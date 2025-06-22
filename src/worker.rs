@@ -20,8 +20,12 @@ impl Worker {
     ///
     /// Returns true if the object was successfully saved, otherwise returns false
     #[inline]
-    pub fn save<'a, T: Serialize + 'a>(&mut self, name: &str, obj: impl Into<Recordable<'a, T>>) -> bool {
-        let record = self.namespace.save(name, obj.into());
+    pub fn save<'a, T: Serialize + 'a>(
+        &mut self,
+        name: &str,
+        obj: impl Into<Recordable<'a, T>>,
+    ) -> bool {
+        let record = self.namespace.save(name, obj);
         if record.is_valid() {
             self.records.push(record);
             true
@@ -57,7 +61,10 @@ impl Worker {
                 continue;
             }
 
-            let is_manifest = entry.as_ref().map(|e| e.header().name() == "MANIFEST").unwrap_or_default();
+            let is_manifest = entry
+                .as_ref()
+                .map(|e| e.header().name() == "MANIFEST")
+                .unwrap_or_default();
             if is_manifest {
                 // TODO: Use this list to cross-verify records that have been restored
                 continue;
@@ -81,8 +88,14 @@ impl Worker {
 
         let mut writer = tokio_util::codec::FramedWrite::new(output, encoder);
 
-        // Creates archive entries of all records and encodes to the output stream
-        let mut stream = futures::stream::iter(self.records.iter().map(|f| f.archive()));
+        // Creates archive entries of all archivable records and encodes to the output stream
+        let mut stream = futures::stream::iter(
+            self.records
+                .iter()
+                .filter(|f| !f.enabled(crate::RecordOpts::NoArchive))
+                .map(|f| f.archive()),
+        );
+
         writer
             .send_all(&mut stream)
             .await
@@ -132,7 +145,8 @@ mod test {
             "record_one",
             toml! {
                 value = "hello world"
-            }.indexable(),
+            }
+            .indexable(),
         );
 
         worker.save(
@@ -140,6 +154,15 @@ mod test {
             &toml! {
                 value = "goodbye world"
             },
+        );
+
+        let test = toml! {
+            value = "goodbye world"
+        };
+
+        worker.save(
+            "record_three",
+            test.no_archive(),
         );
 
         std::fs::remove_file("test.tar").ok();
@@ -155,5 +178,7 @@ mod test {
         let value = index.find("record_one", &ns);
         let toml = value.unwrap().load::<toml::Value>().unwrap();
         assert_eq!("hello world", toml["value"].as_str().unwrap());
+
+        assert!(index.find("record_three", &ns).is_none());
     }
 }

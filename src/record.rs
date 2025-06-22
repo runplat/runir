@@ -1,12 +1,12 @@
 use crate::{
     archive::{self, Entry, HeaderBuilder}, RecordOpts, Recordable
 };
-use ahash::RandomState;
 use ascii::AsAsciiStr;
 use bytes::Bytes;
 use crc::{CRC_64_MS, Crc, Digest};
 use serde::{Deserialize, Serialize};
 use std::{
+    hash::Hash,
     io::Error,
     str::FromStr,
     sync::OnceLock,
@@ -21,14 +21,31 @@ fn crc_digest() -> Digest<'static, u64> {
 }
 
 /// Namespace provides a hasher for the record
-/// 
+///
 /// If created via str, the namespace will be deterministic, and records saved via
-/// this namespace may be archived/restored
-/// 
+/// this namespace may be archived/restored with deterministic symbols
+///
 /// Otherwise, the namespace is treated as ephemeral and will only be valid during the lifetime of
 /// the process
 #[derive(Clone)]
-pub struct Namespace(ahash::RandomState);
+pub struct Namespace {
+    /// Hashing core of the namespace
+    hasher_core: ahash::RandomState,
+    /// Default record options
+    opts: RecordOpts,
+}
+
+impl Hash for Namespace {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.chk().hash(state);
+    }
+}
+
+impl PartialEq for Namespace {
+    fn eq(&self, other: &Self) -> bool {
+        self.chk() == other.chk()
+    }
+}
 
 impl Namespace {
     /// Derives a new namespace from a namespace label
@@ -51,31 +68,45 @@ impl Namespace {
         let init_hash = ahash::RandomState::with_seeds(0, 0, 0, 1);
         let k4 = init_hash.hash_one(namespace);
 
-        Namespace(ahash::RandomState::with_seeds(k1, k2, k3, k4))
+        Namespace {
+            hasher_core: ahash::RandomState::with_seeds(k1, k2, k3, k4),
+            opts: RecordOpts::empty(),
+        }
     }
 
     /// Returns an ephemeral namespace
     #[inline]
     pub fn ephemeral() -> Namespace {
-        Namespace(ahash::RandomState::default())
+        Namespace {
+            hasher_core: ahash::RandomState::default(),
+            opts: RecordOpts::NoArchive,
+        }
     }
 
     /// Returns a new empty record under this namespace
     #[inline]
     pub fn record(&self, label: &str) -> Record {
-        Record::create(label, self.clone())
+        Record::create(label, self.clone()).with_opts(self.opts)
     }
 
     /// Returns the key value for a label under this namespace
     #[inline]
     pub fn key(&self, label: &str) -> u64 {
-        self.0.hash_one(label)
+        self.hasher_core.hash_one(label)
     }
 
     /// Returns the checksum value for the namespace
     #[inline]
     pub fn chk(&self) -> u64 {
-        self.0.hash_one(0)
+        self.hasher_core.hash_one(self.opts.bits())
+    }
+
+    /// Enables the indexing record option by default for all records,
+    /// created from this namespace.
+    #[inline]
+    pub fn enable_indexing(&mut self) -> &mut Self {
+        self.opts |= RecordOpts::Indexing;
+        self
     }
 
     /// Authors a record under this namespace for an obj
@@ -83,16 +114,21 @@ impl Namespace {
     /// Note: If the object was unable to be saved, it will return an empty record,
     /// empty records are not considered valid, therefore the Worker will return false if a record
     /// was saved from a worker
-    /// 
+    ///
     /// Reminder: Namespace maintains no state, this purely authors a record
     #[inline]
-    pub fn save<'a, T: Serialize + 'a>(&self, label: &str, recordable: impl Into<Recordable<'a, T>>) -> Record {
+    pub fn save<'a, T: Serialize + 'a>(
+        &self,
+        label: &str,
+        recordable: impl Into<Recordable<'a, T>>,
+    ) -> Record {
         let recordable = recordable.into();
         let mut ser = flexbuffers::FlexbufferSerializer::new();
-        let mut record = self.record(label);
+        let record = self.record(label);
         if let Ok(()) = recordable.serialize(&mut ser) {
-            record.indexing(recordable.opts.contains(RecordOpts::Indexing));
-            record.commit(Bytes::from(ser.take_buffer()))
+            record
+                .with_opts(self.opts | recordable.opts)
+                .commit(Bytes::from(ser.take_buffer()))
         } else {
             record
         }
@@ -101,7 +137,7 @@ impl Namespace {
 
 impl From<()> for Namespace {
     fn from(_: ()) -> Self {
-        Namespace(RandomState::default())
+        Namespace::ephemeral()
     }
 }
 
@@ -138,13 +174,13 @@ impl Record {
     #[inline]
     pub fn create(label: &str, ns: impl Into<Namespace>) -> Record {
         let ns = ns.into();
-        let hash = ns.0.hash_one(label);
+        let key = ns.key(label);
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
         Record {
-            key: Uuid::from_u64_pair(hash, 0),
+            key: Uuid::from_u64_pair(key, 0),
             data: None,
             ns_chk: ns.chk(),
             opts: RecordOpts::empty(),
@@ -225,6 +261,21 @@ impl Record {
         }
     }
 
+    /// Enables or disables archiving
+    /// 
+    /// WARNING: If the record was created under an ephemeral namespace, than
+    /// restoring the archive of this record will create an un-resolvable label key.
+    /// 
+    /// Use with caution
+    #[inline]
+    pub fn archiving(&mut self, enabled: bool) {
+        if enabled {
+            self.opts &= !RecordOpts::NoArchive;
+        } else {
+            self.opts |= RecordOpts::NoArchive;
+        }
+    }
+
     /// Commit data to the record and configures the Uuid,
     ///
     /// The UUID is composed of two parts hash and checksum
@@ -292,19 +343,29 @@ impl Record {
     }
 
     /// Creates an archive entry for this record
-    /// 
+    ///
     /// The filename of the record's entry is formatted as {ns_chk:x}_{key.as_simple()}_{opts.bits():x},
     /// this filename format is used to restore the record from the archive entry
     #[inline]
     pub fn archive(&self) -> std::io::Result<archive::Entry> {
+        if self.enabled(RecordOpts::NoArchive) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "This record may not be archived",
+            ));
+        }
+
         if self.is_valid() {
             if let Some(data) = self.data.as_ref() {
                 let mut header = HeaderBuilder::regular(
-                    format!("{:x}_{}_{:x}", self.ns_chk, self.key.as_simple(), self.opts.bits())
-                        .as_ascii_str()
-                        .map_err(|e| {
-                            Error::new(std::io::ErrorKind::InvalidFilename, e.to_string())
-                        })?,
+                    format!(
+                        "{:x}_{}_{:x}",
+                        self.ns_chk,
+                        self.key.as_simple(),
+                        self.opts.bits()
+                    )
+                    .as_ascii_str()
+                    .map_err(|e| Error::new(std::io::ErrorKind::InvalidFilename, e.to_string()))?,
                 )?
                 .set_defaults_for_archive();
 
@@ -327,19 +388,22 @@ impl Record {
     pub fn restore(entry: Entry) -> std::io::Result<Self> {
         let header = entry.header();
 
-        if let Some((ns_chk, (key, opts))) = header
-            .name()
-            .split_once("_")
-            .and_then(|(nschk, uuid_opts)| {
-                let nschk = u64::from_str_radix(nschk, 16).ok();
-                let uuid_opts = uuid_opts.split_once("_").and_then(|(uuid, opts)| {
-                    uuid::Uuid::from_str(uuid)
-                        .ok()
-                        .zip(u8::from_str_radix(opts, 16).ok().and_then(|b| RecordOpts::from_bits(b)))
-                });
+        if let Some((ns_chk, (key, opts))) =
+            header
+                .name()
+                .split_once("_")
+                .and_then(|(nschk, uuid_opts)| {
+                    let nschk = u64::from_str_radix(nschk, 16).ok();
+                    let uuid_opts = uuid_opts.split_once("_").and_then(|(uuid, opts)| {
+                        uuid::Uuid::from_str(uuid).ok().zip(
+                            u8::from_str_radix(opts, 16)
+                                .ok()
+                                .and_then(|b| RecordOpts::from_bits(b)),
+                        )
+                    });
 
-                nschk.zip(uuid_opts)
-            })
+                    nschk.zip(uuid_opts)
+                })
         {
             let ts = header.last_modified();
             let record = Record {
@@ -374,12 +438,12 @@ impl Record {
 
 #[cfg(test)]
 mod test {
-    use std::{collections::BTreeMap, time::Duration};
+    use super::Record;
+    use crate::{RecordOpts, RecordableExtensions, record::Namespace};
     use bytes::Bytes;
     use serde::{Deserialize, Serialize};
+    use std::{collections::BTreeMap, time::Duration};
     use uuid::Uuid;
-    use crate::{record::Namespace, RecordOpts, RecordableExtensions};
-    use super::Record;
 
     #[test]
     fn test_record_is_valid_false_when_empty() {
@@ -433,8 +497,13 @@ mod test {
 
     #[test]
     fn test_record_from_parts_is_invalid_with_random_parts() {
-        let record =
-            Record::from_parts((Uuid::nil(), Some(Bytes::from_static(b"gibberish")), 0, 0, RecordOpts::empty()));
+        let record = Record::from_parts((
+            Uuid::nil(),
+            Some(Bytes::from_static(b"gibberish")),
+            0,
+            0,
+            RecordOpts::empty(),
+        ));
         assert!(!record.is_valid())
     }
 

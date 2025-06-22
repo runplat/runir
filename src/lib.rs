@@ -1,6 +1,7 @@
 pub mod archive;
 
 mod query;
+
 pub use query::Indexer;
 pub use query::TextMetadata;
 
@@ -23,6 +24,8 @@ bitflags::bitflags! {
     pub struct RecordOpts : u8 {
         /// Indicates that the record can be processed by the indexer
         const Indexing = 1;
+        /// Indicates that the record should not be archived
+        const NoArchive = 1 << 1;
     }
 }
 
@@ -36,12 +39,22 @@ pub trait RecordableExtensions {
     {
         Recordable::from(self).indexable()
     }
+
+    /// Prevents the record from being archived
+    #[inline]
+    fn no_archive(&self) -> Recordable<'_, Self> 
+    where
+        Self: Sized
+    {
+        Recordable::from(self).no_archive()
+    }
 }
 
 impl<T: serde::Serialize> RecordableExtensions for T {}
 
 /// Wrapper struct enabling pre-configuring record options
 /// before data is committed to the record
+#[derive(Clone, Copy)]
 pub struct Recordable<'a, T> {
     /// Object being recorded
     pub(crate) recording: &'a T,
@@ -49,11 +62,18 @@ pub struct Recordable<'a, T> {
     pub(crate) opts: RecordOpts,
 }
 
-impl<T> Recordable<'_, T> {
+impl<'a, T> Recordable<'a, T> {
     /// Enables indexing for this record
     #[inline]
     pub fn indexable(mut self) -> Self {
         self.opts |= RecordOpts::Indexing;
+        self
+    }
+
+    /// Enables the no_archive flag for this record
+    #[inline]
+    pub fn no_archive(mut self) -> Self {
+        self.opts |= RecordOpts::NoArchive;
         self
     }
 
@@ -78,7 +98,7 @@ impl<T> Recordable<'_, T> {
 
 impl<'a, T> From<&'a T> for Recordable<'a, T> {
     fn from(value: &'a T) -> Self {
-        Recordable {
+        Recordable::<T> {
             recording: value,
             opts: RecordOpts::empty(),
         }
