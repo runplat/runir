@@ -1,15 +1,36 @@
 use bytes::Bytes;
+use sha2::{Digest, Sha256};
 
 use super::{header::EMPTY_HEADER, DigestBuffer, Header};
 
-/// Archive entry
+/// Enumeration of archive entry types
 pub enum Entry {
     /// Regular file entry
     Regular(FileEntry),
+    /// Regular file entry reference
+    RegularReference(FileReference),
     /// Other entry type
     Other(Header),
-    /// EOA entry
-    EOA,
+    /// Pending an actual entry
+    /// 
+    /// Returned by the decoder to indicate that it is currently processing an actual entry
+    Pending,
+    /// 512-byte zero block entry
+    Zeros,
+}
+
+/// Archived file entry reference
+/// 
+/// Instead of storing the bytes of the actual file, this
+/// returns an offset into the source buffer for the start of the file content,
+/// and the expected digest of the stored content.
+pub struct FileReference {
+    /// Archive header
+    pub header: Header,
+    /// Digest buffer of the stored content
+    pub digest: DigestBuffer,
+    /// Offset into the source for the start of the file entry content
+    pub offset: u64
 }
 
 /// Archived file entry
@@ -24,11 +45,12 @@ pub struct FileEntry {
 
 impl Entry {
     /// Returns a new archive regular file entry
-    pub fn regular(header: Header, data: Bytes, digest: DigestBuffer) -> Self {
+    pub fn regular(header: Header, data: Bytes) -> Self {
+        let digest = Sha256::digest(&data);
         Self::Regular(FileEntry {
             header,
             data,
-            digest,
+            digest: digest.into(),
         })
     }
 
@@ -41,8 +63,10 @@ impl Entry {
     pub fn header(&self) -> &Header {
         match self {
             Entry::Regular(reg) => &reg.header,
+            Entry::RegularReference(reg) => &reg.header,
             Entry::Other(h) => &h,
-            Entry::EOA => &EMPTY_HEADER,
+            Entry::Zeros => &EMPTY_HEADER,
+            Entry::Pending => &EMPTY_HEADER,
         }
     }
 
@@ -57,10 +81,10 @@ impl Entry {
         }
     }
 
-    /// Returns true if this is an EOA entry
-    pub fn is_eoa(&self) -> bool {
+    /// Returns true if this is a zeroes/padding entry
+    pub fn is_zeroes(&self) -> bool {
         match self {
-            Entry::EOA => true,
+            Entry::Zeros => true,
             _ => false
         }
     }

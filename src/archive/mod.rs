@@ -4,6 +4,7 @@ pub type DigestBuffer = [u8; 32];
 mod header;
 pub use header::FileType;
 pub use header::Header;
+pub use header::HeaderBuilder;
 
 mod entry;
 pub use entry::Entry;
