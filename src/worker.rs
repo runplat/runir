@@ -23,7 +23,7 @@ impl Worker {
     pub fn save<'a, T: Serialize + 'a>(
         &mut self,
         name: &str,
-        obj: impl Into<Recordable<'a, T>>,
+        obj: impl Into<Recordable<'a, T, 0>>,
     ) -> bool {
         let record = self.namespace.save(name, obj);
         if record.is_valid() {
@@ -141,29 +141,27 @@ mod test {
     async fn test_worker_archive_to() {
         let mut worker = Worker::from("test");
 
-        worker.save(
+        assert!(worker.save(
             "record_one",
             toml! {
                 value = "hello world"
             }
             .indexable(),
-        );
+        ));
 
-        worker.save(
+        assert!(worker.save(
             "record_two",
             &toml! {
                 value = "goodbye world"
             },
-        );
+        ));
 
-        let test = toml! {
-            value = "goodbye world"
-        };
-
-        worker.save(
+        assert!(worker.save(
             "record_three",
-            test.no_archive(),
-        );
+            toml! {
+                value = "goodbye world"
+            }.no_archive(),
+        ));
 
         std::fs::remove_file("test.tar").ok();
         let archive_file = tokio::fs::File::create_new("test.tar").await.unwrap();

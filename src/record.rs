@@ -120,7 +120,7 @@ impl Namespace {
     pub fn save<'a, T: Serialize + 'a>(
         &self,
         label: &str,
-        recordable: impl Into<Recordable<'a, T>>,
+        recordable: impl Into<Recordable<'a, T, 0>>,
     ) -> Record {
         let recordable = recordable.into();
         let mut ser = flexbuffers::FlexbufferSerializer::new();

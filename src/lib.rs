@@ -1,7 +1,6 @@
 pub mod archive;
 
 mod query;
-
 pub use query::Indexer;
 pub use query::TextMetadata;
 
@@ -13,10 +12,11 @@ mod index;
 pub use index::Index;
 
 mod worker;
-use serde::Serialize;
 pub use worker::Worker;
 
 mod store;
+
+use serde::Serialize;
 
 bitflags::bitflags! {
     /// Record options
@@ -33,20 +33,20 @@ bitflags::bitflags! {
 pub trait RecordableExtensions {
     /// Enables the record to be indexed
     #[inline]
-    fn indexable(&self) -> Recordable<'_, Self>
+    fn indexable(&self) -> Recordable<'_, Self, 1>
     where
         Self: Sized,
     {
-        Recordable::from(self).indexable()
+        Recordable::<Self, 0>::from(self).indexable()
     }
 
     /// Prevents the record from being archived
     #[inline]
-    fn no_archive(&self) -> Recordable<'_, Self> 
+    fn no_archive(&self) -> Recordable<'_, Self, 1>
     where
-        Self: Sized
+        Self: Sized,
     {
-        Recordable::from(self).no_archive()
+        Recordable::<Self, 0>::from(self).no_archive()
     }
 }
 
@@ -55,26 +55,32 @@ impl<T: serde::Serialize> RecordableExtensions for T {}
 /// Wrapper struct enabling pre-configuring record options
 /// before data is committed to the record
 #[derive(Clone, Copy)]
-pub struct Recordable<'a, T> {
+pub struct Recordable<'a, T, const REF_GUARD: i8> {
     /// Object being recorded
     pub(crate) recording: &'a T,
     /// Record options passed set on the record
     pub(crate) opts: RecordOpts,
 }
 
-impl<'a, T> Recordable<'a, T> {
+impl<'a, T, const REF_COUNT: i8> Recordable<'a, T, REF_COUNT> {
     /// Enables indexing for this record
     #[inline]
-    pub fn indexable(mut self) -> Self {
+    pub fn indexable(mut self) -> Recordable<'a, T, 1> {
         self.opts |= RecordOpts::Indexing;
-        self
+        Recordable {
+            recording: self.recording,
+            opts: self.opts,
+        }
     }
 
     /// Enables the no_archive flag for this record
     #[inline]
-    pub fn no_archive(mut self) -> Self {
+    pub fn no_archive(mut self) -> Recordable<'a, T, 1> {
         self.opts |= RecordOpts::NoArchive;
-        self
+        Recordable {
+            recording: self.recording,
+            opts: self.opts,
+        }
     }
 
     /// Consumes the reference and creates a record
@@ -96,16 +102,57 @@ impl<'a, T> Recordable<'a, T> {
     }
 }
 
-impl<'a, T> From<&'a T> for Recordable<'a, T> {
+impl<'a, T> From<&'a T> for Recordable<'a, T, 0> {
     fn from(value: &'a T) -> Self {
-        Recordable::<T> {
+        Recordable::<T, 0> {
             recording: value,
             opts: RecordOpts::empty(),
         }
     }
 }
 
-impl<'a, T: serde::Serialize> serde::Serialize for Recordable<'a, T> {
+/// HACK: These two below implementations hack the type system to address this situation:
+/// 
+/// ```rs no_run
+/// 
+/// // This is okay
+/// worker.save(
+///     toml {
+///         value = "hello world"
+///     }.no_archive()
+/// )
+/// 
+/// // This is a trap, if rust decides to use the From<&'a T> impl
+/// // It will end up resetting all the record flags previously set
+/// // With the below fix, this forces the type system not to compile this code
+/// // Although, the error message is confusing, it's better than a runtime bug ┐(´ー｀)┌
+/// worker.save(
+///     &toml {
+///         value = "hello world"
+///     }.no_archive()
+/// )
+/// ```
+impl<'a, T> From<Recordable<'a, T, 1>> for Recordable<'a, T, 0> {
+    fn from(value: Recordable<'a, T, 1>) -> Self {
+        Recordable::<T, 0> {
+            recording: value.recording,
+            opts: value.opts,
+        }
+    }
+}
+
+impl<'a, T> From<&'a Recordable<'a, T, 1>> for Recordable<'a, T, 0> {
+    fn from(value: &'a Recordable<'a, T, 1>) -> Self {
+        Recordable::<T, 0> {
+            recording: value.recording,
+            opts: value.opts,
+        }
+    }
+}
+
+impl<'a, const REF_GUARD: i8, T: serde::Serialize> serde::Serialize
+    for Recordable<'a, T, REF_GUARD>
+{
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
