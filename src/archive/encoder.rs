@@ -1,9 +1,50 @@
-use std::io::Error;
-use ascii::AsAsciiStr;
+use super::{Entry, Sha256Digest};
+use crate::{RecordableExtensions, record::Namespace, virt::RecordExtent};
 use bytes::{BufMut, Bytes};
-use flexbuffers::Builder;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio_util::codec::Encoder;
-use super::{DigestBuffer, Entry, HeaderBuilder};
+
+/// Enumeration of encoded entry metadata collected by the tape encoder
+#[derive(Serialize, Deserialize, Clone)]
+pub enum JournalEntry {
+    Extent {
+        source: Sha256Digest,
+        content: Sha256Digest,
+        offset: u64,
+        len: u32,
+    },
+    Record(RecordExtent),
+}
+
+impl JournalEntry {
+    /// Returns the content digest of the journaled entry's data
+    #[inline]
+    pub fn source(&self) -> &Sha256Digest {
+        match self {
+            JournalEntry::Extent { source, .. } => &source,
+            JournalEntry::Record(record_extent) => &record_extent.source,
+        }
+    }
+
+    /// Returns the content digest of the journaled entry's data
+    #[inline]
+    pub fn content(&self) -> &Sha256Digest {
+        match self {
+            JournalEntry::Extent { content, .. } => &content,
+            JournalEntry::Record(record_extent) => &record_extent.content,
+        }
+    }
+
+    /// Returns an offset, len tuple
+    #[inline]
+    pub fn extent(&self) -> (u64, u32) {
+        match self {
+            JournalEntry::Extent { offset, len, .. } => (*offset, *len),
+            JournalEntry::Record(record_extent) => (record_extent.offset, record_extent.len),
+        }
+    }
+}
 
 /// Simple tape archive encoder,
 ///
@@ -11,40 +52,36 @@ use super::{DigestBuffer, Entry, HeaderBuilder};
 ///
 #[derive(Default)]
 pub struct TapeEncoder {
-    /// List of entries that have been encoded,
-    encoded: Vec<DigestBuffer>,
+    /// Journal of encoded entries,
+    journal: Vec<JournalEntry>,
+    /// Digest data being encoded
+    digest: Sha256,
 }
 
 impl TapeEncoder {
-    /// Returns digests of all records encoded into the archive
+    /// Stamps the current source digest on all entries in encoded journal
     #[inline]
-    fn encoded(&self) -> impl Iterator<Item = &DigestBuffer> {
-        self.encoded.iter()
+    pub fn stamp_source_digest(&mut self) {
+        let source_digest = self.digest.clone().finalize();
+        for enc in self.journal.iter_mut() {
+            match enc {
+                JournalEntry::Extent { source, .. } => {
+                    source.copy_from_slice(source_digest.as_slice());
+                }
+                JournalEntry::Record(record_extent) => {
+                    record_extent.source = source_digest.into();
+                }
+            }
+        }
     }
 
     /// Creates a manifest entry for the encoded entries
     #[inline]
     pub fn create_manifest(&self) -> std::io::Result<Entry> {
-        let mut manifest = HeaderBuilder::regular(
-            "MANIFEST"
-                .as_ascii_str()
-                .map_err(|e| Error::new(std::io::ErrorKind::InvalidFilename, e))?,
-        )?
-        .set_defaults_for_archive();
-        let mut builder = Builder::default();
-        let mut records = builder.start_vector();
-        for rec in self.encoded() {
-            records.push(&rec[..]);
-        }
-        records.end_vector();
-        manifest.set_size(builder.view().len())?;
-        manifest.set_last_modified(time::UtcDateTime::now().unix_timestamp() as u64)?;
-        let entry = Entry::regular(
-            manifest.build()?,
-            Bytes::from(builder.take_buffer()),
-        );
-
-        Ok(entry)
+        let mut record =
+            Namespace::new("__ARCHIVE_INTERNALS").store("MANIFEST", self.journal.indexable());
+        record.opts_mut().set_manifest_spec();
+        record.archive()
     }
 }
 
@@ -52,6 +89,11 @@ impl TapeEncoder {
 ///
 fn zero_block() -> Bytes {
     Bytes::from_iter(std::iter::repeat('\0' as u8).take(512))
+}
+
+fn put_update(dst: &mut bytes::BytesMut, digester: &mut Sha256, content: &[u8]) {
+    dst.put(content);
+    digester.update(content);
 }
 
 impl Encoder<Entry> for TapeEncoder {
@@ -65,21 +107,60 @@ impl Encoder<Entry> for TapeEncoder {
         if item.is_zeroes() {
             dst.reserve(512 * 2);
             let zero_block = zero_block();
-            dst.put(zero_block.clone());
-            dst.put(zero_block.clone());
+            put_update(dst, &mut self.digest, &zero_block);
+            put_update(dst, &mut self.digest, &zero_block);
             Ok(())
         } else {
             dst.reserve(item.header().size());
-            let header_bytes = item.header().as_ref();
-            dst.put(header_bytes);
+            let header_bytes = item.header();
+            put_update(dst, &mut self.digest, header_bytes.as_ref());
             if let Some((bytes, digest)) = item.data() {
-                dst.reserve(bytes.len());
-                let padding = bytes.len() % 512;
-                dst.put(bytes);
-                dst.put_bytes(0, 512 - padding);
-                self.encoded.push(digest);
+                let offset = dst.len();
+                let len = bytes.len();
+                dst.reserve(len);
+                let padding = len % 512;
+                put_update(dst, &mut self.digest, &bytes);
+                put_update(dst, &mut self.digest, &vec![0; 512 - padding]);
+                if let Some((opts, crc)) = item.opts().zip(item.crc()) {
+                    self.journal.push(JournalEntry::Record(RecordExtent {
+                        source: [0; 32],
+                        content: digest,
+                        offset: offset as u64,
+                        len: len as u32,
+                        crc,
+                        ts: header_bytes.last_modified(),
+                        opts: opts.encode(),
+                    }));
+                } else {
+                    self.journal.push(JournalEntry::Extent {
+                        source: [0; 32],
+                        content: digest,
+                        offset: offset as u64,
+                        len: len as u32,
+                    });
+                }
             }
             Ok(())
+        }
+    }
+}
+
+impl std::fmt::Debug for JournalEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Extent {
+                source,
+                content,
+                offset,
+                len,
+            } => f
+                .debug_struct("Extent")
+                .field("source", &hex::encode(source))
+                .field("content", &hex::encode(content))
+                .field("offset", offset)
+                .field("len", len)
+                .finish(),
+            Self::Record(arg0) => f.debug_tuple("Record").field(arg0).finish(),
         }
     }
 }

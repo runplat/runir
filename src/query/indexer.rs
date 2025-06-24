@@ -1,7 +1,8 @@
 use super::TextMetadata;
-use crate::{Record, record::Namespace};
+use crate::{archive::{JournalEntry, Sha256Digest}, record::Namespace, virt::RecordExtent, Record};
+use flexbuffers::{MapReader, Reader};
 use std::{collections::BTreeMap, fmt::Debug};
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 /// Indexer is an additional module that can index flexbuffer based records
@@ -13,26 +14,27 @@ pub struct Indexer {
     ///
     /// The keys are the record's (uuid-hi ^ ns_chk) value and a hash of name of the field for this record as the uuid-lo
     values: BTreeMap<uuid::Uuid, Index>,
+    /// Index of journal entries
+    journaled: Vec<JournalEntry>,
 }
 
 impl Indexer {
     /// Scans a record and updates the indexer's state
     #[inline]
     pub fn scan_update(&mut self, record: &Record) {
-        let (hi, _) = record.uuid().as_u64_pair();
-        let uuid_hi = hi ^ record.ns_chk();
+        if record.is_valid() && record.opts().is_indexable() {
+            let (hi, _) = record.uuid().as_u64_pair();
+            let uuid_hi = hi ^ record.ns_chk();
 
-        let ns = Namespace::from("___runir__INDEXER");
-        if let Some(reader) = flexbuffers::Reader::get_root(record.data().bytes()).ok() {
-            if reader.flexbuffer_type().is_map() {
-                let map = reader.as_map();
-                for k in map.iter_keys() {
-                    let val = map.idx(k);
-                    if val.flexbuffer_type().is_string() {
-                        let uuid_lo = ns.key(k);
-                        self.values
-                            .entry(Uuid::from_u64_pair(uuid_hi, uuid_lo))
-                            .or_insert_with(|| TextMetadata::from(val.as_str()).into());
+            if let Some(reader) = flexbuffers::Reader::get_root(record.data().bytes()).ok() {
+                if reader.flexbuffer_type().is_map() {
+                    self.index_flexbuffer_map(uuid_hi, reader);
+                } else if reader.flexbuffer_type().is_vector() {
+                    let vec = reader.as_vector();
+                    for v in vec.iter() {
+                        if v.flexbuffer_type().is_map() {
+                            self.index_flexbuffer_map(uuid_hi, v);
+                        }
                     }
                 }
             }
@@ -63,6 +65,27 @@ impl Indexer {
         })
     }
 
+    /// Returns true if the indexer contains a journal entry for content
+    #[inline]
+    pub fn contains_content(&self, content: Sha256Digest) -> bool {
+        self.journaled.iter().find(|k| k.content().cmp(&content).is_eq()).is_some()
+    }
+
+    /// Returns an iterator over indexed journaled record extents
+    #[inline]
+    pub fn record_extents(&self) -> impl Iterator<Item = &RecordExtent> {
+        self.journaled.iter().filter_map(|e| match e {
+            JournalEntry::Record(record_extent) => Some(record_extent),
+            _ => None
+        })
+    }
+
+    /// Returns an iterator over journaled entries
+    #[inline]
+    pub fn journaled(&self) -> impl Iterator<Item = &JournalEntry> {
+        self.journaled.iter()
+    }
+
     /// Absorbs other index data into this indexer
     ///
     /// In cases of collisions, incoming will always replace the existing value
@@ -76,6 +99,78 @@ impl Indexer {
                 // However, log that it happened in case it wasn't intentional
                 debug!("Replacing index at {k}");
             }
+        }
+    }
+
+    /// Indexes a flexbuffer map
+    fn index_flexbuffer_map(&mut self, uuid_hi: u64, reader: Reader<&[u8]>) {
+        let ns = Namespace::from("___runir__INDEXER");
+        let map = reader.as_map();
+        for k in map.iter_keys() {
+            let val = map.idx(k);
+            if val.flexbuffer_type().is_map() {
+                if k == "Record" {
+                    self.index_journal_record_extent(val.as_map());
+                } else if k == "Extent" {
+                    self.index_extent(val.as_map());
+                 } else {
+                    self.index_flexbuffer_map(uuid_hi, val);
+                }
+            } else if val.flexbuffer_type().is_string() {
+                let uuid_lo = ns.key(k);
+                self.values
+                    .entry(Uuid::from_u64_pair(uuid_hi, uuid_lo))
+                    .or_insert_with(|| TextMetadata::from(val.as_str()).into());
+            } else {
+                debug!("{k}: {:?}", val.flexbuffer_type());
+            }
+        }
+    }
+
+    /// Indexes a journal record extent
+    fn index_journal_record_extent(&mut self, map: MapReader<&[u8]>) {
+        if let Some(keys) =
+            get_all_keys(&map, &["source", "content", "offset", "len", "ts", "crc", "opts"])
+        {
+            match &keys[..] {
+                [source, content, offset, len, ts, crc, opts, ..] => {
+                    let extent = RecordExtent {
+                        source: read_sha256_digest(&map, *source),
+                        content: read_sha256_digest(&map, *content),
+                        offset: map.idx(*offset).as_u64(),
+                        len: map.idx(*len).as_u32(),
+                        ts: map.idx(*ts).as_u64(),
+                        crc: map.idx(*crc).as_u64(),
+                        opts: map.idx(*opts).as_u64(),
+                    };
+                    self.journaled.push(JournalEntry::Record(extent));
+                }
+                _ => unreachable!()
+            }
+        } else {
+            warn!("Could not find all keys for record struct");
+        }
+    }
+
+    /// Indexes a journal extent
+    fn index_extent(&mut self, map: MapReader<&[u8]>) {
+        if let Some(keys) =
+            get_all_keys(&map, &["source", "content", "offset", "len"])
+        {
+            match &keys[..] {
+                [source, content, offset, len, ..] => {
+                    let extent = JournalEntry::Extent {
+                        source: read_sha256_digest(&map, *source),
+                        content: read_sha256_digest(&map, *content),
+                        offset: map.idx(*offset).as_u64(),
+                        len: map.idx(*len).as_u32(),
+                    };
+                    self.journaled.push(extent);
+                }
+                _ => unreachable!()
+            }
+        } else {
+            warn!("Could not find all keys for record struct");
         }
     }
 }
@@ -98,4 +193,21 @@ impl Debug for Index {
             Self::Text(_) => f.debug_tuple("Text").finish(),
         }
     }
+}
+
+fn read_sha256_digest(map: &MapReader<&[u8]>, key: usize) -> Sha256Digest {
+    let source_vec = map.idx(key).as_vector().iter().map(|a| a.as_u8()).take(32);
+    let mut source = [0; 32];
+    source.copy_from_slice(&source_vec.collect::<Vec<_>>());
+    source
+}
+
+fn get_all_keys(map: &MapReader<&[u8]>, keys: &[&str]) -> Option<Vec<usize>> {
+    let mut _keys = vec![];
+    for k in keys {
+        if let Some(k) = map.index_key(k) {
+            _keys.push(k);
+        }
+    }
+    Some(_keys).filter(|k| k.len() == keys.len())
 }

@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod util;
 
 mod data;
 pub use data::Data;
@@ -22,6 +23,9 @@ pub use query::TextMetadata;
 
 mod store;
 mod virt;
+pub use virt::VirtualRef;
+pub use virt::RecordExtent;
+pub use virt::VirtualStore;
 
 /// Provides extensions for configuring a type before it is committed as a record
 pub trait RecordableExtensions {

@@ -61,15 +61,6 @@ impl Worker {
                 continue;
             }
 
-            let is_manifest = entry
-                .as_ref()
-                .map(|e| e.header().name() == "MANIFEST")
-                .unwrap_or_default();
-            if is_manifest {
-                // TODO: Use this list to cross-verify records that have been restored
-                continue;
-            }
-
             let record = entry.and_then(|e| Record::restore(e))?;
             self.records.push(record);
         }
@@ -93,7 +84,7 @@ impl Worker {
             self.records
                 .iter()
                 .filter(|f| f.opts().is_archivable())
-                .map(|f| f.archive()),
+                .map(|f| Ok(Entry::Record(f.clone()))),
         );
 
         writer
@@ -101,7 +92,10 @@ impl Worker {
             .await
             .map_err(|e| Error::new(std::io::ErrorKind::Interrupted, e))?;
 
-        // Stores a manifest of the archived entries from the TapeEncoder
+        // Applies the digest of the current state of the archive to all journal entries
+        writer.encoder_mut().stamp_source_digest();
+
+        // Creates a manifest record of all the journal entries
         let manifest = writer.encoder().create_manifest()?;
         writer
             .send(manifest)
@@ -134,10 +128,11 @@ impl<T: Into<Namespace>> From<T> for Worker {
 
 #[cfg(test)]
 mod test {
-    use crate::{RecordableExtensions, Worker};
+    use crate::{archive::JournalEntry, RecordableExtensions, Worker};
     use toml::toml;
 
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn test_worker_archive_to() {
         let mut worker = Worker::from("test");
 
@@ -171,11 +166,15 @@ mod test {
         let archive_file = tokio::fs::File::open("test.tar").await.unwrap();
         restoring.restore_from(archive_file).await.unwrap();
 
-        let ns = restoring.namespace.clone();
         let index = restoring.to_index();
-        let value = index.find("record_one", &ns);
+        let value = index.find("record_one", "test");
         let toml = value.unwrap().load::<toml::Value>().unwrap();
         assert_eq!("hello world", toml["value"].as_str().unwrap());
-        assert!(index.find("record_three", &ns).is_none());
+        assert!(index.find("record_three", "test").is_none());
+
+        let manifest = index.find("MANIFEST", "__ARCHIVE_INTERNALS").expect("should be stored with the archive");
+        let encoded = manifest.load::<Vec<JournalEntry>>().unwrap();
+        assert_eq!(2, encoded.len());
+        eprintln!("{encoded:#x?}");
     }
 }

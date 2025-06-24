@@ -1,4 +1,4 @@
-use crate::{Indexer, Record, record::Namespace};
+use crate::{archive::JournalEntry, record::Namespace, Indexer, Record, RecordableExtensions};
 use ahash::HashMap;
 use std::time::Duration;
 
@@ -21,7 +21,30 @@ impl Index {
     pub fn index(&mut self, record: &Record) {
         if record.is_valid() {
             let (hi, _) = record.uuid().as_u64_pair();
-            self.records.insert(hi ^ record.ns_chk(), record.clone());
+            let index_key = hi ^ record.ns_chk();
+            let existing = self.records.insert(index_key, record.clone());
+
+            // Handle known merge cases
+            if let Some(replaced) = existing {
+                // Merge manifests under a single manifest inside of index
+                if replaced.opts().is_manifest() && record.opts().is_manifest() {
+                    if let Some((mut a, b)) = replaced
+                        .load::<Vec<JournalEntry>>()
+                        .zip(record.load::<Vec<JournalEntry>>())
+                    {
+                        let merged = a.extend(b);
+                        let mut merged_record =  merged.indexable();
+                        merged_record.opts_mut().set_manifest_spec();
+                        let merged =
+                            Namespace::from("__ARCHIVE_INTERNALS").store("MANIFEST", merged_record);
+
+                        // Remove the existing one so this doesn't end up in an infinite loop
+                        self.records.remove(&index_key);
+                        self.index(&merged);
+                        return;
+                    }
+                }
+            }
 
             if record.opts().is_indexable() {
                 self.indexer.scan_update(record);
@@ -31,7 +54,8 @@ impl Index {
 
     /// Finds a record w/ a matching label
     #[inline]
-    pub fn find(&self, label: &str, ns: &Namespace) -> Option<&Record> {
+    pub fn find(&self, label: &str, ns: impl Into<Namespace>) -> Option<&Record> {
+        let ns = ns.into();
         let key = ns.key(label) ^ ns.chk();
         self.records.get(&key)
     }
@@ -60,7 +84,7 @@ mod test {
 
     use bytes::Bytes;
 
-    use crate::{record::Namespace, RecordableExtensions, Worker};
+    use crate::{RecordableExtensions, Worker, record::Namespace};
 
     use super::Index;
 
@@ -78,10 +102,10 @@ mod test {
             .commit(Bytes::from_static(b"hello world"));
         index.index(&record2);
 
-        let record = index.find("some / record", &ns).expect("should exist");
+        let record = index.find("some / record", ns).expect("should exist");
         assert!(record.data().is_empty());
 
-        let record = index.find("some / record", &ns2).expect("should exist");
+        let record = index.find("some / record", ns2).expect("should exist");
         assert_eq!(&b"hello world"[..], record.data().bytes());
 
         assert_eq!(2, index.find_older_than(Duration::from_nanos(1)).count());
@@ -99,7 +123,8 @@ mod test {
                 "__record_1",
                 toml! {
                     value = "hello world"
-                }.indexable()
+                }
+                .indexable()
             )
         );
 

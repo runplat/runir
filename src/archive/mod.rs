@@ -1,5 +1,5 @@
 /// Type alias for the bytes of a SHA256 digest,
-pub type DigestBuffer = [u8; 32];
+pub type Sha256Digest = [u8; 32];
 
 mod header;
 pub use header::FileType;
@@ -15,3 +15,6 @@ pub use decoder::TapeDecoder;
 
 mod encoder;
 pub use encoder::TapeEncoder;
+pub use encoder::JournalEntry;
+
+mod manifest;

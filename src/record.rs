@@ -1,5 +1,6 @@
 use crate::{
-    archive::{self, Entry, HeaderBuilder}, Data, Opts, RawRecordable
+    Data, Opts, RawRecordable,
+    archive::{self, Entry, HeaderBuilder},
 };
 use ahash::RandomState;
 use ascii::AsAsciiStr;
@@ -204,6 +205,14 @@ impl Record {
             .unwrap()
     }
 
+    /// Returns the crc checksum
+    ///
+    /// The checksum is computed as CRC(data | ts)
+    #[inline]
+    pub fn checksum(&self) -> u64 {
+        self.key.as_u64_pair().1
+    }
+
     /// Returns the current record uuid
     #[inline]
     pub fn uuid(&self) -> uuid::Uuid {
@@ -326,6 +335,25 @@ impl Record {
         }
     }
 
+    /// Returns an archive header for this record
+    #[inline]
+    pub fn make_archive_header(&self) -> std::io::Result<archive::Header> {
+        let mut header = HeaderBuilder::regular(
+            format!(
+                "{:x}_{}_{:x}",
+                self.ns_chk,
+                self.key.as_simple(),
+                self.opts.encode()
+            )
+            .as_ascii_str()
+            .map_err(|e| Error::new(std::io::ErrorKind::InvalidFilename, e.to_string()))?,
+        )?
+        .set_defaults_for_archive();
+        header.set_last_modified(self.ts)?;
+        header.set_size(self.data().len())?;
+        header.build()
+    }
+
     /// Creates an archive entry for this record
     ///
     /// The filename of the record's entry is formatted as {ns_chk:x}_{key.as_simple()}_{opts.bits():x},
@@ -342,24 +370,8 @@ impl Record {
         if self.is_valid() {
             match &self.data {
                 Data::Bytes(bytes) => {
-                    let mut header = HeaderBuilder::regular(
-                        format!(
-                            "{:x}_{}_{:x}",
-                            self.ns_chk,
-                            self.key.as_simple(),
-                            self.opts.encode()
-                        )
-                        .as_ascii_str()
-                        .map_err(|e| {
-                            Error::new(std::io::ErrorKind::InvalidFilename, e.to_string())
-                        })?,
-                    )?
-                    .set_defaults_for_archive();
-
-                    header.set_last_modified(self.ts)?;
-                    header.set_size(bytes.len())?;
-
-                    let entry = archive::Entry::regular(header.build()?, bytes.clone());
+                    let header = self.make_archive_header()?;
+                    let entry = archive::Entry::regular(header, bytes.clone());
                     return Ok(entry);
                 }
                 _ => {}

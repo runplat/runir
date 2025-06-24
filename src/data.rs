@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use crate::virt::VirtualRef;
 
 /// Enumeration of different data implementations
 #[derive(Default, Debug, Clone)]
@@ -7,7 +8,9 @@ pub enum Data {
     #[default]
     Empty,
     /// Data is loaded into memory
-    Bytes(Bytes)
+    Bytes(Bytes),
+    /// Data is stored virtually w/ a reference to a journal entry and mmap
+    Virtual(VirtualRef),
 }
 
 impl Data {
@@ -20,7 +23,7 @@ impl Data {
     /// Returns the len in bytes of data
     #[inline]
     pub fn len(&self) -> usize {
-       self.bytes().len()
+        self.bytes().len()
     }
 
     /// Returns a slice of the bytes in data
@@ -28,9 +31,8 @@ impl Data {
     pub fn bytes(&self) -> &[u8] {
         match self {
             Data::Empty => &[],
-            Data::Bytes(bytes) => {
-                &bytes
-            },
+            Data::Bytes(bytes) => &bytes,
+            Data::Virtual(virt_ref) => &virt_ref
         }
     }
 }

@@ -5,14 +5,15 @@ use std::ops::BitOr;
 pub struct Opts {
     runtime: Runtime,
     store: Store,
-    reserved: [u8; 6],
+    spec: Spec,
+    reserved: [u8; 5],
 }
 
 impl Opts {
     /// Returns default Opts for an ephemeral namespace
     #[inline]
     pub fn ephemeral() -> Self {
-        Self { runtime: Runtime::NoArchive, store: Store::empty(), reserved: [0; 6] }
+        Self { runtime: Runtime::NoArchive, store: Store::empty(), spec: Spec::empty(), reserved: [0; 5] }
     }
     /// Returns true if runtime indexing is enabled
     #[inline]
@@ -30,6 +31,12 @@ impl Opts {
     #[inline]
     pub fn is_object(&self) -> bool {
         self.store.contains(Store::Object)
+    }
+
+    /// Returns true if stored data is a manifest
+    #[inline]
+    pub fn is_manifest(&self) -> bool {
+        self.spec.contains(Spec::Manifest)
     }
 
     /// Enables runtime indexing behavior for the record
@@ -69,6 +76,20 @@ impl Opts {
         self
     }
 
+    /// Sets the manifest spec flag, to indicate that the stored data is an archive manifest
+    #[inline]
+    pub fn set_manifest_spec(&mut self) -> &mut Self {
+        self.spec |= Spec::Manifest;
+        self
+    }
+
+    /// Sets the worker archive spec flag, to indicate that the stored data is a worker archive
+    #[inline]
+    pub fn set_worker_archive(&mut self) -> &mut Self {
+        self.spec |= Spec::WorkerArchive;
+        self
+    }
+
     // /// Sets the Compressed flag in store opts
     // #[inline]
     // pub fn set_compressed(&mut self) -> &mut Self {
@@ -86,18 +107,19 @@ impl Opts {
     /// Encodes opts into a u64
     #[inline]
     pub fn encode(&self) -> u64 {
-        u64::from_le_bytes([self.runtime.bits(), self.store.bits(), 0, 0, 0, 0, 0, 0])
+        u64::from_le_bytes([self.runtime.bits(), self.store.bits(), self.spec.bits(), 0, 0, 0, 0, 0])
     }
 
     /// Decodes opts value into an Opts struct
     #[inline]
     pub fn decode(opts: u64) -> Self {
-        let [runtime, store, ..] = opts.to_le_bytes();
+        let [runtime, store, spec, ..] = opts.to_le_bytes();
 
         Self {
             runtime: Runtime::from_bits_retain(runtime),
             store: Store::from_bits_retain(store),
-            reserved: [0; 6],
+            spec: Spec::from_bits_retain(spec),
+            reserved: [0; 5],
         }
     }
 }
@@ -109,7 +131,8 @@ impl BitOr for Opts {
         Self {
             runtime: self.runtime | rhs.runtime,
             store: self.store | rhs.store,
-            reserved: [0; 6],
+            spec: self.spec | rhs.spec,
+            reserved: [0; 5],
         }
     }
 }
@@ -138,6 +161,23 @@ bitflags::bitflags! {
     }
 }
 
+bitflags::bitflags! {
+    /// Spec options note any specification information about the stored data
+    #[derive(Hash, Default, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct Spec: u8 {
+        /// Indicates that data stored for the record is an archive manifest
+        const Manifest = 1;
+        /// Indicates that data stored for the record is a name record
+        /// 
+        /// A name record can be used to map namespaces/records to a friendly name
+        const Name = 1 << 1;
+        /// Indicates that the data is stored in a readable format instead of a binary format
+        const Readable = 1 << 2;
+        /// Indicates stored data is a worker archive
+        const WorkerArchive = 1 << 3;
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::Opts;
@@ -149,7 +189,8 @@ mod test {
         opts
             .enable_archiving()
             .enable_indexing()
-            .set_serialized_object();
+            .set_serialized_object()
+            .set_manifest_spec();
 
         let encoded = opts.encode();
 
