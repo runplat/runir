@@ -79,10 +79,10 @@ mod test {
         index.index(&record2);
 
         let record = index.find("some / record", &ns).expect("should exist");
-        assert!(record.data().map(|d| d.is_empty()).unwrap_or_default());
+        assert!(record.data().is_empty());
 
         let record = index.find("some / record", &ns2).expect("should exist");
-        assert_eq!(&b"hello world"[..], record.data().unwrap());
+        assert_eq!(&b"hello world"[..], record.data().bytes());
 
         assert_eq!(2, index.find_older_than(Duration::from_nanos(1)).count());
         assert_eq!(0, index.find_older_than(Duration::from_secs(10)).count());

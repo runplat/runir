@@ -1,11 +1,8 @@
+use super::TextMetadata;
+use crate::{Record, record::Namespace};
+use std::{collections::BTreeMap, fmt::Debug};
 use tracing::debug;
 use uuid::Uuid;
-use crate::{
-    Record,
-    record::Namespace,
-};
-use std::{collections::BTreeMap, fmt::Debug};
-use super::TextMetadata;
 
 /// Indexer is an additional module that can index flexbuffer based records
 ///
@@ -26,10 +23,7 @@ impl Indexer {
         let uuid_hi = hi ^ record.ns_chk();
 
         let ns = Namespace::from("___runir__INDEXER");
-        if let Some(reader) = record
-            .data()
-            .and_then(|d| flexbuffers::Reader::get_root(&d[..]).ok())
-        {
+        if let Some(reader) = flexbuffers::Reader::get_root(record.data().bytes()).ok() {
             if reader.flexbuffer_type().is_map() {
                 let map = reader.as_map();
                 for k in map.iter_keys() {
@@ -61,7 +55,7 @@ impl Indexer {
                         } else {
                             None
                         }
-                    },
+                    }
                 }
             } else {
                 None
@@ -70,7 +64,7 @@ impl Indexer {
     }
 
     /// Absorbs other index data into this indexer
-    /// 
+    ///
     /// In cases of collisions, incoming will always replace the existing value
     #[inline]
     pub fn absorb_indexer(&mut self, incoming: Indexer) {

@@ -1,3 +1,6 @@
+pub struct Opts {
+    record: RecordOpts
+}
 
 bitflags::bitflags! {
     /// Record options

@@ -1,5 +1,6 @@
 use crate::{
-    archive::{self, Entry, HeaderBuilder}, RecordOpts, Recordable
+    Data, RecordOpts, Recordable,
+    archive::{self, Entry, HeaderBuilder},
 };
 use ascii::AsAsciiStr;
 use bytes::Bytes;
@@ -161,12 +162,12 @@ pub struct Record {
     key: uuid::Uuid,
     /// Namespace checksum
     ns_chk: u64,
-    /// Timestamp of when record was created
-    ts: u64,
     /// Bitflag options
     opts: RecordOpts,
+    /// Timestamp of when the record was created
+    ts: u64,
     /// Data this record is storing
-    data: Option<Bytes>,
+    data: Data,
 }
 
 impl Record {
@@ -175,16 +176,13 @@ impl Record {
     pub fn create(label: &str, ns: impl Into<Namespace>) -> Record {
         let ns = ns.into();
         let key = ns.key(label);
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let ts = time::UtcDateTime::now().unix_timestamp() as u64;
         Record {
             key: Uuid::from_u64_pair(key, 0),
-            data: None,
             ns_chk: ns.chk(),
             opts: RecordOpts::empty(),
             ts,
+            data: Data::Empty,
         }
     }
 
@@ -208,8 +206,8 @@ impl Record {
 
     /// Returns a reference to the data stored in this record
     #[inline]
-    pub fn data(&self) -> Option<&Bytes> {
-        self.data.as_ref()
+    pub fn data(&self) -> &Data {
+        &self.data
     }
 
     /// Returns the namespace checksum value
@@ -220,15 +218,13 @@ impl Record {
 
     /// Returns record parts
     #[inline]
-    pub fn into_parts(self) -> (Uuid, Option<Bytes>, u64, u64, RecordOpts) {
+    pub fn into_parts(self) -> (Uuid, Data, u64, u64, RecordOpts) {
         (self.key, self.data, self.ns_chk, self.ts, self.opts)
     }
 
     /// Returns a record composed of parts
     #[inline]
-    pub fn from_parts(
-        (key, data, ns_chk, ts, opts): (Uuid, Option<Bytes>, u64, u64, RecordOpts),
-    ) -> Self {
+    pub fn from_parts((key, data, ns_chk, ts, opts): (Uuid, Data, u64, u64, RecordOpts)) -> Self {
         Self {
             key,
             data,
@@ -262,10 +258,10 @@ impl Record {
     }
 
     /// Enables or disables archiving
-    /// 
+    ///
     /// WARNING: If the record was created under an ephemeral namespace, than
     /// restoring the archive of this record will create an un-resolvable label key.
-    /// 
+    ///
     /// Use with caution
     #[inline]
     pub fn archiving(&mut self, enabled: bool) {
@@ -289,7 +285,7 @@ impl Record {
         crc.update(&data);
         crc.update(&self.ts.to_le_bytes());
 
-        let _ = self.data.insert(data);
+        self.data = Data::Bytes(data);
 
         let (hi, _) = self.key.as_u64_pair();
         self.key = Uuid::from_u64_pair(hi, crc.finalize());
@@ -302,17 +298,17 @@ impl Record {
     /// Note: Records w/ no data are not considered valid
     #[inline]
     pub fn is_valid(&self) -> bool {
-        self.data
-            .as_ref()
-            .map(|d| {
+        match &self.data {
+            Data::Bytes(bytes) => {
                 let mut crc = crc_digest();
-                crc.update(d);
+                crc.update(&bytes);
                 crc.update(&self.ts.to_le_bytes());
 
                 let (_, lo) = self.key.as_u64_pair();
                 lo == crc.finalize()
-            })
-            .unwrap_or_default()
+            }
+            _ => false,
+        }
     }
 
     /// Returns true if this record matches the provided label
@@ -328,18 +324,19 @@ impl Record {
     /// Attempts to deserialize data to some type
     #[inline]
     pub fn load<'de, T: Deserialize<'de>>(&'de self) -> Option<T> {
-        self.data
-            .as_ref()
-            .filter(|_| self.is_valid())
-            .and_then(|d| flexbuffers::from_slice(&d).ok())
+        match &self.data {
+            Data::Bytes(bytes) if self.is_valid() => flexbuffers::from_slice(&bytes).ok(),
+            _ => None,
+        }
     }
 
     /// Attempts to deserialize data to some type, skips checking if the data is valid
     #[inline]
     pub fn unchecked_load<'de, T: Deserialize<'de>>(&'de self) -> Option<T> {
-        self.data
-            .as_ref()
-            .and_then(|d| flexbuffers::from_slice(&d).ok())
+        match &self.data {
+            Data::Bytes(bytes) => flexbuffers::from_slice(&bytes).ok(),
+            _ => None,
+        }
     }
 
     /// Creates an archive entry for this record
@@ -356,24 +353,29 @@ impl Record {
         }
 
         if self.is_valid() {
-            if let Some(data) = self.data.as_ref() {
-                let mut header = HeaderBuilder::regular(
-                    format!(
-                        "{:x}_{}_{:x}",
-                        self.ns_chk,
-                        self.key.as_simple(),
-                        self.opts.bits()
-                    )
-                    .as_ascii_str()
-                    .map_err(|e| Error::new(std::io::ErrorKind::InvalidFilename, e.to_string()))?,
-                )?
-                .set_defaults_for_archive();
+            match &self.data {
+                Data::Bytes(bytes) => {
+                    let mut header = HeaderBuilder::regular(
+                        format!(
+                            "{:x}_{}_{:x}",
+                            self.ns_chk,
+                            self.key.as_simple(),
+                            self.opts.bits()
+                        )
+                        .as_ascii_str()
+                        .map_err(|e| {
+                            Error::new(std::io::ErrorKind::InvalidFilename, e.to_string())
+                        })?,
+                    )?
+                    .set_defaults_for_archive();
 
-                header.set_last_modified(self.ts)?;
-                header.set_size(data.len())?;
+                    header.set_last_modified(self.ts)?;
+                    header.set_size(bytes.len())?;
 
-                let entry = archive::Entry::regular(header.build()?, data.clone());
-                return Ok(entry);
+                    let entry = archive::Entry::regular(header.build()?, bytes.clone());
+                    return Ok(entry);
+                }
+                _ => {}
             }
         }
 
@@ -408,12 +410,19 @@ impl Record {
             let ts = header.last_modified();
             let record = Record {
                 key,
-                data: entry.data().and_then(|(b, d)| {
-                    use sha2::Digest;
-                    let digest = sha2::Sha256::digest(&b);
-                    let digest: [u8; 32] = digest.into();
-                    Some(b).filter(|_| digest.eq(&d))
-                }),
+                data: entry
+                    .data()
+                    .map(|(b, d)| {
+                        use sha2::Digest;
+                        let digest = sha2::Sha256::digest(&b);
+                        let digest: [u8; 32] = digest.into();
+                        if digest.eq(&d) {
+                            Data::Bytes(b)
+                        } else {
+                            Data::Empty
+                        }
+                    })
+                    .unwrap_or(Data::Empty),
                 ns_chk,
                 opts,
                 ts,
@@ -439,7 +448,7 @@ impl Record {
 #[cfg(test)]
 mod test {
     use super::Record;
-    use crate::{RecordOpts, RecordableExtensions, record::Namespace};
+    use crate::{record::Namespace, Data, RecordOpts, RecordableExtensions};
     use bytes::Bytes;
     use serde::{Deserialize, Serialize};
     use std::{collections::BTreeMap, time::Duration};
@@ -499,7 +508,7 @@ mod test {
     fn test_record_from_parts_is_invalid_with_random_parts() {
         let record = Record::from_parts((
             Uuid::nil(),
-            Some(Bytes::from_static(b"gibberish")),
+            Data::Bytes(Bytes::from_static(b"gibberish")),
             0,
             0,
             RecordOpts::empty(),

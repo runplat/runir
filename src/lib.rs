@@ -1,25 +1,27 @@
 pub mod archive;
 
-mod query;
-pub use query::Indexer;
-pub use query::TextMetadata;
+mod data;
+pub use data::Data;
 
 mod record;
 use record::Namespace;
 pub use record::Record;
 
-mod index;
-pub use index::Index;
-
 mod worker;
 pub use worker::Worker;
-
-mod store;
 
 mod opts;
 pub use opts::RecordOpts;
 
-use serde::Serialize;
+mod index;
+pub use index::Index;
+
+mod query;
+pub use query::Indexer;
+pub use query::TextMetadata;
+
+mod store;
+mod virt;
 
 /// Provides extensions for configuring a type before it is committed as a record
 pub trait RecordableExtensions {
@@ -79,7 +81,7 @@ impl<'a, T, const REF_COUNT: i8> Recordable<'a, T, REF_COUNT> {
     #[inline]
     pub fn to_record(self, label: &str, namespace: impl Into<Namespace>) -> Record
     where
-        T: Serialize,
+        T: serde::Serialize,
     {
         namespace
             .into()
