@@ -1,7 +1,7 @@
+use super::Entry;
+use crate::archive::Header;
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::Decoder;
-use crate::archive::Header;
-use super::Entry;
 
 /// Struct for decoding a tape archive file (tar)
 #[derive(Default)]
@@ -50,8 +50,14 @@ impl Decoder for TapeDecoder {
                 return Ok(Some(entry));
             }
         } else {
-            // TODO: Compute checksum of the header to validate integrity
             let header = Header::from(&src[..512]);
+
+            if !header.is_checksum_valid() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Checksum in header is invalid, archive integrity cannot be ensured",
+                ));
+            }
 
             // This indicates that that for the entry will follow this header
             // Prep by allocating a buffer to store the entry in
@@ -61,8 +67,7 @@ impl Decoder for TapeDecoder {
                 // TODO: Can use a contiguous buffer and split off sections for each file
                 let buf = BytesMut::with_capacity(size);
 
-                self.next
-                    .push((header, buf));
+                self.next.push((header, buf));
                 src.reserve(size);
             } else {
                 src.advance(512);

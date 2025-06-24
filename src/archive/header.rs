@@ -3,18 +3,29 @@ use bytes::{BufMut, Bytes, BytesMut};
 use std::{fmt::Display, io::Error, os::unix::fs::MetadataExt, path::Path};
 use tracing::{trace, warn};
 
+/// 65534 is a symbolic value for NO_OWNER/NO_GROUP
+/// 
+/// Reference: https://en.wikipedia.org/wiki/User_identifier#Special_values
 const NO_OWNER_NO_GROUP: u16 = u16::MAX - 1;
 
 /// Builds a TAR-compliant header
 #[derive(Default)]
 pub struct HeaderBuilder {
+    /// Name of the entry
     name: AsciiString,
+    /// File mode
     mode: u64,
+    /// Owner id
     owner: u64,
+    /// Group id
     group: u64,
+    /// Size of the data stored by the entry
     size: usize,
+    /// UNIX timestamp of when the entry was last modified
     last_modified: u64,
+    /// File type of the entry
     file_type: FileType,
+    /// Link file name
     link_name: AsciiString,
 }
 
@@ -217,11 +228,8 @@ impl HeaderBuilder {
 
         let padding = 512 - bytes.len();
         bytes.put_bytes(0, padding);
-        
-        // bytes[257..257+6].copy_from_slice("ustar\0".as_ascii_str().unwrap().as_bytes());
-        // bytes[263..263+2].copy_from_slice("00".as_ascii_str().unwrap().as_bytes());
 
-        let checksum: u32 = bytes[..].iter().map(|b| *b as u32).sum();
+        let checksum: u32 = compute_header_checksum(&bytes);
         bytes[148..148 + 8].copy_from_slice(format!("{:06o}\0 ", checksum).as_bytes());
 
         let bytes = bytes.freeze();
@@ -258,7 +266,36 @@ pub static EMPTY_HEADER: Header = Header {
 };
 
 impl Header {
-    /// Filename
+    /// Splits the entry name for record parts
+    ///
+    /// Returns None if the entry name does not contain record parts
+    #[inline]
+    pub fn split_name_for_record(&self) -> Option<(u64, uuid::Uuid, crate::Opts)> {
+        use crate::Opts;
+        use std::str::FromStr;
+        self.name()
+            .split_once("_")
+            .and_then(|(nschk, uuid_opts)| {
+                let nschk = u64::from_str_radix(nschk, 16).ok();
+                let uuid_opts = uuid_opts.split_once("_").and_then(|(uuid, opts)| {
+                    uuid::Uuid::from_str(uuid)
+                        .ok()
+                        .zip(u64::from_str_radix(opts, 16).ok().map(Opts::decode))
+                });
+
+                nschk.zip(uuid_opts)
+            })
+            .map(|(n, (r, o))| (n, r, o))
+    }
+
+    /// Computes the checksum and verifies that the computed checksum matches
+    /// the checksum in the header
+    #[inline]
+    pub fn is_checksum_valid(&self) -> bool {
+        self.checksum() == compute_header_checksum(&self.bytes)
+    }
+
+    /// Entry name
     #[inline]
     pub fn name(&self) -> &str {
         self.gnu.name()
@@ -346,6 +383,21 @@ impl Header {
     pub fn filename_prefix(&self) -> Option<&str> {
         self.ustar.as_ref().map(|u| u.filename_prefix())
     }
+}
+
+fn compute_header_checksum(bytes: &[u8]) -> u32 {
+    bytes[..]
+        .iter()
+        .enumerate()
+        .map(|(idx, b)| {
+            if (148..148 + 8).contains(&idx) {
+                ' ' as u32
+            } else {
+                *b as u32
+            }
+        })
+        .map(|b| b as u32)
+        .sum()
 }
 
 /// Struct containing the content of the gnu file header,
@@ -680,7 +732,7 @@ mod test {
             .set_file_type(crate::archive::FileType::SoftLink)
             .unwrap();
         let header = builder.build().unwrap();
-        eprintln!("{}", header);
+        assert!(header.is_checksum_valid());
     }
 
     #[test]

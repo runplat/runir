@@ -1,7 +1,7 @@
 use crate::{
-    Data, RecordOpts, Recordable,
-    archive::{self, Entry, HeaderBuilder},
+    archive::{self, Entry, HeaderBuilder}, Data, Opts, RawRecordable
 };
+use ahash::RandomState;
 use ascii::AsAsciiStr;
 use bytes::Bytes;
 use crc::{CRC_64_MS, Crc, Digest};
@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     hash::Hash,
     io::Error,
-    str::FromStr,
     sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -33,7 +32,7 @@ pub struct Namespace {
     /// Hashing core of the namespace
     hasher_core: ahash::RandomState,
     /// Default record options
-    opts: RecordOpts,
+    opts: Opts,
 }
 
 impl Hash for Namespace {
@@ -71,7 +70,7 @@ impl Namespace {
 
         Namespace {
             hasher_core: ahash::RandomState::with_seeds(k1, k2, k3, k4),
-            opts: RecordOpts::empty(),
+            opts: Opts::default(),
         }
     }
 
@@ -80,7 +79,7 @@ impl Namespace {
     pub fn ephemeral() -> Namespace {
         Namespace {
             hasher_core: ahash::RandomState::default(),
-            opts: RecordOpts::NoArchive,
+            opts: Opts::ephemeral(),
         }
     }
 
@@ -99,14 +98,14 @@ impl Namespace {
     /// Returns the checksum value for the namespace
     #[inline]
     pub fn chk(&self) -> u64 {
-        self.hasher_core.hash_one(self.opts.bits())
+        self.hasher_core.hash_one(self.opts)
     }
 
     /// Enables the indexing record option by default for all records,
     /// created from this namespace.
     #[inline]
     pub fn enable_indexing(&mut self) -> &mut Self {
-        self.opts |= RecordOpts::Indexing;
+        self.opts.enable_indexing();
         self
     }
 
@@ -118,18 +117,21 @@ impl Namespace {
     ///
     /// Reminder: Namespace maintains no state, this purely authors a record
     #[inline]
-    pub fn save<'a, T: Serialize + 'a>(
+    pub fn store<'a, T: Serialize + 'a>(
         &self,
         label: &str,
-        recordable: impl Into<Recordable<'a, T, 0>>,
+        recordable: impl Into<RawRecordable<'a, T>>,
     ) -> Record {
         let recordable = recordable.into();
         let mut ser = flexbuffers::FlexbufferSerializer::new();
         let record = self.record(label);
         if let Ok(()) = recordable.serialize(&mut ser) {
-            record
+            let mut record = record
                 .with_opts(self.opts | recordable.opts)
-                .commit(Bytes::from(ser.take_buffer()))
+                .commit(Bytes::from(ser.take_buffer()));
+
+            record.opts_mut().set_serialized_object();
+            record
         } else {
             record
         }
@@ -138,7 +140,11 @@ impl Namespace {
 
 impl From<()> for Namespace {
     fn from(_: ()) -> Self {
-        Namespace::ephemeral()
+        Namespace {
+            // This means this namespace will be static within the same process
+            hasher_core: RandomState::with_seed(0),
+            opts: Opts::default(),
+        }
     }
 }
 
@@ -163,7 +169,7 @@ pub struct Record {
     /// Namespace checksum
     ns_chk: u64,
     /// Bitflag options
-    opts: RecordOpts,
+    opts: Opts,
     /// Timestamp of when the record was created
     ts: u64,
     /// Data this record is storing
@@ -180,7 +186,7 @@ impl Record {
         Record {
             key: Uuid::from_u64_pair(key, 0),
             ns_chk: ns.chk(),
-            opts: RecordOpts::empty(),
+            opts: Opts::default(),
             ts,
             data: Data::Empty,
         }
@@ -218,13 +224,13 @@ impl Record {
 
     /// Returns record parts
     #[inline]
-    pub fn into_parts(self) -> (Uuid, Data, u64, u64, RecordOpts) {
+    pub fn into_parts(self) -> (Uuid, Data, u64, u64, Opts) {
         (self.key, self.data, self.ns_chk, self.ts, self.opts)
     }
 
     /// Returns a record composed of parts
     #[inline]
-    pub fn from_parts((key, data, ns_chk, ts, opts): (Uuid, Data, u64, u64, RecordOpts)) -> Self {
+    pub fn from_parts((key, data, ns_chk, ts, opts): (Uuid, Data, u64, u64, Opts)) -> Self {
         Self {
             key,
             data,
@@ -236,40 +242,21 @@ impl Record {
 
     /// Sets the record opts
     #[inline]
-    pub fn with_opts(mut self, opts: RecordOpts) -> Self {
+    pub fn with_opts(mut self, opts: Opts) -> Self {
         self.opts = opts;
         self
     }
 
-    /// Checks current record opts state
+    /// Returns current record opts
     #[inline]
-    pub fn enabled(&self, opt: RecordOpts) -> bool {
-        self.opts.contains(opt)
+    pub fn opts(&self) -> &Opts {
+        &self.opts
     }
 
-    /// Enables or disables indexing
+    /// Returns a mutable reference to current record opts
     #[inline]
-    pub fn indexing(&mut self, enabled: bool) {
-        if enabled {
-            self.opts |= RecordOpts::Indexing;
-        } else {
-            self.opts &= !RecordOpts::Indexing;
-        }
-    }
-
-    /// Enables or disables archiving
-    ///
-    /// WARNING: If the record was created under an ephemeral namespace, than
-    /// restoring the archive of this record will create an un-resolvable label key.
-    ///
-    /// Use with caution
-    #[inline]
-    pub fn archiving(&mut self, enabled: bool) {
-        if enabled {
-            self.opts &= !RecordOpts::NoArchive;
-        } else {
-            self.opts |= RecordOpts::NoArchive;
-        }
+    pub fn opts_mut(&mut self) -> &mut Opts {
+        &mut self.opts
     }
 
     /// Commit data to the record and configures the Uuid,
@@ -345,7 +332,7 @@ impl Record {
     /// this filename format is used to restore the record from the archive entry
     #[inline]
     pub fn archive(&self) -> std::io::Result<archive::Entry> {
-        if self.enabled(RecordOpts::NoArchive) {
+        if !self.opts().is_archivable() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "This record may not be archived",
@@ -360,7 +347,7 @@ impl Record {
                             "{:x}_{}_{:x}",
                             self.ns_chk,
                             self.key.as_simple(),
-                            self.opts.bits()
+                            self.opts.encode()
                         )
                         .as_ascii_str()
                         .map_err(|e| {
@@ -390,23 +377,7 @@ impl Record {
     pub fn restore(entry: Entry) -> std::io::Result<Self> {
         let header = entry.header();
 
-        if let Some((ns_chk, (key, opts))) =
-            header
-                .name()
-                .split_once("_")
-                .and_then(|(nschk, uuid_opts)| {
-                    let nschk = u64::from_str_radix(nschk, 16).ok();
-                    let uuid_opts = uuid_opts.split_once("_").and_then(|(uuid, opts)| {
-                        uuid::Uuid::from_str(uuid).ok().zip(
-                            u8::from_str_radix(opts, 16)
-                                .ok()
-                                .and_then(|b| RecordOpts::from_bits(b)),
-                        )
-                    });
-
-                    nschk.zip(uuid_opts)
-                })
-        {
+        if let Some((ns_chk, key, opts)) = header.split_name_for_record() {
             let ts = header.last_modified();
             let record = Record {
                 key,
@@ -448,7 +419,7 @@ impl Record {
 #[cfg(test)]
 mod test {
     use super::Record;
-    use crate::{record::Namespace, Data, RecordOpts, RecordableExtensions};
+    use crate::{Data, Opts, RecordableExtensions, record::Namespace};
     use bytes::Bytes;
     use serde::{Deserialize, Serialize};
     use std::{collections::BTreeMap, time::Duration};
@@ -511,7 +482,7 @@ mod test {
             Data::Bytes(Bytes::from_static(b"gibberish")),
             0,
             0,
-            RecordOpts::empty(),
+            Opts::default(),
         ));
         assert!(!record.is_valid())
     }
@@ -563,7 +534,7 @@ mod test {
 
         let ns = Namespace::ephemeral();
 
-        let record = ns.save("my-test-obj", &test);
+        let record = ns.store("my-test-obj", &test);
         assert!(record.is_valid());
 
         let loaded = record.load::<TestObj>().unwrap();
@@ -597,7 +568,10 @@ mod test {
         };
 
         let ns = Namespace::ephemeral();
-        let record = ns.save("my-test-obj", test.indexable());
+        let mut record = ns.store("my-test-obj", test.indexable());
+        assert!(record.archive().is_err());
+
+        record.opts_mut().enable_archiving();
 
         let key = record.key.clone();
         let archive = record.archive().unwrap();

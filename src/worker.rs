@@ -1,5 +1,5 @@
 use crate::{
-    archive::{self, Entry}, record::Namespace, Index, Record, Recordable
+    archive::{self, Entry}, record::Namespace, Index, RawRecordable, Record
 };
 use futures::StreamExt;
 use serde::Serialize;
@@ -16,16 +16,16 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Saves an object into the current worker with name
+    /// Stores an object into the current worker with name
     ///
-    /// Returns true if the object was successfully saved, otherwise returns false
+    /// Returns true if the object was successfully stored, otherwise returns false
     #[inline]
-    pub fn save<'a, T: Serialize + 'a>(
+    pub fn store<'a, T: Serialize + 'a>(
         &mut self,
         name: &str,
-        obj: impl Into<Recordable<'a, T, 0>>,
+        obj: impl Into<RawRecordable<'a, T>>,
     ) -> bool {
-        let record = self.namespace.save(name, obj);
+        let record = self.namespace.store(name, obj);
         if record.is_valid() {
             self.records.push(record);
             true
@@ -92,7 +92,7 @@ impl Worker {
         let mut stream = futures::stream::iter(
             self.records
                 .iter()
-                .filter(|f| !f.enabled(crate::RecordOpts::NoArchive))
+                .filter(|f| f.opts().is_archivable())
                 .map(|f| f.archive()),
         );
 
@@ -141,7 +141,7 @@ mod test {
     async fn test_worker_archive_to() {
         let mut worker = Worker::from("test");
 
-        assert!(worker.save(
+        assert!(worker.store(
             "record_one",
             toml! {
                 value = "hello world"
@@ -149,14 +149,14 @@ mod test {
             .indexable(),
         ));
 
-        assert!(worker.save(
+        assert!(worker.store(
             "record_two",
             &toml! {
                 value = "goodbye world"
             },
         ));
 
-        assert!(worker.save(
+        assert!(worker.store(
             "record_three",
             toml! {
                 value = "goodbye world"
@@ -176,7 +176,6 @@ mod test {
         let value = index.find("record_one", &ns);
         let toml = value.unwrap().load::<toml::Value>().unwrap();
         assert_eq!("hello world", toml["value"].as_str().unwrap());
-
         assert!(index.find("record_three", &ns).is_none());
     }
 }

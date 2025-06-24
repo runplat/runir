@@ -23,7 +23,7 @@ impl Index {
             let (hi, _) = record.uuid().as_u64_pair();
             self.records.insert(hi ^ record.ns_chk(), record.clone());
 
-            if record.enabled(crate::RecordOpts::Indexing) {
+            if record.opts().is_indexable() {
                 self.indexer.scan_update(record);
             }
         }
@@ -95,7 +95,7 @@ mod test {
         let mut worker = Worker::from("test_index_query");
 
         assert!(
-            worker.save(
+            worker.store(
                 "__record_1",
                 toml! {
                     value = "hello world"
@@ -103,7 +103,7 @@ mod test {
             )
         );
 
-        assert!(worker.save(
+        assert!(worker.store(
             "__record_2",
             &toml! {
                 value = "good dream world"
@@ -111,7 +111,7 @@ mod test {
         ));
 
         assert!(
-            worker.save(
+            worker.store(
                 "__record_3",
                 toml! {
                     value = "do electric worlds dream of sheep, or say hello"

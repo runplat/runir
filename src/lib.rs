@@ -11,7 +11,7 @@ mod worker;
 pub use worker::Worker;
 
 mod opts;
-pub use opts::RecordOpts;
+pub use opts::Opts;
 
 mod index;
 pub use index::Index;
@@ -27,40 +27,46 @@ mod virt;
 pub trait RecordableExtensions {
     /// Enables the record to be indexed
     #[inline]
-    fn indexable(&self) -> Recordable<'_, Self, 1>
+    fn indexable(&self) -> RecordableConfig<'_, Self>
     where
         Self: Sized,
     {
-        Recordable::<Self, 0>::from(self).indexable()
+        Recordable::<Self, false>::from(self).indexable()
     }
 
     /// Prevents the record from being archived
     #[inline]
-    fn no_archive(&self) -> Recordable<'_, Self, 1>
+    fn no_archive(&self) -> RecordableConfig<'_, Self>
     where
         Self: Sized,
     {
-        Recordable::<Self, 0>::from(self).no_archive()
+        Recordable::<Self, false>::from(self).no_archive()
     }
 }
 
 impl<T: serde::Serialize> RecordableExtensions for T {}
 
+/// Type-alias for an inert recordable wrapper
+pub type RawRecordable<'a, T> = Recordable<'a, T, false>;
+
+/// Type-alias for a user-configurable recordable wrapper
+pub type RecordableConfig<'a, T> = Recordable<'a, T, true>;
+
 /// Wrapper struct enabling pre-configuring record options
 /// before data is committed to the record
 #[derive(Clone, Copy)]
-pub struct Recordable<'a, T, const REF_GUARD: i8> {
+pub struct Recordable<'a, T, const REF_GATE: bool> {
     /// Object being recorded
     pub(crate) recording: &'a T,
     /// Record options passed set on the record
-    pub(crate) opts: RecordOpts,
+    pub(crate) opts: Opts,
 }
 
-impl<'a, T, const REF_COUNT: i8> Recordable<'a, T, REF_COUNT> {
+impl<'a, T, const REF_GATE: bool> Recordable<'a, T, REF_GATE> {
     /// Enables indexing for this record
     #[inline]
-    pub fn indexable(mut self) -> Recordable<'a, T, 1> {
-        self.opts |= RecordOpts::Indexing;
+    pub fn indexable(mut self) -> RecordableConfig<'a, T> {
+        self.opts.enable_indexing();
         Recordable {
             recording: self.recording,
             opts: self.opts,
@@ -69,8 +75,8 @@ impl<'a, T, const REF_COUNT: i8> Recordable<'a, T, REF_COUNT> {
 
     /// Enables the no_archive flag for this record
     #[inline]
-    pub fn no_archive(mut self) -> Recordable<'a, T, 1> {
-        self.opts |= RecordOpts::NoArchive;
+    pub fn no_archive(mut self) -> RecordableConfig<'a, T> {
+        self.opts.disable_archiving();
         Recordable {
             recording: self.recording,
             opts: self.opts,
@@ -85,22 +91,28 @@ impl<'a, T, const REF_COUNT: i8> Recordable<'a, T, REF_COUNT> {
     {
         namespace
             .into()
-            .save(label, self.recording)
+            .store(label, self.recording)
             .with_opts(self.opts)
     }
 
     /// Returns the record opts
     #[inline]
-    pub fn opts(&self) -> RecordOpts {
+    pub fn opts(&self) -> Opts {
         self.opts
+    }
+
+    /// Returns mutable reference to current opts
+    #[inline]
+    pub fn opts_mut(&mut self) -> &mut Opts {
+        &mut self.opts
     }
 }
 
-impl<'a, T> From<&'a T> for Recordable<'a, T, 0> {
+impl<'a, T> From<&'a T> for RawRecordable<'a, T> {
     fn from(value: &'a T) -> Self {
-        Recordable::<T, 0> {
+        RawRecordable::<T> {
             recording: value,
-            opts: RecordOpts::empty(),
+            opts: Opts::default(),
         }
     }
 }
@@ -126,25 +138,25 @@ impl<'a, T> From<&'a T> for Recordable<'a, T, 0> {
 ///     }.no_archive()
 /// )
 /// ```
-impl<'a, T> From<Recordable<'a, T, 1>> for Recordable<'a, T, 0> {
-    fn from(value: Recordable<'a, T, 1>) -> Self {
-        Recordable::<T, 0> {
+impl<'a, T> From<RecordableConfig<'a, T>> for RawRecordable<'a, T> {
+    fn from(value: RecordableConfig<'a, T>) -> Self {
+        RawRecordable::<T> {
             recording: value.recording,
             opts: value.opts,
         }
     }
 }
 
-impl<'a, T> From<&'a Recordable<'a, T, 1>> for Recordable<'a, T, 0> {
-    fn from(value: &'a Recordable<'a, T, 1>) -> Self {
-        Recordable::<T, 0> {
+impl<'a, T> From<&'a RecordableConfig<'a, T>> for RawRecordable<'a, T> {
+    fn from(value: &'a RecordableConfig<'a, T>) -> Self {
+        RawRecordable::<T> {
             recording: value.recording,
             opts: value.opts,
         }
     }
 }
 
-impl<'a, const REF_GUARD: i8, T: serde::Serialize> serde::Serialize
+impl<'a, const REF_GUARD: bool, T: serde::Serialize> serde::Serialize
     for Recordable<'a, T, REF_GUARD>
 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
