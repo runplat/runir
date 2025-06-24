@@ -16,18 +16,10 @@ pub use worker::Worker;
 
 mod store;
 
-use serde::Serialize;
+mod opts;
+pub use opts::RecordOpts;
 
-bitflags::bitflags! {
-    /// Record options
-    #[derive(Copy, Clone, Debug)]
-    pub struct RecordOpts : u8 {
-        /// Indicates that the record can be processed by the indexer
-        const Indexing = 1;
-        /// Indicates that the record should not be archived
-        const NoArchive = 1 << 1;
-    }
-}
+use serde::Serialize;
 
 /// Provides extensions for configuring a type before it is committed as a record
 pub trait RecordableExtensions {
