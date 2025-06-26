@@ -16,3 +16,28 @@ pub use decoder::TapeDecoder;
 mod encoder;
 pub use encoder::TapeEncoder;
 pub use encoder::JournalEntry;
+
+mod manifest;
+pub use manifest::Manifest;
+
+/// Scans an input tape archive and returns references
+#[inline]
+pub async fn scan_for_references(input: impl tokio::io::AsyncRead + Send + Unpin + 'static) -> std::io::Result<Vec<Entry>> {
+    use futures::StreamExt;
+
+    let mut references = vec![];
+
+    let decoder = TapeDecoder::references_only();
+    let mut reader = tokio_util::codec::FramedRead::new(input, decoder);
+
+    while let Some(entry) = reader.next().await {
+        if matches!(
+            entry,
+            Ok(Entry::Reference { .. })
+        ) {
+            references.push(entry?);
+        }
+    }
+
+    Ok(references)
+}

@@ -1,13 +1,72 @@
 use super::Entry;
 use crate::archive::Header;
 use bytes::{Buf, BufMut, BytesMut};
+use sha2::{Digest, Sha256};
 use tokio_util::codec::Decoder;
 
 /// Struct for decoding a tape archive file (tar)
 #[derive(Default)]
 pub struct TapeDecoder {
     /// Next entry in the archive,
-    next: Vec<(Header, BytesMut)>,
+    entries: Vec<(Header, Dest)>,
+    /// True if tape decoder should only calculate digests of entries
+    digest_only: bool,
+    /// Cursor position
+    cursor: usize,
+}
+
+impl TapeDecoder {
+    /// Returns a tape recorder that only emits entry references
+    pub fn references_only() -> Self {
+        Self { entries: vec![], digest_only: true, cursor: 0 }
+    }
+}
+
+enum Dest {
+    Bytes(BytesMut),
+    Digester {
+        digest: Sha256,
+        offset: usize,
+        len: usize,
+    }
+}
+
+impl Dest {
+    pub fn put_chunk(&mut self, chunk: &[u8]) {
+        match self {
+            Dest::Bytes(bytes_mut) => bytes_mut.put(chunk),
+            Dest::Digester {
+                digest,
+                len,
+                ..
+            } => {
+                digest.update(chunk);
+                *len += chunk.len();
+            },
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Dest::Bytes(bytes_mut) => bytes_mut.len(),
+            Dest::Digester { len, .. } => *len,
+        }
+    }
+
+    pub fn to_entry(self, header: Header) -> Entry {
+        match self {
+            Dest::Bytes(mut buf) => {
+                // Truncate the buffer to the exact size indicated by the header
+                buf.truncate(header.size() as usize);
+
+                let buf = buf.freeze();
+                Entry::regular(header, buf)
+            },
+            Dest::Digester { digest, offset, .. } => {
+                Entry::Reference { header, digest, offset }
+            },
+        }
+    }
 }
 
 impl Decoder for TapeDecoder {
@@ -28,25 +87,28 @@ impl Decoder for TapeDecoder {
         // Continue advancing until src is empty
         if src[..512].iter().all(|b| *b == b'\0') {
             src.advance(512);
+            self.cursor += 512;
             return Ok(Some(Entry::Zeros));
         }
 
         // Checks if we are currently processing an entry
-        if let Some((header, mut buf)) = self.next.pop() {
+        if let Some((header, mut buf)) = self.entries.pop() {
             let chunk = &src[..512];
-            buf.put(chunk);
+            if buf.len() + 512 > header.size() {
+                let slice_end = header.size() - buf.len();
+                buf.put_chunk(&chunk[..slice_end]);
+            } else {
+                buf.put_chunk(chunk);
+            }
 
             // If the amount of data in the buf is less than the total size of the file
             // push the proccessing entry back onto the stack
             if buf.len() < header.size() as usize {
-                self.next.push((header, buf));
+                self.entries.push((header, buf));
             } else {
-                // Truncate the buffer to the exact size indicated by the header
-                buf.truncate(header.size() as usize);
-
-                let buf = buf.freeze();
-                let entry = Entry::regular(header, buf);
+                let entry = buf.to_entry(header);
                 src.advance(512);
+                self.cursor += 512;
                 return Ok(Some(entry));
             }
         } else {
@@ -64,13 +126,15 @@ impl Decoder for TapeDecoder {
             if header.size() > 0 {
                 let size = header.size() as usize;
 
-                // TODO: Can use a contiguous buffer and split off sections for each file
-                let buf = BytesMut::with_capacity(size);
-
-                self.next.push((header, buf));
+                self.entries.push((header, if self.digest_only {
+                    Dest::Digester { digest: Sha256::new(), len: 0, offset: self.cursor + 512 }
+                } else {
+                    Dest::Bytes(BytesMut::with_capacity(size))
+                }));
                 src.reserve(size);
             } else {
                 src.advance(512);
+                self.cursor += 512;
                 return Ok(Some(Entry::other(header)));
             }
         }
@@ -78,6 +142,7 @@ impl Decoder for TapeDecoder {
         // Check if we can advance the cursor
         if src.has_remaining() {
             src.advance(512);
+            self.cursor += 512;
         }
         Ok(Some(Entry::Pending))
     }

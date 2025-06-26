@@ -1,7 +1,5 @@
 use crate::{
-    Index, RawRecordable, Record,
-    archive::{self, Entry},
-    record::Namespace,
+    archive::{self, Entry, Manifest}, record::Namespace, Index, RawRecordable, Record
 };
 use futures::StreamExt;
 use serde::Serialize;
@@ -85,11 +83,13 @@ impl Worker {
     }
 
     /// Archives the worker state to an output stream
+    /// 
+    /// Returns a record containing a manifest of the contents written to the output stream
     #[inline]
     pub async fn archive_to(
         &self,
         output: impl AsyncWrite + Send + Unpin + 'static,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<Manifest> {
         use futures::sink::SinkExt;
         let encoder = archive::TapeEncoder::default();
 
@@ -103,18 +103,9 @@ impl Worker {
                 .map(|f| Ok(Entry::Record(f.clone()))),
         );
 
+        // Send a stream of entries
         writer
             .send_all(&mut stream)
-            .await
-            .map_err(|e| Error::new(std::io::ErrorKind::Interrupted, e))?;
-
-        // Applies the digest of the current state of the archive to all journal entries
-        writer.encoder_mut().stamp_source_digest();
-
-        // Creates a manifest record of all the journal entries
-        let manifest = writer.encoder().create_manifest()?;
-        writer
-            .send(manifest)
             .await
             .map_err(|e| Error::new(std::io::ErrorKind::Interrupted, e))?;
 
@@ -124,12 +115,17 @@ impl Worker {
             .await
             .map_err(|e| Error::new(std::io::ErrorKind::Interrupted, e))?;
 
+        // Applies the digest of the current state of the archive to all journal entries
+        writer.encoder_mut().stamp_source_digest();
+
         // Close the writer
         writer
             .close()
             .await
             .map_err(|e| Error::new(std::io::ErrorKind::Interrupted, e))?;
-        Ok(())
+
+        let manifest = writer.encoder().create_manifest_record();
+        Ok(manifest)
     }
 }
 
@@ -144,7 +140,8 @@ impl<T: Into<Namespace>> From<T> for Worker {
 
 #[cfg(test)]
 mod test {
-    use crate::{RecordableExtensions, Worker, archive::JournalEntry};
+    use crate::{archive::Entry, RecordableExtensions, Worker};
+    use sha2::Digest;
     use toml::toml;
 
     #[tokio::test]
@@ -181,7 +178,8 @@ mod test {
 
         std::fs::remove_file("test.tar").ok();
         let archive_file = tokio::fs::File::create_new("test.tar").await.unwrap();
-        worker.archive_to(archive_file).await.unwrap();
+        let manifest = worker.archive_to(archive_file).await.unwrap();
+        assert!(manifest.is_valid());
 
         let mut restoring = Worker::from("test");
         let archive_file = tokio::fs::File::open("test.tar").await.unwrap();
@@ -193,11 +191,17 @@ mod test {
         assert_eq!("hello world", toml["value"].as_str().unwrap());
         assert!(index.find("record_three", "test").is_none());
 
-        let manifest = index
-            .find("MANIFEST", "__ARCHIVE_INTERNALS")
-            .expect("should be stored with the archive");
-        let encoded = manifest.load::<Vec<JournalEntry>>().unwrap();
+        let encoded = manifest.journal_entries().unwrap();
         assert_eq!(2, encoded.len());
         eprintln!("{encoded:#x?}");
+
+        let archive_file = tokio::fs::File::open("test.tar").await.unwrap();
+        let references = crate::archive::scan_for_references(archive_file).await.unwrap();
+        for reference in references {
+            if let Entry::Reference { header, digest, offset } = reference {
+                eprintln!("offset: {offset}, digest: {:x}", digest.finalize());
+                eprintln!("{header}");
+            }
+        }
     }
 }

@@ -1,5 +1,5 @@
-use super::{Entry, Sha256Digest};
-use crate::{RecordableExtensions, record::Namespace, virt::RecordExtent};
+use super::{Entry, Manifest, Sha256Digest};
+use crate::{record::Namespace, virt::RecordExtent, Record, RecordableExtensions};
 use bytes::{BufMut, Bytes};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -77,11 +77,11 @@ impl TapeEncoder {
 
     /// Creates a manifest entry for the encoded entries
     #[inline]
-    pub fn create_manifest(&self) -> std::io::Result<Entry> {
+    pub fn create_manifest_record(&self) -> Manifest {
         let mut record =
             Namespace::new("__ARCHIVE_INTERNALS").store("MANIFEST", self.journal.indexable());
         record.opts_mut().set_manifest_spec();
-        record.archive()
+        Manifest { record }
     }
 }
 

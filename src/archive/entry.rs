@@ -9,6 +9,11 @@ pub enum Entry {
     Record(Record),
     /// Regular file entry
     Regular(FileEntry),
+    Reference {
+        header: Header,
+        digest: Sha256,
+        offset: usize,
+    },
     /// Other entry type
     Other(Header),
     /// Pending an actual entry
@@ -53,6 +58,7 @@ impl Entry {
         match self {
             Entry::Record(r) => r.make_archive_header().expect("must be able to return archive header"),
             Entry::Regular(reg) => reg.header.clone(),
+            Entry::Reference { header, .. } => header.clone(),
             Entry::Other(h) => h.clone(),
             Entry::Zeros => EMPTY_HEADER.clone(),
             Entry::Pending => EMPTY_HEADER.clone(),
