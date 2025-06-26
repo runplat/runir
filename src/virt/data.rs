@@ -7,14 +7,14 @@ use crate::archive::JournalEntry;
 /// 
 /// Uses a mmap'ed file to provide access to journaled data
 #[derive(Debug, Clone)]
-pub struct VirtualRef {
+pub struct VirtualData {
     /// Journal entry for this virtual reference
     journaled: JournalEntry,
     /// Memory-map handle to data
     mmap: Arc<Mmap>,
 }
 
-impl VirtualRef {
+impl VirtualData {
     /// Returns a new virtual ref, if the provided arguments are valid
     ///
     /// Returns an error if the source/content digetsts could not be verified
@@ -51,13 +51,13 @@ impl VirtualRef {
     }
 }
 
-impl AsRef<[u8]> for VirtualRef {
+impl AsRef<[u8]> for VirtualData {
     fn as_ref(&self) -> &[u8] {
         &self
     }
 }
 
-impl Deref for VirtualRef {
+impl Deref for VirtualData {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {

@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use crate::virt::VirtualRef;
+use crate::virt::VirtualData;
 
 /// Enumeration of different data implementations
 #[derive(Default, Debug, Clone)]
@@ -10,7 +10,7 @@ pub enum Data {
     /// Data is loaded into memory
     Bytes(Bytes),
     /// Data is stored virtually w/ a reference to a journal entry and mmap
-    Virtual(VirtualRef),
+    Virtual(VirtualData),
 }
 
 impl Data {

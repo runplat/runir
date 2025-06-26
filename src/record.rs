@@ -137,6 +137,21 @@ impl Namespace {
             record
         }
     }
+
+    /// Authors a flexbuffer root that will become the committed value of the record
+    #[inline]
+    pub fn author(
+        &self,
+        label: &str,
+        author: impl Fn(flexbuffers::Builder) -> flexbuffers::Builder,
+    ) -> Record {
+        let mut record = self.record(label).commit(Bytes::from(
+            author(flexbuffers::Builder::default()).take_buffer(),
+        ));
+
+        record.opts_mut().set_serialized_object();
+        record
+    }
 }
 
 impl From<()> for Namespace {
@@ -590,5 +605,20 @@ mod test {
         assert!(archive.header().name().ends_with("1"));
         let record = Record::restore(archive).unwrap();
         assert_eq!(key, record.key);
+    }
+
+    #[test]
+    fn test_author_root() {
+        let namespace = Namespace::ephemeral();
+
+        let record = namespace.author("example", |mut b| {
+            let mut map = b.start_map();
+            map.push("value", "hello world");
+            map.end_map();
+            b
+        });
+
+        let value = record.load::<toml::Value>().unwrap();
+        assert_eq!("hello world", value["value"].as_str().unwrap());
     }
 }

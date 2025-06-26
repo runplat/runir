@@ -1,5 +1,7 @@
 use crate::{
-    archive::{self, Entry}, record::Namespace, Index, RawRecordable, Record
+    Index, RawRecordable, Record,
+    archive::{self, Entry},
+    record::Namespace,
 };
 use futures::StreamExt;
 use serde::Serialize;
@@ -27,6 +29,20 @@ impl Worker {
     ) -> bool {
         let record = self.namespace.store(name, obj);
         if record.is_valid() {
+            self.records.push(record);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Pushes a record onto this worker
+    ///
+    /// Returns true if the record was pushed into state, false if the record's ns_chk did not match
+    /// the current worker's ns_chk
+    #[inline]
+    pub fn push(&mut self, record: Record) -> bool {
+        if record.ns_chk() == self.namespace.chk() {
             self.records.push(record);
             true
         } else {
@@ -128,7 +144,7 @@ impl<T: Into<Namespace>> From<T> for Worker {
 
 #[cfg(test)]
 mod test {
-    use crate::{archive::JournalEntry, RecordableExtensions, Worker};
+    use crate::{RecordableExtensions, Worker, archive::JournalEntry};
     use toml::toml;
 
     #[tokio::test]
@@ -136,13 +152,15 @@ mod test {
     async fn test_worker_archive_to() {
         let mut worker = Worker::from("test");
 
-        assert!(worker.store(
-            "record_one",
-            toml! {
-                value = "hello world"
-            }
-            .indexable(),
-        ));
+        assert!(
+            worker.store(
+                "record_one",
+                toml! {
+                    value = "hello world"
+                }
+                .indexable(),
+            )
+        );
 
         assert!(worker.store(
             "record_two",
@@ -151,12 +169,15 @@ mod test {
             },
         ));
 
-        assert!(worker.store(
-            "record_three",
-            toml! {
-                value = "goodbye world"
-            }.no_archive(),
-        ));
+        assert!(
+            worker.store(
+                "record_three",
+                toml! {
+                    value = "goodbye world"
+                }
+                .no_archive(),
+            )
+        );
 
         std::fs::remove_file("test.tar").ok();
         let archive_file = tokio::fs::File::create_new("test.tar").await.unwrap();
@@ -172,7 +193,9 @@ mod test {
         assert_eq!("hello world", toml["value"].as_str().unwrap());
         assert!(index.find("record_three", "test").is_none());
 
-        let manifest = index.find("MANIFEST", "__ARCHIVE_INTERNALS").expect("should be stored with the archive");
+        let manifest = index
+            .find("MANIFEST", "__ARCHIVE_INTERNALS")
+            .expect("should be stored with the archive");
         let encoded = manifest.load::<Vec<JournalEntry>>().unwrap();
         assert_eq!(2, encoded.len());
         eprintln!("{encoded:#x?}");

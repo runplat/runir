@@ -1,8 +1,5 @@
-mod rex;
-pub use rex::RecordExtent;
+mod extent;
+pub use extent::RecordExtent;
 
-mod store;
-pub use store::VirtualStore;
-
-mod r#ref;
-pub use r#ref::VirtualRef;
+mod data;
+pub use data::VirtualData;

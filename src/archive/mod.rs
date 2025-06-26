@@ -16,5 +16,3 @@ pub use decoder::TapeDecoder;
 mod encoder;
 pub use encoder::TapeEncoder;
 pub use encoder::JournalEntry;
-
-mod manifest;
