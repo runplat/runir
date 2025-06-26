@@ -34,6 +34,22 @@ impl Worker {
         }
     }
 
+    /// Authors a flexbuffer root that will become the committed value of the record
+    #[inline]
+    pub fn author(
+        &mut self,
+        name: &str,
+        author: impl Fn(flexbuffers::Builder) -> flexbuffers::Builder,
+    ) -> bool {
+        let record = self.namespace.author(name, author);
+        if record.is_valid() {
+            self.records.push(record);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Pushes a record onto this worker
     ///
     /// Returns true if the record was pushed into state, false if the record's ns_chk did not match
