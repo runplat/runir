@@ -192,6 +192,18 @@ mod test {
             )
         );
 
+        assert!(
+            worker.author(
+                "record_four",
+                |mut b| {
+                    let mut map = b.start_map();
+                    map.push("value", "hello hello");
+                    map.end_map();
+                    b
+                },
+            )
+        );
+
         std::fs::remove_file("test.tar").ok();
         let archive_file = tokio::fs::File::create_new("test.tar").await.unwrap();
         let manifest = worker.archive_to(archive_file).await.unwrap();
@@ -208,7 +220,7 @@ mod test {
         assert!(index.find("record_three", "test").is_none());
 
         let encoded = manifest.journal_entries().unwrap();
-        assert_eq!(2, encoded.len());
+        assert_eq!(3, encoded.len());
         eprintln!("{encoded:#x?}");
 
         let archive_file = tokio::fs::File::open("test.tar").await.unwrap();
