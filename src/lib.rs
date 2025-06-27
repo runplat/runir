@@ -84,6 +84,8 @@ pub use index::Index;
 mod query;
 pub use query::Indexer;
 pub use query::TextMetadata;
+pub use query::field;
+pub use query::namespace;
 
 mod store;
 pub use store::Store;

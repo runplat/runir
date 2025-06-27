@@ -1,5 +1,6 @@
 use crate::{
-    archive::{self, Entry, HeaderBuilder}, Data, Namespace, Opts
+    Data, Namespace, Opts,
+    archive::{self, Entry, HeaderBuilder},
 };
 use ascii::AsAsciiStr;
 use bytes::Bytes;
@@ -195,6 +196,25 @@ impl Record {
         hi == label_key
     }
 
+    /// Returns a flexbuffer reader over the flexbuffer root
+    /// 
+    /// Returns None if the current record data does not have a flexbuffer root
+    #[inline]
+    pub fn peek(&self) -> Option<flexbuffers::Reader<&[u8]>> {
+        flexbuffers::Reader::get_root(self.data().bytes()).ok()
+    }
+
+    /// Peeks at the flexbuffer root and return a value
+    ///
+    /// Returns None if data is not a flexbuffer root
+    #[inline]
+    pub fn peek_map<O>(
+        &self,
+        peek: impl Fn(flexbuffers::Reader<&[u8]>) -> O,
+    ) -> Option<O> {
+        self.peek().map(|d| peek(d))
+    }
+
     /// Attempts to deserialize data to some type
     #[inline]
     pub fn load<'de, T: Deserialize<'de>>(&'de self) -> Option<T> {
@@ -283,11 +303,7 @@ impl Record {
                     .map(|(b, d)| {
                         use sha2::Digest;
                         let digest: [u8; 32] = b.digest().finalize().into();
-                        if digest.eq(&d) {
-                            b
-                        } else {
-                            Data::Empty
-                        }
+                        if digest.eq(&d) { b } else { Data::Empty }
                     })
                     .unwrap_or(Data::Empty),
                 ns_chk,

@@ -1,5 +1,10 @@
-use crate::{archive::JournalEntry, Namespace, Indexer, Record, RecordableExtensions};
+use crate::{
+    Indexer, Namespace, Record, RecordableExtensions,
+    archive::JournalEntry,
+    query::{Matches, Query},
+};
 use ahash::HashMap;
+use futures::Stream;
 use std::time::Duration;
 
 /// Contains an index of records
@@ -33,7 +38,7 @@ impl Index {
                         .zip(record.load::<Vec<JournalEntry>>())
                     {
                         let merged = a.extend(b);
-                        let mut merged_record =  merged.indexable();
+                        let mut merged_record = merged.indexable();
                         merged_record.opts_mut().set_manifest_spec(true);
                         let merged =
                             Namespace::from("__ARCHIVE_INTERNALS").store("MANIFEST", merged_record);
@@ -76,6 +81,23 @@ impl Index {
             .contains_text(field, text)
             .filter_map(|k| self.records.get(&k))
     }
+
+    /// Searches the index with a query
+    #[inline]
+    pub fn search<'query>(
+        &'query self,
+        query: impl Into<Query<'query>>,
+    ) -> impl Stream<Item = &'query Record> {
+        let query = query.into();
+        let records = self
+            .records
+            .iter()
+            .filter(|r| r.1.opts.is_object())
+            .map(|r| r.1)
+            .filter(move |r| query.matches(r));
+
+        futures::stream::iter(records)
+    }
 }
 
 #[cfg(test)]
@@ -83,8 +105,9 @@ mod test {
     use std::time::Duration;
 
     use bytes::Bytes;
+    use futures::StreamExt;
 
-    use crate::{RecordableExtensions, Worker, Namespace};
+    use crate::{Namespace, RecordableExtensions, Worker, field, namespace};
 
     use super::Index;
 
@@ -112,8 +135,8 @@ mod test {
         assert_eq!(0, index.find_older_than(Duration::from_secs(10)).count());
     }
 
-    #[test]
-    fn test_index_query() {
+    #[tokio::test]
+    async fn test_index_query() {
         use toml::toml;
 
         let mut worker = Worker::from("test_index_query");
@@ -147,6 +170,22 @@ mod test {
 
         let index = worker.to_index();
 
-        assert_eq!(2, index.search_text("value", "dream hello").count())
+        assert_eq!(2, index.search_text("value", "dream hello").count());
+
+        let query = field("value");
+        let results = index.search(query).collect::<Vec<_>>().await;
+        assert_eq!(3, results.len());
+
+        let results = index
+            .search(field("value").contains("electric"))
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(1, results.len());
+
+        let results = index
+            .search(namespace("test_index_query").key("__record_2"))
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(1, results.len());
     }
 }

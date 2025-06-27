@@ -1,5 +1,5 @@
 use super::TextMetadata;
-use crate::{archive::{JournalEntry, Sha256Digest}, Namespace, virt::RecordExtent, Record};
+use crate::{archive::{JournalEntry, Sha256Digest}, virt::RecordExtent, Namespace, Record};
 use flexbuffers::{MapReader, Reader};
 use std::{collections::BTreeMap, fmt::Debug};
 use tracing::{debug, warn};
