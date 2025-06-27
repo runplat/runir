@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use sha2::{digest::Update, Sha256};
 use crate::virt::VirtualData;
 
 /// Enumeration of different data implementations
@@ -34,5 +35,13 @@ impl Data {
             Data::Bytes(bytes) => &bytes,
             Data::Virtual(virt_ref) => &virt_ref
         }
+    }
+
+    /// Returns a SHA256 digest of this data
+    #[inline]
+    pub fn digest(&self) -> Sha256 {
+        let mut digest = Sha256::default();
+        digest.update(self.bytes());
+        digest
     }
 }

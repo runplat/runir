@@ -1,5 +1,5 @@
 use crate::{
-    archive::{self, Entry, Manifest}, record::Namespace, Index, RawRecordable, Record
+    archive::{self, Entry, Manifest}, Namespace, Index, RawRecordable, Record
 };
 use futures::StreamExt;
 use serde::Serialize;
@@ -16,6 +16,12 @@ pub struct Worker {
 }
 
 impl Worker {
+    /// Returns a reference to the namespace of this worker
+    #[inline]
+    pub fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
     /// Stores an object into the current worker with name
     ///
     /// Returns true if the object was successfully stored, otherwise returns false
@@ -140,7 +146,7 @@ impl Worker {
             .await
             .map_err(|e| Error::new(std::io::ErrorKind::Interrupted, e))?;
 
-        let manifest = writer.encoder().create_manifest_record();
+        let manifest = writer.encoder().create_manifest();
         Ok(manifest)
     }
 }
@@ -154,16 +160,22 @@ impl<T: Into<Namespace>> From<T> for Worker {
     }
 }
 
+impl std::fmt::Debug for Worker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Worker").field("namespace", &self.namespace.ns_uuid()).field("records", &self.records).finish()
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use crate::{archive::Entry, RecordableExtensions, Worker};
+    use crate::{archive::{Entry, FileEntryReference}, RecordableExtensions, ToNamespace, Worker};
     use sha2::Digest;
     use toml::toml;
 
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_worker_archive_to() {
-        let mut worker = Worker::from("test");
+        let mut worker = Worker::from("test".to_namespace());
 
         assert!(
             worker.store(
@@ -226,7 +238,7 @@ mod test {
         let archive_file = tokio::fs::File::open("test.tar").await.unwrap();
         let references = crate::archive::scan_for_references(archive_file).await.unwrap();
         for reference in references {
-            if let Entry::Reference { header, digest, offset } = reference {
+            if let Entry::Reference(FileEntryReference { header, digest, offset })= reference {
                 eprintln!("offset: {offset}, digest: {:x}", digest.finalize());
                 eprintln!("{header}");
             }

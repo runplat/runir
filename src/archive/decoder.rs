@@ -1,4 +1,4 @@
-use super::Entry;
+use super::{entry::FileEntryReference, Entry};
 use crate::archive::Header;
 use bytes::{Buf, BufMut, BytesMut};
 use sha2::{Digest, Sha256};
@@ -63,7 +63,7 @@ impl Dest {
                 Entry::regular(header, buf)
             },
             Dest::Digester { digest, offset, .. } => {
-                Entry::Reference { header, digest, offset }
+                Entry::Reference(FileEntryReference { header, digest, offset })
             },
         }
     }

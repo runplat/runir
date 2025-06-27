@@ -1,14 +1,11 @@
 use crate::{
-    Data, Opts, RawRecordable,
-    archive::{self, Entry, HeaderBuilder},
+    archive::{self, Entry, HeaderBuilder}, Data, Namespace, Opts
 };
-use ahash::RandomState;
 use ascii::AsAsciiStr;
 use bytes::Bytes;
 use crc::{CRC_64_MS, Crc, Digest};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{
-    hash::Hash,
     io::Error,
     sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -19,155 +16,6 @@ static CRC: OnceLock<Crc<u64>> = OnceLock::new();
 
 fn crc_digest() -> Digest<'static, u64> {
     CRC.get_or_init(|| Crc::<u64>::new(&CRC_64_MS)).digest()
-}
-
-/// Namespace provides a hasher for the record
-///
-/// If created via str, the namespace will be deterministic, and records saved via
-/// this namespace may be archived/restored with deterministic symbols
-///
-/// Otherwise, the namespace is treated as ephemeral and will only be valid during the lifetime of
-/// the process
-#[derive(Clone)]
-pub struct Namespace {
-    /// Hashing core of the namespace
-    hasher_core: ahash::RandomState,
-    /// Default record options
-    opts: Opts,
-}
-
-impl Hash for Namespace {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.chk().hash(state);
-    }
-}
-
-impl PartialEq for Namespace {
-    fn eq(&self, other: &Self) -> bool {
-        self.chk() == other.chk()
-    }
-}
-
-impl Namespace {
-    /// Derives a new namespace from a namespace label
-    ///
-    /// Note: This function re-uses ahash in order to have persistent keys,
-    /// however these hashes are not intended to be DOS-resistant. That layer
-    /// of hashing is handled in the Index code which should be servicing the majority
-    /// of hash-based lookups
-    #[inline]
-    pub fn new(namespace: &str) -> Namespace {
-        let init_hash = ahash::RandomState::with_seeds(1, 0, 0, 0);
-        let k1 = init_hash.hash_one(namespace);
-
-        let init_hash = ahash::RandomState::with_seeds(0, 1, 0, 0);
-        let k2 = init_hash.hash_one(namespace);
-
-        let init_hash = ahash::RandomState::with_seeds(0, 0, 1, 0);
-        let k3 = init_hash.hash_one(namespace);
-
-        let init_hash = ahash::RandomState::with_seeds(0, 0, 0, 1);
-        let k4 = init_hash.hash_one(namespace);
-
-        Namespace {
-            hasher_core: ahash::RandomState::with_seeds(k1, k2, k3, k4),
-            opts: Opts::default(),
-        }
-    }
-
-    /// Returns an ephemeral namespace
-    #[inline]
-    pub fn ephemeral() -> Namespace {
-        Namespace {
-            hasher_core: ahash::RandomState::default(),
-            opts: Opts::ephemeral(),
-        }
-    }
-
-    /// Returns a new empty record under this namespace
-    #[inline]
-    pub fn record(&self, label: &str) -> Record {
-        Record::create(label, self.clone()).with_opts(self.opts)
-    }
-
-    /// Returns the key value for a label under this namespace
-    #[inline]
-    pub fn key(&self, label: &str) -> u64 {
-        self.hasher_core.hash_one(label)
-    }
-
-    /// Returns the checksum value for the namespace
-    #[inline]
-    pub fn chk(&self) -> u64 {
-        self.hasher_core.hash_one(self.opts)
-    }
-
-    /// Enables the indexing record option by default for all records,
-    /// created from this namespace.
-    #[inline]
-    pub fn enable_indexing(&mut self) -> &mut Self {
-        self.opts.enable_indexing();
-        self
-    }
-
-    /// Authors a record under this namespace for an obj
-    ///
-    /// Note: If the object was unable to be saved, it will return an empty record,
-    /// empty records are not considered valid, therefore the Worker will return false if a record
-    /// was saved from a worker
-    ///
-    /// Reminder: Namespace maintains no state, this purely authors a record
-    #[inline]
-    pub fn store<'a, T: Serialize + 'a>(
-        &self,
-        label: &str,
-        recordable: impl Into<RawRecordable<'a, T>>,
-    ) -> Record {
-        let recordable = recordable.into();
-        let mut ser = flexbuffers::FlexbufferSerializer::new();
-        let record = self.record(label);
-        if let Ok(()) = recordable.serialize(&mut ser) {
-            let mut record = record
-                .with_opts(self.opts | recordable.opts)
-                .commit(Bytes::from(ser.take_buffer()));
-
-            record.opts_mut().set_serialized_object();
-            record
-        } else {
-            record
-        }
-    }
-
-    /// Authors a flexbuffer root that will become the committed value of the record
-    #[inline]
-    pub fn author(
-        &self,
-        label: &str,
-        author: impl Fn(flexbuffers::Builder) -> flexbuffers::Builder,
-    ) -> Record {
-        let mut record = self.record(label).commit(Bytes::from(
-            author(flexbuffers::Builder::default()).take_buffer(),
-        ));
-
-        record.opts_mut().set_serialized_object();
-        record
-    }
-}
-
-impl From<()> for Namespace {
-    fn from(_: ()) -> Self {
-        Namespace {
-            // This means this namespace will be static within the same process
-            hasher_core: RandomState::with_seed(0),
-            opts: Opts::default(),
-        }
-    }
-}
-
-impl From<&str> for Namespace {
-    fn from(value: &str) -> Self {
-        Namespace::new(value)
-    }
 }
 
 /// State for storing data into the database
@@ -181,15 +29,15 @@ pub struct Record {
     /// The lo-bits are a crc checksum of the commited data and ts of this record
     ///
     /// If the lo-bits are zeroed, this means that no data has been committed
-    key: uuid::Uuid,
+    pub(crate) key: uuid::Uuid,
     /// Namespace checksum
-    ns_chk: u64,
+    pub(crate) ns_chk: u64,
     /// Bitflag options
-    opts: Opts,
+    pub(crate) opts: Opts,
     /// Timestamp of when the record was created
-    ts: u64,
+    pub(crate) ts: u64,
     /// Data this record is storing
-    data: Data,
+    pub(crate) data: Data,
 }
 
 impl Record {
@@ -198,11 +46,12 @@ impl Record {
     pub fn create(label: &str, ns: impl Into<Namespace>) -> Record {
         let ns = ns.into();
         let key = ns.key(label);
+        let opts = ns.opts();
         let ts = time::UtcDateTime::now().unix_timestamp() as u64;
         Record {
             key: Uuid::from_u64_pair(key, 0),
             ns_chk: ns.chk(),
-            opts: Opts::default(),
+            opts: opts.clone(),
             ts,
             data: Data::Empty,
         }
@@ -218,6 +67,12 @@ impl Record {
                     .unwrap(),
             )
             .unwrap()
+    }
+
+    /// Returns the timestamp/
+    #[inline]
+    pub fn ts(&self) -> u64 {
+        self.ts
     }
 
     /// Returns the crc checksum
@@ -318,6 +173,14 @@ impl Record {
                 let (_, lo) = self.key.as_u64_pair();
                 lo == crc.finalize()
             }
+            Data::Virtual(bytes) => {
+                let mut crc = crc_digest();
+                crc.update(&bytes);
+                crc.update(&self.ts.to_le_bytes());
+
+                let (_, lo) = self.key.as_u64_pair();
+                lo == crc.finalize()
+            }
             _ => false,
         }
     }
@@ -337,6 +200,7 @@ impl Record {
     pub fn load<'de, T: Deserialize<'de>>(&'de self) -> Option<T> {
         match &self.data {
             Data::Bytes(bytes) if self.is_valid() => flexbuffers::from_slice(&bytes).ok(),
+            Data::Virtual(bytes) if self.is_valid() => flexbuffers::from_slice(&bytes).ok(),
             _ => None,
         }
     }
@@ -346,6 +210,7 @@ impl Record {
     pub fn unchecked_load<'de, T: Deserialize<'de>>(&'de self) -> Option<T> {
         match &self.data {
             Data::Bytes(bytes) => flexbuffers::from_slice(&bytes).ok(),
+            Data::Virtual(bytes) => flexbuffers::from_slice(&bytes).ok(),
             _ => None,
         }
     }
@@ -389,6 +254,11 @@ impl Record {
                     let entry = archive::Entry::regular(header, bytes.clone());
                     return Ok(entry);
                 }
+                Data::Virtual(bytes) => {
+                    let header = self.make_archive_header()?;
+                    let entry = archive::Entry::from_virtual(header, bytes.clone());
+                    return Ok(entry);
+                }
                 _ => {}
             }
         }
@@ -412,10 +282,9 @@ impl Record {
                     .data()
                     .map(|(b, d)| {
                         use sha2::Digest;
-                        let digest = sha2::Sha256::digest(&b);
-                        let digest: [u8; 32] = digest.into();
+                        let digest: [u8; 32] = b.digest().finalize().into();
                         if digest.eq(&d) {
-                            Data::Bytes(b)
+                            b
                         } else {
                             Data::Empty
                         }

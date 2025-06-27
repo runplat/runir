@@ -1,4 +1,4 @@
-use crate::{archive::JournalEntry, record::Namespace, Indexer, Record, RecordableExtensions};
+use crate::{archive::JournalEntry, Namespace, Indexer, Record, RecordableExtensions};
 use ahash::HashMap;
 use std::time::Duration;
 
@@ -34,7 +34,7 @@ impl Index {
                     {
                         let merged = a.extend(b);
                         let mut merged_record =  merged.indexable();
-                        merged_record.opts_mut().set_manifest_spec();
+                        merged_record.opts_mut().set_manifest_spec(true);
                         let merged =
                             Namespace::from("__ARCHIVE_INTERNALS").store("MANIFEST", merged_record);
 
@@ -84,7 +84,7 @@ mod test {
 
     use bytes::Bytes;
 
-    use crate::{RecordableExtensions, Worker, record::Namespace};
+    use crate::{RecordableExtensions, Worker, Namespace};
 
     use super::Index;
 

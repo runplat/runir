@@ -1,5 +1,5 @@
 use super::TextMetadata;
-use crate::{archive::{JournalEntry, Sha256Digest}, record::Namespace, virt::RecordExtent, Record};
+use crate::{archive::{JournalEntry, Sha256Digest}, Namespace, virt::RecordExtent, Record};
 use flexbuffers::{MapReader, Reader};
 use std::{collections::BTreeMap, fmt::Debug};
 use tracing::{debug, warn};
@@ -130,18 +130,20 @@ impl Indexer {
     /// Indexes a journal record extent
     fn index_journal_record_extent(&mut self, map: MapReader<&[u8]>) {
         if let Some(keys) =
-            get_all_keys(&map, &["source", "content", "offset", "len", "ts", "crc", "opts"])
+            map_all(&map, &["source", "content", "offset", "len", "key", "ns_chk", "ts", "crc", "opts"])
         {
             match &keys[..] {
-                [source, content, offset, len, ts, crc, opts, ..] => {
+                [source, content, offset, len, key, ns_chk, ts, crc, opts, ..] => {
                     let extent = RecordExtent {
-                        source: read_sha256_digest(&map, *source),
-                        content: read_sha256_digest(&map, *content),
-                        offset: map.idx(*offset).as_u64(),
-                        len: map.idx(*len).as_u32(),
-                        ts: map.idx(*ts).as_u64(),
-                        crc: map.idx(*crc).as_u64(),
-                        opts: map.idx(*opts).as_u64(),
+                        source: read_sha256_digest(source),
+                        content: read_sha256_digest(content),
+                        offset: offset.as_u64(),
+                        len: len.as_u32(),
+                        key: key.as_u64(),
+                        ns_chk: ns_chk.as_u64(),
+                        ts: ts.as_u64(),
+                        crc: crc.as_u64(),
+                        opts: opts.as_u64(),
                     };
                     self.journaled.push(JournalEntry::Record(extent));
                 }
@@ -155,15 +157,15 @@ impl Indexer {
     /// Indexes a journal extent
     fn index_extent(&mut self, map: MapReader<&[u8]>) {
         if let Some(keys) =
-            get_all_keys(&map, &["source", "content", "offset", "len"])
+            map_all(&map, &["source", "content", "offset", "len"])
         {
             match &keys[..] {
                 [source, content, offset, len, ..] => {
                     let extent = JournalEntry::Extent {
-                        source: read_sha256_digest(&map, *source),
-                        content: read_sha256_digest(&map, *content),
-                        offset: map.idx(*offset).as_u64(),
-                        len: map.idx(*len).as_u32(),
+                        source: read_sha256_digest(source),
+                        content: read_sha256_digest(content),
+                        offset: offset.as_u64(),
+                        len: len.as_u32(),
                     };
                     self.journaled.push(extent);
                 }
@@ -195,18 +197,18 @@ impl Debug for Index {
     }
 }
 
-fn read_sha256_digest(map: &MapReader<&[u8]>, key: usize) -> Sha256Digest {
-    let source_vec = map.idx(key).as_vector().iter().map(|a| a.as_u8()).take(32);
+fn read_sha256_digest(reader: &Reader<&[u8]>) -> Sha256Digest {
+    let source_vec = reader.as_vector().iter().map(|a| a.as_u8()).take(32);
     let mut source = [0; 32];
     source.copy_from_slice(&source_vec.collect::<Vec<_>>());
     source
 }
 
-fn get_all_keys(map: &MapReader<&[u8]>, keys: &[&str]) -> Option<Vec<usize>> {
+fn map_all<'a: 'b, 'b>(map: &'a MapReader<&[u8]>, keys: &[&str]) -> Option<Vec<Reader<&'b [u8]>>> {
     let mut _keys = vec![];
     for k in keys {
         if let Some(k) = map.index_key(k) {
-            _keys.push(k);
+            _keys.push(map.idx(k));
         }
     }
     Some(_keys).filter(|k| k.len() == keys.len())

@@ -4,8 +4,11 @@ pub mod util;
 mod data;
 pub use data::Data;
 
+mod namespace;
+pub use namespace::Namespace;
+pub use namespace::ToNamespace;
+
 mod record;
-use record::Namespace;
 pub use record::Record;
 
 mod worker;
@@ -13,6 +16,67 @@ pub use worker::Worker;
 
 mod opts;
 pub use opts::Opts;
+
+pub mod policy {
+    pub mod merge {
+        use crate::opts::MergePolicy;
+
+        /// Merge policy is to include all versions of the record
+        /// 
+        /// When the record is fetched and multiple versions are found, an error will be returned
+        /// that will include all versions of the record
+        #[inline]
+        pub fn all_versions() -> MergePolicy {
+            MergePolicy::AllVersions
+        }
+
+        /// Prefer the earliest version of the record
+        #[inline]
+        pub fn earliest() -> MergePolicy {
+            MergePolicy::Earliest
+        }
+
+        /// Prefer the latest version of the record
+        #[inline]
+        pub fn latest() -> MergePolicy {
+            MergePolicy::Latest
+        }
+
+        /// Prefer the record with the lower checksum
+        #[inline]
+        pub fn lowest_checksum() -> MergePolicy {
+            MergePolicy::LowestChecksum
+        }
+
+        /// Prefer the record with the highest checksum
+        #[inline]
+        pub fn highest_checksum() -> MergePolicy {
+            MergePolicy::HighestChecksum
+        }
+
+        /// Do-not allow merges once a record is set and return an error
+        #[inline]
+        pub fn fail() -> MergePolicy {
+            MergePolicy::Fail
+        }
+
+        /// Do-not allow merges once a record is set and do not
+        /// bubble up an error
+        #[inline]
+        pub fn fail_silent() -> MergePolicy {
+            MergePolicy::FailSilent
+        }
+
+        /// Execute a user-registered merge function
+        /// 
+        /// If this flag is set, and a function is not provided, this will
+        /// result in a fatal runtime error
+        #[inline]
+        pub fn user_merge_function() -> MergePolicy {
+            MergePolicy::UserMergeFunction
+        }
+    }
+}
 
 mod index;
 pub use index::Index;
@@ -22,9 +86,11 @@ pub use query::Indexer;
 pub use query::TextMetadata;
 
 mod store;
+pub use store::Store;
+
 mod virt;
-pub use virt::VirtualData;
 pub use virt::RecordExtent;
+pub use virt::VirtualData;
 
 /// Provides extensions for configuring a type before it is committed as a record
 pub trait RecordableExtensions {
@@ -121,16 +187,16 @@ impl<'a, T> From<&'a T> for RawRecordable<'a, T> {
 }
 
 /// HACK: These two below implementations hack the type system to address this situation:
-/// 
+///
 /// ```rs no_run
-/// 
+///
 /// // This is okay
 /// worker.save(
 ///     toml {
 ///         value = "hello world"
 ///     }.no_archive()
 /// )
-/// 
+///
 /// // This is a trap, if rust decides to use the From<&'a T> impl
 /// // It will end up resetting all the record flags previously set
 /// // With the below fix, this forces the type system not to compile this code

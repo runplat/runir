@@ -9,6 +9,7 @@ pub use header::HeaderBuilder;
 mod entry;
 pub use entry::Entry;
 pub use entry::FileEntry;
+pub use entry::FileEntryReference;
 
 mod decoder;
 pub use decoder::TapeDecoder;

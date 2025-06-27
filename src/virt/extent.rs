@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
+use tracing::error;
+use uuid::Uuid;
 
-use crate::archive::Sha256Digest;
+use crate::{Data, Opts, Record, archive::Sha256Digest};
 
 /// Provides offset/len information of stored record data in addition
 /// to source and storage metadata
@@ -14,12 +17,57 @@ pub struct RecordExtent {
     pub(crate) offset: u64,
     /// Length of record data
     pub(crate) len: u32,
-    /// Timestamp of when the record was created
-    pub(crate) ts: u64,
+    /// Record key
+    pub(crate) key: u64,
     /// CRC-checksum of record data
     pub(crate) crc: u64,
+    /// Timestamp of when the record was created
+    pub(crate) ts: u64,
+    /// Record ns_chk vlaue
+    pub(crate) ns_chk: u64,
     /// Encoded record opts
     pub(crate) opts: u64,
+}
+
+impl RecordExtent {
+    /// Formats the archive name used for this record
+    #[inline]
+    pub fn format_archve_name(&self) -> String {
+        format!(
+            "{:x}_{}_{:x}",
+            self.ns_chk,
+            uuid::Uuid::from_u64_pair(self.key, self.crc),
+            self.opts
+        )
+    }
+
+    /// Materializes a record from extent w/ data
+    ///
+    /// Returns None if the materialized record is not valid
+    #[inline]
+    pub fn materialize(&self, data: &Data) -> Option<Record> {
+        let rec = Record::from_parts((
+            Uuid::from_u64_pair(self.key, self.crc),
+            data.clone(),
+            self.ns_chk,
+            self.ts,
+            Opts::decode(self.opts),
+        ));
+
+        let rec_is_valid = rec.is_valid();
+        let digest: [u8; 32] = data.digest().finalize().into();
+        if rec_is_valid && digest == self.content {
+            Some(rec)
+        } else {
+            error!(
+                is_valid = rec_is_valid,
+                data=hex::encode(digest),
+                expected=hex::encode(self.content),
+                "Could not materialize record extent from provided data"
+            );
+            None
+        }
+    }
 }
 
 impl std::fmt::Debug for RecordExtent {

@@ -1,13 +1,15 @@
-use std::{ops::Deref, sync::Arc};
+use crate::{Data, Record, archive::JournalEntry};
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
-use crate::archive::JournalEntry;
+use std::{ops::Deref, sync::Arc};
 
 /// Virtual reference to journaled data
-/// 
+///
 /// Uses a mmap'ed file to provide access to journaled data
 #[derive(Debug, Clone)]
 pub struct VirtualData {
+    /// If packed, the mmap will not include the zero-bytes
+    is_packed: bool,
     /// Journal entry for this virtual reference
     journaled: JournalEntry,
     /// Memory-map handle to data
@@ -17,10 +19,10 @@ pub struct VirtualData {
 impl VirtualData {
     /// Returns a new virtual ref, if the provided arguments are valid
     ///
-    /// Returns an error if the source/content digetsts could not be verified
+    /// Returns an error if the source/content digests could not be verified
     #[inline]
     pub fn new(journaled: JournalEntry, mmap: Arc<Mmap>) -> std::io::Result<Self> {
-        let virt_ref = Self { journaled, mmap };
+        let virt_ref = Self {  is_packed: false, journaled, mmap };
         if virt_ref.is_valid() {
             Ok(virt_ref)
         } else {
@@ -31,11 +33,38 @@ impl VirtualData {
         }
     }
 
+    /// Returns a new virtual ref, if the provided arguments are valid
+    ///
+    /// Returns an error if the source/content digests could not be verified
+    /// 
+    /// Sets the packed flag so that the source confirmation can account for zero bytes
+    #[inline]
+    pub fn new_packed(journaled: JournalEntry, mmap: Arc<Mmap>) -> std::io::Result<Self> {
+        let virt_ref = Self {  is_packed: true, journaled, mmap };
+        if virt_ref.is_valid() {
+            Ok(virt_ref)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Provided packed data did not match source/content digest constraints",
+            ))
+        }
+    }
+
     /// Returns true if the source/content digests match the current settings
     #[inline]
     pub fn is_valid(&self) -> bool {
-        Sha256::digest(&self.mmap[..]).as_slice() == self.journaled.source()
-            && Sha256::digest(&self).as_slice() == self.journaled.content()
+        let source_matches = if !self.is_packed {
+            Sha256::digest(&self.mmap[..]).as_slice() == self.journaled.source()
+        } else {
+            let mut digest = Sha256::new();
+            digest.update(&self.mmap[..]);
+            let zero_bytes = [0; 512];
+            digest.update(&zero_bytes);
+            digest.update(&zero_bytes);
+            digest.finalize().as_slice() == self.journaled.source()
+        };
+        source_matches && Sha256::digest(&self).as_slice() == self.journaled.content()
     }
 
     /// Returns the length in bytes
@@ -48,6 +77,17 @@ impl VirtualData {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.as_ref().is_empty()
+    }
+
+    /// Reverses back into a record if journaled data is a record extent
+    #[inline]
+    pub fn materialize(&self) -> Option<Record> {
+        match &self.journaled {
+            JournalEntry::Record(record_extent) => {
+                record_extent.materialize(&Data::Virtual(self.clone()))
+            }
+            _ => None,
+        }
     }
 }
 

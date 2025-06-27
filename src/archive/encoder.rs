@@ -1,5 +1,5 @@
 use super::{Entry, Manifest, Sha256Digest};
-use crate::{record::Namespace, virt::RecordExtent, Record, RecordableExtensions};
+use crate::{Namespace, RecordableExtensions, virt::RecordExtent};
 use bytes::{BufMut, Bytes};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -18,6 +18,15 @@ pub enum JournalEntry {
 }
 
 impl JournalEntry {
+    /// If this journal entry is a record extent, returns the archive name of this journal entry
+    #[inline]
+    pub fn archve_name(&self) -> Option<String> {
+        match self {
+            JournalEntry::Record(record_extent) => Some(record_extent.format_archve_name()),
+            _ => None
+        }
+    }
+
     /// Returns the content digest of the journaled entry's data
     #[inline]
     pub fn source(&self) -> &Sha256Digest {
@@ -77,10 +86,11 @@ impl TapeEncoder {
 
     /// Creates a manifest entry for the encoded entries
     #[inline]
-    pub fn create_manifest_record(&self) -> Manifest {
+    pub fn create_manifest(&self) -> Manifest {
+        let manifest_name = format!("MANIFEST_{:x}", self.digest.clone().finalize());
         let mut record =
-            Namespace::new("__ARCHIVE_INTERNALS").store("MANIFEST", self.journal.indexable());
-        record.opts_mut().set_manifest_spec();
+            Namespace::new("__runir_store").store(manifest_name.as_str(), self.journal.indexable());
+        record.opts_mut().set_manifest_spec(true);
         Manifest { record }
     }
 }
@@ -114,30 +124,15 @@ impl Encoder<Entry> for TapeEncoder {
             dst.reserve(item.header().size());
             let header_bytes = item.header();
             put_update(dst, &mut self.digest, header_bytes.as_ref());
-            if let Some((bytes, digest)) = item.data() {
+            if let Some((data, _)) = item.data() {
                 let offset = dst.len();
-                let len = bytes.len();
+                let len = data.len();
                 dst.reserve(len);
                 let padding = len % 512;
-                put_update(dst, &mut self.digest, &bytes);
+                put_update(dst, &mut self.digest, &data.bytes());
                 put_update(dst, &mut self.digest, &vec![0; 512 - padding]);
-                if let Some((opts, crc)) = item.opts().zip(item.crc()) {
-                    self.journal.push(JournalEntry::Record(RecordExtent {
-                        source: [0; 32],
-                        content: digest,
-                        offset: offset as u64,
-                        len: len as u32,
-                        crc,
-                        ts: header_bytes.last_modified(),
-                        opts: opts.encode(),
-                    }));
-                } else {
-                    self.journal.push(JournalEntry::Extent {
-                        source: [0; 32],
-                        content: digest,
-                        offset: offset as u64,
-                        len: len as u32,
-                    });
+                if let Some(journal_entry) = item.create_journal_entry(offset) {
+                    self.journal.push(journal_entry);
                 }
             }
             Ok(())
