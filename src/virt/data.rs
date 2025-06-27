@@ -16,13 +16,30 @@ pub struct VirtualData {
     mmap: Arc<Mmap>,
 }
 
+/// Slim virtual data only stores offset/len and the backing data
+///
+/// Can only be constructed from VirtualData which does the validation
+#[derive(Debug, Clone)]
+pub struct VirtualDataSlim {
+    /// Offset into the mmap
+    offset: usize,
+    /// Len of data
+    len: usize,
+    /// Memory-map handle to backing data
+    mmap: Arc<Mmap>,
+}
+
 impl VirtualData {
     /// Returns a new virtual ref, if the provided arguments are valid
     ///
     /// Returns an error if the source/content digests could not be verified
     #[inline]
     pub fn new(journaled: JournalEntry, mmap: Arc<Mmap>) -> std::io::Result<Self> {
-        let virt_ref = Self {  is_packed: false, journaled, mmap };
+        let virt_ref = Self {
+            is_packed: false,
+            journaled,
+            mmap,
+        };
         if virt_ref.is_valid() {
             Ok(virt_ref)
         } else {
@@ -36,11 +53,15 @@ impl VirtualData {
     /// Returns a new virtual ref, if the provided arguments are valid
     ///
     /// Returns an error if the source/content digests could not be verified
-    /// 
+    ///
     /// Sets the packed flag so that the source confirmation can account for zero bytes
     #[inline]
     pub fn new_packed(journaled: JournalEntry, mmap: Arc<Mmap>) -> std::io::Result<Self> {
-        let virt_ref = Self {  is_packed: true, journaled, mmap };
+        let virt_ref = Self {
+            is_packed: true,
+            journaled,
+            mmap,
+        };
         if virt_ref.is_valid() {
             Ok(virt_ref)
         } else {
@@ -84,9 +105,21 @@ impl VirtualData {
     pub fn materialize(&self) -> Option<Record> {
         match &self.journaled {
             JournalEntry::Record(record_extent) => {
-                record_extent.materialize(&Data::Virtual(self.clone()))
+                record_extent.materialize(&Data::Virtual(self.to_slim()))
             }
             _ => None,
+        }
+    }
+
+    /// Converts this reference into "slim" mode which removes the journal entry
+    /// metadata used for validation
+    #[inline]
+    pub fn to_slim(&self) -> VirtualDataSlim {
+        let (offset, len) = self.journaled.extent();
+        VirtualDataSlim {
+            offset: offset as usize,
+            len: len as usize,
+            mmap: self.mmap.clone(),
         }
     }
 }
@@ -103,5 +136,19 @@ impl Deref for VirtualData {
     fn deref(&self) -> &Self::Target {
         let (offset, len) = self.journaled.extent();
         &self.mmap[offset as usize..(offset + len as u64) as usize]
+    }
+}
+
+impl AsRef<[u8]> for VirtualDataSlim {
+    fn as_ref(&self) -> &[u8] {
+        &self
+    }
+}
+
+impl Deref for VirtualDataSlim {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.mmap[self.offset as usize..(self.offset + self.len)]
     }
 }

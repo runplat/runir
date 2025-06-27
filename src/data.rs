@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use sha2::{digest::Update, Sha256};
-use crate::virt::VirtualData;
+use crate::virt::VirtualDataSlim;
 
 /// Enumeration of different data implementations
 #[derive(Default, Debug, Clone)]
@@ -11,7 +11,7 @@ pub enum Data {
     /// Data is loaded into memory
     Bytes(Bytes),
     /// Data is stored virtually w/ a reference to a journal entry and mmap
-    Virtual(VirtualData),
+    Virtual(VirtualDataSlim),
 }
 
 impl Data {

@@ -1,19 +1,21 @@
 use super::{Header, JournalEntry, Sha256Digest, header::EMPTY_HEADER};
-use crate::{Data, Opts, Record, VirtualData};
+use crate::{Data, Opts, Record, virt::VirtualDataSlim};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
 
 /// Enumeration of archive entry types
 pub enum Entry {
     /// Record file entry
-    /// 
+    ///
     /// This will lazily call Record::archive(..) and allows for a record extent to be journaled
     Record(Record),
     /// Regular file entry
     Regular(FileEntry),
-    /// Entry can be found on disk
-    Journaled { header: Header, data: VirtualData },
+    /// Entry can be found on disk, and has been journaled
+    Journaled {
+        header: Header,
+        data: VirtualDataSlim,
+    },
     /// Reference entry
     Reference(FileEntryReference),
     /// Other entry type
@@ -47,22 +49,9 @@ pub struct FileEntry {
 }
 
 impl Entry {
-    /// Returns a new journaled entry
-    #[inline]
-    pub fn from_journal(
-        header: Header,
-        journaled: JournalEntry,
-        source: PathBuf,
-    ) -> std::io::Result<Self> {
-        let file = std::fs::File::open(source)?;
-        let mmap = unsafe { memmap2::Mmap::map(&file)? };
-        let data = VirtualData::new(journaled, std::sync::Arc::new(mmap))?;
-        Ok(Self::Journaled { header, data })
-    }
-
     /// Returns a new journaled entry from virtual data
     #[inline]
-    pub fn from_virtual(header: Header, data: VirtualData) -> Self {
+    pub fn from_virtual(header: Header, data: VirtualDataSlim) -> Self {
         Self::Journaled { header, data }
     }
 
@@ -108,7 +97,7 @@ impl Entry {
                 let data = Data::Virtual(data.clone());
                 let digest = data.digest().finalize().into();
                 Some((data, digest))
-            },
+            }
             Entry::Record(rec) => rec.archive().ok().and_then(|e| match e {
                 Entry::Regular(reg) => Some((Data::Bytes(reg.data), reg.digest.clone())),
                 Entry::Journaled { data, .. } => {
@@ -165,28 +154,12 @@ impl Entry {
                 len: file_entry.data.len() as u32,
             }),
             Entry::Journaled { header, data } => {
-                if let Some(record) = data.materialize() {
-                    let (id, data, ns_chk, ts, opts) = record.clone().into_parts();
-                    let (key, crc) = id.as_u64_pair();
-                    Some(JournalEntry::Record(crate::RecordExtent {
-                        source: [0; 32],
-                        content: data.digest().finalize().into(),
-                        offset: offset as u64,
-                        len: record.data().len() as u32,
-                        key,
-                        crc,
-                        ts,
-                        ns_chk,
-                        opts: opts.encode(),
-                    }))
-                } else {
-                    Some(JournalEntry::Extent {
-                        source: [0; 32],
-                        content: Data::Virtual(data.clone()).digest().finalize().into(),
-                        offset: offset as u64,
-                        len: header.size() as u32,
-                    })
-                }
+                Some(JournalEntry::Extent {
+                    source: [0; 32],
+                    content: Data::Virtual(data.clone()).digest().finalize().into(),
+                    offset: offset as u64,
+                    len: header.size() as u32,
+                })
             }
             _ => None,
         }

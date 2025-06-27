@@ -139,12 +139,6 @@ impl ArchiveMember {
 }
 
 impl StoreArchive {
-    /// Returns members in the store archive
-    #[inline]
-    pub fn members(&self) -> impl Iterator<Item = &ArchiveMember> {
-        self.archived.iter()
-    }
-
     /// "Unpacks" a store.tar and returns a StoreArchive
     ///
     /// The .tar is not actually unpacked as in it's files are not written to disk, instead
@@ -256,12 +250,6 @@ impl StoreArchive {
         })
     }
 
-    /// Returns the output path of the store.tar
-    #[inline]
-    pub fn store_tar_path(&self) -> PathBuf {
-        self.output_dir.join("store.tar")
-    }
-
     /// Packs worker archives from the output directory into a single store archive
     pub async fn pack(&self) -> std::io::Result<Manifest> {
         use futures::sink::SinkExt;
@@ -292,6 +280,18 @@ impl StoreArchive {
         let completed_dest = self.store_tar_path();
         std::fs::rename(dest, &completed_dest)?;
         Ok(manifest)
+    }
+
+    /// Returns the output path of the store.tar
+    #[inline]
+    pub fn store_tar_path(&self) -> PathBuf {
+        self.output_dir.join("store.tar")
+    }
+
+    /// Returns members in the store archive
+    #[inline]
+    pub fn members(&self) -> impl Iterator<Item = &ArchiveMember> {
+        self.archived.iter()
     }
 }
 
