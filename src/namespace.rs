@@ -9,7 +9,7 @@ use std::hash::Hash;
 
 /// Convenience function to explicitly convert to a namespace
 /// Enables fluent api for configuring the namespace
-pub trait ToNamespace : Into<Namespace> {
+pub trait ToNamespace: Into<Namespace> {
     /// Converts reference to a namespace
     #[inline]
     fn to_namespace(self) -> Namespace {
@@ -177,5 +177,13 @@ impl From<()> for Namespace {
 impl From<&str> for Namespace {
     fn from(value: &str) -> Self {
         Namespace::new(value)
+    }
+}
+
+impl std::fmt::Debug for Namespace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Namespace")
+            .field("ns_uuid", &self.ns_uuid())
+            .finish()
     }
 }

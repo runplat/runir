@@ -297,6 +297,8 @@ impl StoreArchive {
 
 #[cfg(test)]
 mod test {
+    use crate::IRecord;
+
     use super::*;
 
     #[tokio::test]

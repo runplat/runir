@@ -1,5 +1,5 @@
 use super::{Header, JournalEntry, Sha256Digest, header::EMPTY_HEADER};
-use crate::{Data, Opts, Record, virt::VirtualDataSlim};
+use crate::{virt::VirtualDataSlim, Data, IRecord, Opts, Record};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
@@ -139,7 +139,7 @@ impl Entry {
                     source: [0; 32],
                     content: data.digest().finalize().into(),
                     offset: offset as u64,
-                    len: record.data().len() as u32,
+                    len: record.bytes().len() as u32,
                     key,
                     crc,
                     ts,

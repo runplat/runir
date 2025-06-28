@@ -7,9 +7,7 @@ use bytes::Bytes;
 use crc::{CRC_64_MS, Crc, Digest};
 use serde::Deserialize;
 use std::{
-    io::Error,
-    sync::OnceLock,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    fmt::Debug, io::Error, sync::OnceLock, time::{Duration, SystemTime, UNIX_EPOCH}
 };
 use uuid::Uuid;
 
@@ -18,6 +16,86 @@ static CRC: OnceLock<Crc<u64>> = OnceLock::new();
 fn crc_digest() -> Digest<'static, u64> {
     CRC.get_or_init(|| Crc::<u64>::new(&CRC_64_MS)).digest()
 }
+
+/// IRecord provides an immutable front-end for record consumers and abstracts the inner type
+/// 
+/// Implementations must gurantee,
+/// 
+/// 1) The edge providing an IRecord must always do so from a source Record
+/// 2) An IRecord can be reversed into it's source Record
+/// 
+/// WIP
+pub trait IRecord : Debug {
+    /// Key that should be used when indexing a type that implements IRecord
+    fn index_key(&self) -> u64 {
+        self.uuid().as_u64_pair().0 ^ self.ns_chk()
+    }
+
+    /// Namespace::chk value
+    fn ns_chk(&self) -> u64;
+
+    /// Record UUID
+    fn uuid(&self) -> uuid::Uuid;
+
+    /// Record opts
+    fn opts(&self) -> &Opts;
+
+    /// Returns bytes that belong to this record
+    fn bytes(&self) -> &[u8];
+
+    /// Returns a flexbuffer reader over the flexbuffer root
+    /// 
+    /// Returns None if the current record data does not have a flexbuffer root
+    #[inline]
+    fn peek(&self) -> Option<flexbuffers::Reader<&[u8]>> {
+        flexbuffers::Reader::get_root(self.bytes()).ok()
+    }
+
+    /// Returns a clone of the source Record IRecord was created from
+    fn to_record(&self) -> Record;
+}
+
+impl IRecord for Record {
+    #[inline]
+    fn ns_chk(&self) -> u64 {
+        self.ns_chk
+    }
+
+    #[inline]
+    fn uuid(&self) -> uuid::Uuid {
+        self.key
+    }
+
+    #[inline]
+    fn opts(&self) -> &Opts {
+        &self.opts
+    }
+
+    #[inline]
+    fn bytes(&self) -> &[u8] {
+        self.data.bytes()
+    }
+
+    #[inline]
+    fn to_record(&self) -> Record {
+        self.clone()
+    }
+}
+
+pub trait PeekMap : IRecord {
+    /// Peeks at the flexbuffer root and return a value
+    ///
+    /// Returns None if data is not a flexbuffer root
+    #[inline]
+    fn peek_map<O>(
+        &self,
+        peek: impl Fn(flexbuffers::Reader<&[u8]>) -> O,
+    ) -> Option<O> {
+        self.peek().map(|d| peek(d))
+    }
+}
+
+impl<T: IRecord> PeekMap for T {}
 
 /// State for storing data into the database
 ///
@@ -84,24 +162,6 @@ impl Record {
         self.key.as_u64_pair().1
     }
 
-    /// Returns the current record uuid
-    #[inline]
-    pub fn uuid(&self) -> uuid::Uuid {
-        self.key
-    }
-
-    /// Returns a reference to the data stored in this record
-    #[inline]
-    pub fn data(&self) -> &Data {
-        &self.data
-    }
-
-    /// Returns the namespace checksum value
-    #[inline]
-    pub fn ns_chk(&self) -> u64 {
-        self.ns_chk
-    }
-
     /// Returns record parts
     #[inline]
     pub fn into_parts(self) -> (Uuid, Data, u64, u64, Opts) {
@@ -125,12 +185,6 @@ impl Record {
     pub fn with_opts(mut self, opts: Opts) -> Self {
         self.opts = opts;
         self
-    }
-
-    /// Returns current record opts
-    #[inline]
-    pub fn opts(&self) -> &Opts {
-        &self.opts
     }
 
     /// Returns a mutable reference to current record opts
@@ -196,25 +250,6 @@ impl Record {
         hi == label_key
     }
 
-    /// Returns a flexbuffer reader over the flexbuffer root
-    /// 
-    /// Returns None if the current record data does not have a flexbuffer root
-    #[inline]
-    pub fn peek(&self) -> Option<flexbuffers::Reader<&[u8]>> {
-        flexbuffers::Reader::get_root(self.data().bytes()).ok()
-    }
-
-    /// Peeks at the flexbuffer root and return a value
-    ///
-    /// Returns None if data is not a flexbuffer root
-    #[inline]
-    pub fn peek_map<O>(
-        &self,
-        peek: impl Fn(flexbuffers::Reader<&[u8]>) -> O,
-    ) -> Option<O> {
-        self.peek().map(|d| peek(d))
-    }
-
     /// Attempts to deserialize data to some type
     #[inline]
     pub fn load<'de, T: Deserialize<'de>>(&'de self) -> Option<T> {
@@ -250,7 +285,7 @@ impl Record {
         )?
         .set_defaults_for_archive();
         header.set_last_modified(self.ts)?;
-        header.set_size(self.data().len())?;
+        header.set_size(self.bytes().len())?;
         header.build()
     }
 

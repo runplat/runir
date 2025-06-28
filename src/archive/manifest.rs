@@ -1,5 +1,7 @@
 use std::io::Error;
 
+use crate::IRecord;
+
 use super::JournalEntry;
 
 /// Manifest is a footer entry of all archives that includes metadata, provenance information, etc.

@@ -1,5 +1,5 @@
 use super::TextMetadata;
-use crate::{archive::{JournalEntry, Sha256Digest}, virt::RecordExtent, Namespace, Record};
+use crate::{archive::{JournalEntry, Sha256Digest}, virt::RecordExtent, IRecord, Namespace, Record};
 use flexbuffers::{MapReader, Reader};
 use std::{collections::BTreeMap, fmt::Debug};
 use tracing::{debug, warn};
@@ -26,7 +26,7 @@ impl Indexer {
             let (hi, _) = record.uuid().as_u64_pair();
             let uuid_hi = hi ^ record.ns_chk();
 
-            if let Some(reader) = flexbuffers::Reader::get_root(record.data().bytes()).ok() {
+            if let Some(reader) = flexbuffers::Reader::get_root(record.bytes()).ok() {
                 if reader.flexbuffer_type().is_map() {
                     self.index_flexbuffer_map(uuid_hi, reader);
                 } else if reader.flexbuffer_type().is_vector() {

@@ -4,137 +4,455 @@ pub use indexer::Indexer;
 mod text;
 pub use text::TextMetadata;
 
-use crate::{Namespace, Record};
+mod namespaced;
+pub use namespaced::Namespaced;
 
-/// Begins a field query
+mod field;
+pub use field::Field;
+
+/// Trait to apply match conditions on a Record
+pub trait Matches: std::fmt::Debug {
+    /// Record frontend
+    type Record: crate::IRecord;
+
+    /// Returns true if record matches a condition
+    fn matches(&self, record: &Self::Record) -> bool;
+}
+
+/// Trait for types that enables query building
+pub trait QueryBuilder<'query, R: crate::IRecord + 'query> {
+    /// Sets the query to evaluate
+    fn set_query(&mut self, next: Query<'query, R>);
+
+    /// Gets the current query
+    fn get_query(&self) -> Option<Query<'query, R>>;
+
+    /// Logical AND w/ query over existing query
+    fn and(mut self, query: impl Into<Query<'query, R>>) -> Self
+    where
+        Self: Sized + 'query,
+    {
+        let query = query.into();
+        if let Some(existing) = self.get_query() {
+            self.set_query(
+                Filter(std::sync::Arc::new(move |r| {
+                    existing.matches(r) && query.matches(r)
+                }))
+                .into(),
+            );
+        } else {
+            self.set_query(query);
+        }
+        self
+    }
+
+    /// Logical OR w/ query over existing query
+    fn or(mut self, query: impl Into<Query<'query, R>>) -> Self
+    where
+        Self: Sized + 'query,
+    {
+        let query = query.into();
+        if let Some(existing) = self.get_query() {
+            self.set_query(
+                Filter(std::sync::Arc::new(move |r| {
+                    existing.matches(r) || query.matches(r)
+                }))
+                .into(),
+            );
+        } else {
+            self.set_query(query);
+        }
+        self
+    }
+}
+
+/// Wraps query components for use w/ search infrastructure
+#[derive(Debug)]
+pub struct Query<'query, R> {
+    matches: std::sync::Arc<dyn Matches<Record = R> + 'query>,
+}
+
+impl<'query, R> Clone for Query<'query, R> {
+    fn clone(&self) -> Self {
+        Self {
+            matches: self.matches.clone(),
+        }
+    }
+}
+
+impl<'query, R: crate::IRecord> Query<'query, R> {
+    /// Returns true if the record matches the expected query parameters
+    #[inline]
+    pub fn matches(&self, record: &R) -> bool {
+        self.matches.matches(record)
+    }
+}
+
+/// Wraps a closure that implements Matches/LayeredQuery
+pub struct Filter<'q, R>(std::sync::Arc<dyn Fn(&R) -> bool + 'q>);
+
+impl<'q, R> Clone for Filter<'q, R> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+/// Begins a record filter query
 #[inline]
-pub fn field<'query>(field: &'query str) -> Field<'query> {
-    Field { field }
+pub fn filter<'q, R>(filter: impl Fn(&R) -> bool + 'q) -> Filter<'q, R> {
+    Filter(std::sync::Arc::new(filter))
+}
+
+/// Begins a field query, checks a record to see if a field is set
+///
+/// Note: This will not search nested fields
+#[inline]
+pub fn field<'query, R: crate::IRecord + 'query>(field: &'query str) -> Field<'query, R> {
+    Field {
+        field,
+        query: Some(
+            filter::<R>(move |record| {
+                use crate::PeekMap;
+                record
+                    .peek_map(|r| {
+                        let is_field_set = !r.as_map().idx(field).flexbuffer_type().is_null();
+                        is_field_set
+                    })
+                    .unwrap_or_default()
+            })
+            .into(),
+        ),
+    }
+}
+
+/// Begins a field query, checks a record to see if a field is set and is a str type
+///
+/// Note: This will not search nested fields
+#[inline]
+pub fn string<'query, R: crate::IRecord + 'query>(field: &'query str) -> Field<'query, R> {
+    Field {
+        field,
+        query: Some(
+            filter::<R>(move |record| {
+                use crate::PeekMap;
+                record
+                    .peek_map(|r| {
+                        let is_field_set = r.as_map().idx(field).flexbuffer_type().is_string();
+                        is_field_set
+                    })
+                    .unwrap_or_default()
+            })
+            .into(),
+        ),
+    }
 }
 
 /// Begins a namespace scoped query
 #[inline]
-pub fn namespace<'query>(ns: impl Into<Namespace>) -> Namespaced<'query> {
+pub fn namespace<'query, R: crate::IRecord + 'query>(
+    ns: impl Into<crate::Namespace>,
+) -> Namespaced<'query, R> {
+    let namespace = ns.into();
+    let ns_chk = namespace.chk();
     Namespaced {
-        namespace: ns.into(),
-        key: None,
-        query: None,
+        namespace,
+        query: Some(filter::<R>(move |record| record.ns_chk() == ns_chk).into()),
     }
 }
 
-pub trait Matches<'query> {
-    fn matches(&'query self, record: &Record) -> bool;
+/// Applies logical NOT to the result of query.matches(..)
+///
+/// i.e. !query.matches(..)
+#[inline]
+pub fn not<'query, R: crate::IRecord + 'query>(
+    query: impl Into<Query<'query, R>>,
+) -> Query<'query, R> {
+    let query = query.into();
+
+    filter(move |r| !query.matches(r)).into()
 }
 
-#[derive(Clone)]
-pub enum Query<'query> {
-    /// Query a field
-    Field(Field<'query>),
-    /// Check if a field contains a value
-    Contains(Contains<'query>),
-    /// Namespaced scoped query
-    Namespaced(Box<Namespaced<'query>>),
+impl<'q, R> std::fmt::Debug for Filter<'q, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("QueryFn").finish()
+    }
 }
 
-impl<'query> Matches<'query> for Query<'query> {
-    /// Returns true if record matches the query parameters
+impl<'query, R: crate::IRecord> Matches for Option<Query<'query, R>> {
+    type Record = R;
+
     #[inline]
-    fn matches(&self, record: &Record) -> bool {
-        match self {
-            Query::Field(field) => record
-                .peek_map(|r| !r.as_map().idx(field.field).flexbuffer_type().is_null())
-                .unwrap_or_default(),
-            Query::Contains(contains) => record
-                .peek_map(|r| {
-                    r.as_map()
-                        .idx(contains.field)
-                        .as_str()
-                        .contains(contains.contains)
-                })
-                .unwrap_or_default(),
-            Query::Namespaced(namespaced) => namespaced.matches(record),
+    fn matches(&self, record: &Self::Record) -> bool {
+        self.as_ref().map(|q| q.matches(record)).unwrap_or(true)
+    }
+}
+
+impl<'query, R: crate::IRecord> Matches for fn(&R) -> bool {
+    type Record = R;
+
+    #[inline]
+    fn matches(&self, record: &Self::Record) -> bool {
+        (self)(record)
+    }
+}
+
+impl<'query, R: crate::IRecord> Matches for Filter<'query, R> {
+    type Record = R;
+
+    #[inline]
+    fn matches(&self, record: &Self::Record) -> bool {
+        (self.0)(record)
+    }
+}
+
+impl<'query, T: Matches + 'query> From<T> for Query<'query, T::Record> {
+    #[inline]
+    fn from(value: T) -> Self {
+        Self {
+            matches: std::sync::Arc::new(value),
         }
     }
 }
 
-impl<'query> From<Namespaced<'query>> for Query<'query> {
-    fn from(value: Namespaced<'query>) -> Self {
-        Self::Namespaced(Box::new(value))
-    }
-}
-
-impl<'query> From<Field<'query>> for Query<'query> {
-    fn from(value: Field<'query>) -> Self {
-        Self::Field(value)
-    }
-}
-
-impl<'query> From<Contains<'query>> for Query<'query> {
-    fn from(value: Contains<'query>) -> Self {
-        Self::Contains(value)
-    }
-}
-
-#[derive(Clone)]
-pub struct Namespaced<'query> {
-    namespace: Namespace,
-    key: Option<u64>,
-    query: Option<Query<'query>>,
-}
-
-impl<'query> Namespaced<'query> {
-    /// Sets the key for the namespaced query scope
+impl<'q, R: crate::IRecord + 'q> QueryBuilder<'q, R> for Filter<'q, R> {
     #[inline]
-    pub fn key(mut self, key: &str) -> Self {
-        self.key = Some(self.namespace.key(key));
-        self
+    fn set_query(&mut self, next: Query<'q, R>) {
+        *self = Filter(std::sync::Arc::new(move |r| next.matches(r)));
     }
 
-    /// Sets the query for the namespaced query scope
     #[inline]
-    pub fn query(mut self, query: impl Into<Query<'query>>) -> Self {
-        self.query = Some(query.into());
-        self
+    fn get_query(&self) -> Option<Query<'q, R>> {
+        Some(self.clone().into())
     }
 }
 
-impl<'query> Matches<'query> for Namespaced<'query> {
-    /// Returns true if record matches the query parameters
+impl<'q, R: crate::IRecord + 'q> QueryBuilder<'q, R> for Query<'q, R> {
     #[inline]
-    fn matches(&self, record: &Record) -> bool {
-        record.ns_chk() == self.namespace.chk()
-            && self
-                .key
-                .map(|k| record.uuid().as_u64_pair().0 == k)
-                .unwrap_or(true)
-            && self
-                .query
-                .as_ref()
-                .map(|q| q.matches(record))
-                .unwrap_or(true)
+    fn set_query(&mut self, next: Query<'q, R>) {
+        *self = next;
+    }
+
+    #[inline]
+    fn get_query(&self) -> Option<Query<'q, R>> {
+        Some(self.clone().into())
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Field<'query> {
-    field: &'query str,
-}
+#[cfg(test)]
+mod test {
+    use crate::{Namespace, namespace, not, query::Matches};
+    use toml::toml;
 
-#[derive(Clone, Copy, Debug)]
-pub struct Contains<'query> {
-    field: &'query str,
-    contains: &'query str,
-}
+    use super::{QueryBuilder, field, string};
 
-impl<'query> Field<'query> {
-    /// Finds a field that contains value,
-    ///
-    /// Note: implies field is a str type
-    #[inline]
-    pub fn contains(self, contains: &'query str) -> Contains<'query> {
-        Contains {
-            field: &self.field,
-            contains,
-        }
+    #[test]
+    fn test_field() {
+        let filter = field("value");
+
+        let ns = Namespace::ephemeral();
+
+        let rec = ns.store(
+            "record_1",
+            &toml! {
+                value = "foo"
+            },
+        );
+        assert!(filter.matches(&rec));
+
+        let rec = ns.store(
+            "record_1",
+            &toml! {
+                not_value = "foo"
+            },
+        );
+        assert!(!filter.matches(&rec))
+    }
+
+    #[test]
+    fn test_field_contains() {
+        let filter = field("value").contains("fo");
+
+        let ns = Namespace::ephemeral();
+
+        let rec = ns.store(
+            "record_1",
+            &toml! {
+                value = "foo"
+            },
+        );
+        assert!(filter.matches(&rec));
+
+        let rec = ns.store(
+            "record_1",
+            &toml! {
+                value = "bar"
+            },
+        );
+        assert!(!filter.matches(&rec))
+    }
+
+    #[test]
+    fn test_namespace() {
+        let ns = Namespace::ephemeral();
+        let ns_filter = namespace(ns.clone());
+
+        let rec = ns.store(
+            "record_1",
+            &toml! {
+                value = "foo"
+            },
+        );
+        assert!(ns_filter.matches(&rec));
+
+        let other_ns = Namespace::ephemeral();
+        let rec = other_ns.store(
+            "record_1",
+            &toml! {
+                value = "foo"
+            },
+        );
+        assert!(!ns_filter.matches(&rec));
+    }
+
+    #[test]
+    fn test_labeled() {
+        let ns = Namespace::ephemeral();
+        let ns_filter = namespace(ns.clone()).label("record_1");
+
+        let rec = ns.store(
+            "record_1",
+            &toml! {
+                value = "foo"
+            },
+        );
+        assert!(ns_filter.matches(&rec));
+
+        let rec = ns.store(
+            "record_2",
+            &toml! {
+                value = "foo"
+            },
+        );
+        assert!(!ns_filter.matches(&rec));
+
+        let other_ns = Namespace::ephemeral();
+        let rec = other_ns.store(
+            "record_1",
+            &toml! {
+                value = "foo"
+            },
+        );
+        assert!(!ns_filter.matches(&rec));
+    }
+
+    #[test]
+    fn test_query_builder_and() {
+        let filter_1 = field("value").and(field("other_value"));
+        let filter_2 = field("value").and(field("other_value").contains("h"));
+
+        let ns = Namespace::ephemeral();
+
+        let rec = ns.store(
+            "record_1",
+            &toml! {
+                value = "foo"
+                other_value = "bar"
+            },
+        );
+        assert!(filter_1.matches(&rec));
+        assert!(!filter_2.matches(&rec));
+
+        let rec = ns.store(
+            "record_2",
+            &toml! {
+                value = "foo"
+                other_value = "hello"
+            },
+        );
+        assert!(filter_1.matches(&rec));
+        assert!(filter_2.matches(&rec));
+    }
+
+    #[test]
+    fn test_query_builder_or() {
+        let filter_1 = field("value").or(field("other_value"));
+        let filter_2 = field("not_value").or(field("other_value").contains("h"));
+
+        let ns = Namespace::ephemeral();
+
+        let rec = ns.store(
+            "record_1",
+            &toml! {
+                value = "foo"
+                other_value = "bar"
+            },
+        );
+        assert!(filter_1.matches(&rec));
+        assert!(!filter_2.matches(&rec));
+
+        let rec = ns.store(
+            "record_2",
+            &toml! {
+                value = "foo"
+                other_value = "hello"
+            },
+        );
+        assert!(filter_1.matches(&rec));
+        assert!(filter_2.matches(&rec));
+    }
+
+    #[test]
+    fn test_query_not() {
+        let filter_1 = not(field("value"));
+        let filter_2 = not(field("value").contains("hello"));
+
+        let ns = Namespace::ephemeral();
+
+        let rec = ns.store(
+            "record_1",
+            &toml! {
+                value = "foo"
+                other_value = "bar"
+            },
+        );
+        assert!(!filter_1.matches(&rec));
+        assert!(filter_2.matches(&rec));
+
+        let rec = ns.store(
+            "record_2",
+            &toml! {
+                value = "foo"
+                other_value = "hello"
+            },
+        );
+        assert!(!filter_1.matches(&rec));
+        assert!(filter_2.matches(&rec));
+
+        let rec = ns.store(
+            "record_3",
+            &toml! {
+                unique_value = ""
+            },
+        );
+        assert!(filter_1.matches(&rec));
+        assert!(filter_2.matches(&rec));
+    }
+
+    #[test]
+    fn test_field_string() {
+        let filter = string("value");
+        let ns = Namespace::ephemeral();
+        let rec = ns.store(
+            "record_1",
+            &toml! {
+                a = 1
+                b = 2
+                c = 3
+                ab = true
+                bc = false
+                value = "foo"
+            },
+        );
+        assert!(filter.matches(&rec))
     }
 }
