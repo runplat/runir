@@ -1,3 +1,5 @@
+use tracing::debug;
+
 use crate::{
     Record, Store, VecIndex,
     store::{ArchiveMember, StoreArchive},
@@ -35,8 +37,8 @@ pub struct State {
 pub enum Snapshot {
     /// Default from work_dir
     Default,
-    // /// Imported from a pack
-    // Imported(PathBuf),
+    /// Imported from a pack
+    Imported(PathBuf),
 }
 
 impl State {
@@ -97,16 +99,39 @@ impl State {
         };
 
         archive.pack().await?;
+        debug!("saved store arcive to dir {:?}", archive.output_dir);
         Ok(())
     }
 
-    /// Loads state from an work_dir
+    /// Imports a store_archive into state
+    #[inline]
+    pub async fn import(&self, store_tar: impl AsRef<Path>) -> std::io::Result<()> {
+        let restored = StoreArchive::unpack(store_tar.as_ref()).await?;
+        let mut imported = VecIndex::default();
+        for member in restored.members() {
+            let records = member.get_records().await?;
+
+            for r in records {
+                imported.index(r.clone());
+            }
+        }
+
+        self.snapshots.insert(
+            Snapshot::Imported(store_tar.as_ref().to_path_buf()),
+            imported.into(),
+        );
+        debug!("imported {:?} to state", store_tar.as_ref());
+        Ok(())
+    }
+
+    /// Loads state from a {WORK_DIR}/store.tar file
+    #[inline]
     pub async fn load(work_dir: impl Into<PathBuf>) -> std::io::Result<Self> {
         let work_dir = work_dir.into();
         let restored = StoreArchive::unpack(work_dir.join("store.tar")).await?;
 
         let mut state = Self::default();
-        state.store = Store::work_dir(work_dir);
+        state.store = Store::work_dir(&work_dir);
 
         let mut snapshot = VecIndex::<Record>::default();
         for mem in restored.members() {
@@ -117,6 +142,7 @@ impl State {
         state
             .snapshots
             .insert(Snapshot::Default, Arc::new(snapshot));
+        debug!("loaded state from {:?}", work_dir);
         Ok(state)
     }
 }

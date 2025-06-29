@@ -64,6 +64,22 @@ pub struct KeyValue {
     shared: SharedState,
 }
 
+/// Returns true if the "default" store exists
+///
+/// Returns an error if file system permissions do not exist
+pub fn default_store_exists() -> std::io::Result<bool> {
+    let dot_folder = format!(".{}", env!("CARGO_PKG_NAME"));
+    let dir = std::env::var("RUNIR_WORK_DIR")
+        .map(|w| PathBuf::from(w))
+        .ok()
+        .unwrap_or(std::env::current_dir()?.join(&dot_folder));
+
+    Ok(dir.join("store.tar").exists())
+}
+
+/// Returns a path to the default "save" directory
+///
+/// Returns an error if file system permissions do not exist
 pub fn default_save_dir() -> std::io::Result<PathBuf> {
     let dot_folder = format!(".{}", env!("CARGO_PKG_NAME"));
     let dir = std::env::var("RUNIR_WORK_DIR")
@@ -86,6 +102,15 @@ pub fn default_save_dir() -> std::io::Result<PathBuf> {
 }
 
 impl KeyValue {
+    /// Returns an empty KeyValue store
+    ///
+    /// The default WORK_DIR will be set to a temp directory
+    pub fn new() -> Self {
+        let shared = SharedState::default();
+        let worker = shared.store().namespace("default");
+        Self { worker, shared }
+    }
+
     /// Opens a new key-value store
     ///
     /// Note: This store is *ephemeral* until `save()` or `save_as()` is called.
@@ -112,8 +137,12 @@ impl KeyValue {
     ///
     /// WARN: If the current process does not have permissions for any of the above procedures, an error will be returned.
     pub async fn open() -> std::io::Result<KeyValue> {
-        let save_dir = default_save_dir()?;
-        let state = State::load(save_dir).await?;
+        let state = if default_store_exists()? {
+            let save_dir = default_save_dir()?;
+            State::load(save_dir).await?
+        } else {
+            State::default()
+        };
 
         let mut shared = SharedState::from(state);
         shared.update_snapshot();
@@ -367,19 +396,13 @@ impl<'get> Get<'get, &'get [u8]> for KeyValue {
 
 #[cfg(test)]
 mod test {
+    use std::path::PathBuf;
     use super::{Get, KeyValue, Put};
-    use crate::frontend::state::SharedState;
     use crate::{QueryBuilder, Record, field, filter, namespace};
 
     #[test]
     fn test_kv_put_get() {
-        let state = SharedState::default();
-
-        let worker = state.store().namespace("default");
-        let mut kv = KeyValue {
-            worker,
-            shared: state,
-        };
+        let mut kv = KeyValue::new();
 
         kv.put("hello", b"hello").unwrap().forget();
 
@@ -388,14 +411,7 @@ mod test {
 
     #[test]
     fn test_kv_put_get_serde() {
-        let state = SharedState::default();
-
-        let worker = state.store().namespace("default");
-        let mut kv = KeyValue {
-            worker,
-            shared: state,
-        }
-        .serde();
+        let mut kv = KeyValue::new().serde();
 
         kv.put(
             "hello",
@@ -435,10 +451,7 @@ mod test {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_kv_bg_sync() {
-        let shared = SharedState::default();
-
-        let worker = shared.store().namespace("default");
-        let mut kv = KeyValue { worker, shared }.serde();
+        let mut kv = KeyValue::new().serde();
 
         kv.put(
             "hello",
@@ -528,5 +541,21 @@ mod test {
             )
             .count();
         assert_eq!(1, count);
+
+        kv.shared.state.import(".test/store.tar").await.unwrap();
+        let imported = kv
+            .shared
+            .state
+            .snapshot(crate::frontend::state::Snapshot::Imported(PathBuf::from(
+                ".test/store.tar",
+            )));
+
+        let hello2 = imported.lookup("default", "hello2").unwrap();
+        assert_eq!(
+            "another hello",
+            hello2.load::<toml::Value>().unwrap()["other"]["values"]["also_important"]
+                .as_str()
+                .unwrap()
+        );
     }
 }

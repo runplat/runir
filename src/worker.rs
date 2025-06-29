@@ -177,6 +177,7 @@ impl Worker {
             let packer = settings.packer().clone();
 
             let handle = crate::util::spawn(async move {
+                // TODO: Make this output stream modular, good enough for now
                 let output = tokio::fs::File::create_new(&output_path).await?;
                 let stream = futures::stream::iter(entries);
                 let manifest = archive_to(stream, output).await?;
