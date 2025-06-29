@@ -123,11 +123,13 @@ impl KeyValue {
     /// This allows fast, in-memory operation by default, without requiring setup.
     ///
     /// (See KeyValue::save for details on operational behavior)
+    #[inline]
     pub async fn save_as(&self, _to: impl Into<PathBuf>) -> std::io::Result<()> {
         todo!()
     }
 
     /// Returns a new key-value store scoped to a namespace
+    #[inline]
     pub fn ns(&self, ns: impl Into<Namespace>) -> KeyValue {
         let ns = ns.into();
 

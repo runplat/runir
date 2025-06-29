@@ -106,11 +106,6 @@ fn put_update(dst: &mut bytes::BytesMut, digester: &mut Sha256, content: &[u8]) 
     digester.update(content);
 }
 
-fn put_update_2(dst: &mut futures_codec::BytesMut, digester: &mut Sha256, content: &[u8]) {
-    dst.extend(content);
-    digester.update(content);
-}
-
 impl Encoder<Entry> for TapeEncoder {
     type Error = std::io::Error;
 
@@ -136,38 +131,6 @@ impl Encoder<Entry> for TapeEncoder {
                 let padding = len % 512;
                 put_update(dst, &mut self.digest, &data.bytes());
                 put_update(dst, &mut self.digest, &vec![0; 512 - padding]);
-                if let Some(journal_entry) = item.create_journal_entry(offset) {
-                    self.journal.push(journal_entry);
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-impl futures_codec::Encoder for TapeEncoder {
-    type Item = Entry;
-
-    type Error = std::io::Error;
-
-    fn encode(&mut self, item: Self::Item, dst: &mut futures_codec::BytesMut) -> Result<(), Self::Error> {
-        if item.is_zeroes() {
-            dst.reserve(512 * 2);
-            let zero_block = zero_block();
-            put_update_2(dst, &mut self.digest, &zero_block);
-            put_update_2(dst, &mut self.digest, &zero_block);
-            Ok(())
-        } else {
-            dst.reserve(item.header().size());
-            let header_bytes = item.header();
-            put_update_2(dst, &mut self.digest, header_bytes.as_ref());
-            if let Some((data, _)) = item.data() {
-                let offset = dst.len();
-                let len = data.len();
-                dst.reserve(len);
-                let padding = len % 512;
-                put_update_2(dst, &mut self.digest, &data.bytes());
-                put_update_2(dst, &mut self.digest, &vec![0; 512 - padding]);
                 if let Some(journal_entry) = item.create_journal_entry(offset) {
                     self.journal.push(journal_entry);
                 }
