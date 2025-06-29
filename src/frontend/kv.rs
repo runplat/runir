@@ -217,6 +217,19 @@ impl KeyValue {
             self.worker.cache().search(q)
         }
     }
+
+    /// Lookup a record in the current namespace
+    #[inline]
+    fn lookup(&self, label: &str) -> Option<&Record> {
+        self.worker
+            .cache()
+            .lookup(self.worker.namespace().clone(), label)
+            .or_else(|| {
+                self.shared
+                    .snapshot()
+                    .and_then(|s| s.lookup(self.worker.namespace().clone(), label))
+            })
+    }
 }
 
 /// Wraps a key-value store and provides a put/get interface that is aware of serde-values
@@ -330,17 +343,7 @@ impl<V: AsRef<[u8]>> Put<V> for KeyValue {
 
 impl<'get, V: Deserialize<'get> + 'get> Get<'get, V> for KeySerdeValue {
     fn get<'from: 'get>(&'from self, key: &str) -> std::io::Result<V> {
-        match self
-            .worker
-            .cache()
-            .lookup(self.worker.namespace().clone(), key)
-            .and_then(|r| r.load())
-            .or_else(|| {
-                self.shared
-                    .snapshot()
-                    .and_then(|s| s.lookup(self.worker.namespace().clone(), key))
-                    .and_then(|r| r.load())
-            }) {
+        match self.lookup(key).and_then(|r| r.load::<V>()) {
             Some(r) => Ok(r),
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -352,17 +355,7 @@ impl<'get, V: Deserialize<'get> + 'get> Get<'get, V> for KeySerdeValue {
 
 impl<'get> Get<'get, &'get [u8]> for KeyValue {
     fn get<'from: 'get>(&'from self, key: &str) -> std::io::Result<&'get [u8]> {
-        match self
-            .worker
-            .cache()
-            .lookup(self.worker.namespace().clone(), key)
-            .map(|r| r.bytes())
-            .or_else(|| {
-                self.shared
-                    .snapshot()
-                    .and_then(|s| s.lookup(self.worker.namespace().clone(), key))
-                    .map(|r| r.bytes())
-            }) {
+        match self.lookup(key).map(|r| r.bytes()) {
             Some(r) => Ok(r),
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
