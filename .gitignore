@@ -2,3 +2,4 @@
 test*
 .test
 .runir
+.DS_store

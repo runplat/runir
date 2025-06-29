@@ -1,5 +1,5 @@
 use crate::{
-    Namespace, Record, Store, VecIndex,
+    Record, Store, VecIndex,
     store::{ArchiveMember, StoreArchive},
 };
 use std::{
@@ -74,15 +74,6 @@ impl State {
             updated = true;
         }
         updated
-    }
-
-    /// Performs a lookup from the default snapshot
-    #[inline]
-    pub fn lookup(&self, ns: impl Into<Namespace>, key: &str) -> Option<Record> {
-        self.snapshots
-            .get(&Snapshot::Default)
-            .and_then(|s| s.try_map(|f| f.lookup(ns, key)).ok())
-            .map(|r| r.clone())
     }
 
     /// Returns a stored snapshot
