@@ -1,14 +1,15 @@
 use crate::{
-    IRecord, Namespace, Query, Queue, Record, Store, Worker, search::iter::Search,
-    store::StoreArchive, worker::BackgroundSync,
+    IRecord, Namespace, Query, Record, Worker, search::iter::Search, worker::BackgroundSync,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     io::Error,
     ops::{Deref, DerefMut},
     path::PathBuf,
-    sync::Arc,
 };
+use tracing::{debug, trace};
+
+use super::state::{SharedState, State};
 
 /// Provides a put(..) function that takes a serializable object as the value
 pub trait Put<V> {
@@ -59,7 +60,29 @@ pub trait Get<'get, V: 'get> {
 pub struct KeyValue {
     /// Namespace all keys will be indexed under
     worker: Worker,
-    state: SharedState,
+    /// State that is shared across all workers
+    shared: SharedState,
+}
+
+pub fn default_save_dir() -> std::io::Result<PathBuf> {
+    let dot_folder = format!(".{}", env!("CARGO_PKG_NAME"));
+    let dir = std::env::var("RUNIR_WORK_DIR")
+        .map(|w| PathBuf::from(w))
+        .ok()
+        .unwrap_or(std::env::current_dir()?.join(&dot_folder));
+
+    if !dir.exists() && dir.ends_with(dot_folder) {
+        debug!("Creating .runir folder {dir:?}");
+        std::fs::create_dir(&dir)?;
+    } else if !dir.exists() {
+        // Since this is passed into the process, do not attempt to create directory unless opt-in
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Directory set in RUNIR_WORK_DIR must exist",
+        ));
+    }
+
+    Ok(dir)
 }
 
 impl KeyValue {
@@ -89,7 +112,15 @@ impl KeyValue {
     ///
     /// WARN: If the current process does not have permissions for any of the above procedures, an error will be returned.
     pub async fn open() -> std::io::Result<KeyValue> {
-        todo!()
+        let save_dir = default_save_dir()?;
+        let state = State::load(save_dir).await?;
+
+        let mut shared = SharedState::from(state);
+        shared.update_snapshot();
+        Ok(KeyValue {
+            worker: shared.store().namespace("default"),
+            shared,
+        })
     }
 
     /// Saves the current state of the store to a well-known directory
@@ -110,7 +141,9 @@ impl KeyValue {
     ///
     /// WARN: If the current process does not have permissions for any of the above procedures, an error will be returned.
     pub async fn save(&self) -> std::io::Result<()> {
-        todo!()
+        let save_dir = default_save_dir()?;
+        self.shared.state.save(save_dir).await?;
+        Ok(())
     }
 
     /// Saves the current state of the store to a user-specified directory
@@ -124,8 +157,8 @@ impl KeyValue {
     ///
     /// (See KeyValue::save for details on operational behavior)
     #[inline]
-    pub async fn save_as(&self, _to: impl Into<PathBuf>) -> std::io::Result<()> {
-        todo!()
+    pub async fn save_as(&self, to: impl Into<PathBuf>) -> std::io::Result<()> {
+        self.shared.state.save(to.into()).await
     }
 
     /// Returns a new key-value store scoped to a namespace
@@ -134,8 +167,8 @@ impl KeyValue {
         let ns = ns.into();
 
         Self {
-            worker: self.state.store().namespace(ns),
-            state: self.state.clone(),
+            worker: self.shared.store().namespace(ns),
+            shared: self.shared.clone(),
         }
     }
 
@@ -145,12 +178,29 @@ impl KeyValue {
         KeySerdeValue {
             kv: KeyValue {
                 worker: self
-                    .state
+                    .shared
                     .store()
                     .namespace(self.worker.namespace().clone()),
-                state: self.state.clone(),
+                shared: self.shared.clone(),
             },
         }
+    }
+
+    /// Refreshes the key value store's indexes
+    #[inline]
+    pub fn refresh(&mut self) {
+        if let Some(member_path) = self.worker.archive_member_path() {
+            let updated = self
+                .shared
+                .state
+                .refresh_index(&member_path, self.worker.cache_mut());
+            trace!(
+                updated,
+                member = member_path.to_string_lossy().to_string(),
+                "kv_refresh"
+            );
+        }
+        self.shared.update_snapshot();
     }
 
     /// Searches over stored records w/ a query
@@ -159,10 +209,13 @@ impl KeyValue {
         &'q self,
         query: impl Into<Query<'q, Record>>,
     ) -> impl Iterator<Item = &'q Record> {
-        self.worker.cache().search(query)
+        let q = query.into();
 
-        // TODO: For now this searches the local worker cache
-        // Will add the search functionality over the entire StoreArchive once the sync/flush code is finished
+        if let Some(store) = self.shared.snapshot() {
+            store.search(q)
+        } else {
+            self.worker.cache().search(q)
+        }
     }
 }
 
@@ -182,6 +235,12 @@ impl KeySerdeValue {
             .get(key)
             .ok()
             .and_then(|r| flexbuffers::Reader::get_root(r).ok())
+            .or_else(|| {
+                self.shared
+                    .snapshot()
+                    .and_then(|s| s.lookup(self.worker.namespace().clone(), key))
+                    .and_then(|r| flexbuffers::Reader::get_root(r.bytes()).ok())
+            })
     }
 
     /// Loads an object from the store
@@ -276,7 +335,12 @@ impl<'get, V: Deserialize<'get> + 'get> Get<'get, V> for KeySerdeValue {
             .cache()
             .lookup(self.worker.namespace().clone(), key)
             .and_then(|r| r.load())
-        {
+            .or_else(|| {
+                self.shared
+                    .snapshot()
+                    .and_then(|s| s.lookup(self.worker.namespace().clone(), key))
+                    .and_then(|r| r.load())
+            }) {
             Some(r) => Ok(r),
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -293,7 +357,12 @@ impl<'get> Get<'get, &'get [u8]> for KeyValue {
             .cache()
             .lookup(self.worker.namespace().clone(), key)
             .map(|r| r.bytes())
-        {
+            .or_else(|| {
+                self.shared
+                    .snapshot()
+                    .and_then(|s| s.lookup(self.worker.namespace().clone(), key))
+                    .map(|r| r.bytes())
+            }) {
             Some(r) => Ok(r),
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -303,45 +372,21 @@ impl<'get> Get<'get, &'get [u8]> for KeyValue {
     }
 }
 
-struct Shared {
-    /// Immediate Store, for immediate put/get requests
-    store: Store,
-    /// Last snapshot of records
-    pending: Queue<StoreArchive>,
-}
-
-struct SharedState(Arc<Shared>);
-
-impl SharedState {
-    /// Returns a the current store
-    fn store(&self) -> &Store {
-        &self.0.store
-    }
-}
-
-impl Clone for SharedState {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
-
-    use crate::{Record, Store, field, filter};
-
-    use super::{Get, KeyValue, Put, SharedState};
+    use super::{Get, KeyValue, Put};
+    use crate::frontend::state::SharedState;
+    use crate::{QueryBuilder, Record, field, filter, namespace};
 
     #[test]
     fn test_kv_put_get() {
-        let state = SharedState(Arc::new(super::Shared {
-            store: Store::default(),
-            pending: Default::default(),
-        }));
+        let state = SharedState::default();
 
         let worker = state.store().namespace("default");
-        let mut kv = KeyValue { worker, state };
+        let mut kv = KeyValue {
+            worker,
+            shared: state,
+        };
 
         kv.put("hello", b"hello").unwrap().forget();
 
@@ -350,13 +395,14 @@ mod test {
 
     #[test]
     fn test_kv_put_get_serde() {
-        let state = SharedState(Arc::new(super::Shared {
-            store: Store::default(),
-            pending: Default::default(),
-        }));
+        let state = SharedState::default();
 
         let worker = state.store().namespace("default");
-        let mut kv = KeyValue { worker, state }.serde();
+        let mut kv = KeyValue {
+            worker,
+            shared: state,
+        }
+        .serde();
 
         kv.put(
             "hello",
@@ -394,14 +440,12 @@ mod test {
     }
 
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn test_kv_bg_sync() {
-        let state = SharedState(Arc::new(super::Shared {
-            store: Store::default(),
-            pending: Default::default(),
-        }));
+        let shared = SharedState::default();
 
-        let worker = state.store().namespace("default");
-        let mut kv = KeyValue { worker, state }.serde();
+        let worker = shared.store().namespace("default");
+        let mut kv = KeyValue { worker, shared }.serde();
 
         kv.put(
             "hello",
@@ -415,6 +459,21 @@ mod test {
         .unwrap()
         .await
         .unwrap();
+
+        let mut parallel_ns = kv.ns("default").serde();
+        parallel_ns
+            .put(
+                "hello2",
+                &toml::toml! {
+                    value = "another really important value"
+
+                    [other.values]
+                    also_important = "another hello"
+                },
+            )
+            .unwrap()
+            .await
+            .unwrap();
 
         assert_eq!(
             "hello",
@@ -438,16 +497,43 @@ mod test {
             .count()
         );
 
+        kv.shared.state.flush().await.unwrap();
+        kv.refresh();
+        assert!(
+            kv.worker
+                .cache()
+                .lookup("default", "hello")
+                .unwrap()
+                .is_virtual(),
+            "Worker should now be using virtual data, and not the original buffer"
+        );
+
         assert_eq!(
-            1,
-            kv.state
-                .store()
-                .packer
-                .flush()
-                .inspect(|p| {
-                    eprintln!("{p:?}");
-                })
-                .count()
-        )
+            "hello",
+            kv.load::<toml::Value>("hello").unwrap()["other"]["values"]["also_important"]
+                .as_str()
+                .unwrap()
+        );
+
+        // Test that after refresh is called, we have access to records created in different stores
+        assert_eq!(
+            "another hello",
+            kv.load::<toml::Value>("hello2").unwrap()["other"]["values"]["also_important"]
+                .as_str()
+                .unwrap()
+        );
+
+        let _ = std::fs::create_dir(".test");
+        kv.save().await.unwrap();
+
+        let kv = KeyValue::open().await.unwrap();
+        let count = kv
+            .search(
+                namespace("default")
+                    .label("hello2")
+                    .and(field("value").contains("another")),
+            )
+            .count();
+        assert_eq!(1, count);
     }
 }

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::{
     IRecord, Index, Namespace, RawRecordable, Record, Storage, VecIndex,
     archive::{self, Entry, archive_to},
@@ -32,6 +34,12 @@ impl Worker {
     #[inline]
     pub fn cache(&self) -> &VecIndex<Record> {
         &self.cache
+    }
+
+    /// Returns a mutable reference to the workers cache
+    #[inline]
+    pub fn cache_mut(&mut self) -> &mut VecIndex<Record> {
+        &mut self.cache
     }
 
     /// Sets a store pusher on this worker
@@ -193,6 +201,12 @@ impl Worker {
                 "Worker does not have any store settings",
             ))
         }
+    }
+
+    /// Returns the archive member path used by this worker
+    #[inline]
+    pub fn archive_member_path(&self) -> Option<PathBuf> {
+        self.store.as_ref().map(|s| s.archive_path(&self.namespace))
     }
 }
 

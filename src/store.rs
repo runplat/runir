@@ -6,7 +6,7 @@ use crate::{
 use ahash::HashSet;
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
-use std::{path::PathBuf, sync::Arc};
+use std::{path::{Path, PathBuf}, sync::Arc};
 use tracing::error;
 
 /// Store settings contains options for workers to use during
@@ -55,6 +55,15 @@ pub struct Store {
 }
 
 impl Store {
+    /// Returns a store w/ work_dir set
+    #[inline]
+    pub fn work_dir(path: impl Into<PathBuf>) -> Self {
+        Self {
+            packer: Default::default(),
+            work_dir: path.into(),
+        }
+    }
+
     /// Returns a mutable reference for a worker to a specific namespace
     #[inline]
     pub fn namespace(&self, ns: impl Into<Namespace>) -> Worker {
@@ -65,19 +74,19 @@ impl Store {
         })
     }
 
-    /// Flushes any pending packing requests to build a store archive
+    /// Flushes all archive members and returns a StoreArchive
     #[inline]
-    pub async fn archive(&self) -> std::io::Result<StoreArchive> {
+    pub fn archive(&self) -> StoreArchive {
         let mut archived = vec![];
 
         for member in self.packer.flush() {
             archived.push(member);
         }
 
-        Ok(StoreArchive {
+        StoreArchive {
             archived,
             output_dir: self.work_dir.clone(),
-        })
+        }
     }
 }
 
@@ -85,13 +94,13 @@ impl Store {
 #[derive(Debug)]
 pub struct StoreArchive {
     /// List of worker archives in the output dir
-    archived: Vec<ArchiveMember>,
+    pub(crate) archived: Vec<ArchiveMember>,
     /// Output directory of store files
-    output_dir: PathBuf,
+    pub(crate) output_dir: PathBuf,
 }
 
 /// Enumeration of archive member state
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ArchiveMember {
     /// Archive member is in an intermediate state on disk
     Unpacked { path: PathBuf, manifest: Manifest },
@@ -109,6 +118,18 @@ pub enum ArchiveMember {
 }
 
 impl ArchiveMember {
+    /// Returns the path of this archive member
+    #[inline]
+    pub fn path(&self) -> &PathBuf {
+        match self {
+            ArchiveMember::Unpacked { path, .. } => path,
+            ArchiveMember::Packed {
+                path,
+                ..
+            } => path,
+        }
+    }
+
     /// Returns records stored in archive member
     ///
     /// Note: These records will always be virtual based records, this gurantees that
@@ -178,23 +199,23 @@ impl StoreArchive {
     ///
     /// This allows records to be materialized from the store.tar without needing to expand.
     #[inline]
-    pub async fn unpack(path: PathBuf) -> std::io::Result<Self> {
-        if !path.is_file() {
+    pub async fn unpack(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        if !path.as_ref().is_file() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "Path must be to an existing file",
             ));
         }
-        let output_dir = path
+        let output_dir = path.as_ref()
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or(PathBuf::from("/"));
         let references =
-            crate::archive::scan_for_references(tokio::fs::File::open(&path).await.unwrap())
+            crate::archive::scan_for_references(tokio::fs::File::open(path.as_ref()).await.unwrap())
                 .await
                 .unwrap();
 
-        let source = tokio::fs::File::open(&path).await?;
+        let source = tokio::fs::File::open(path.as_ref()).await?;
         let mmap = unsafe { memmap2::MmapOptions::new().map(&source)? };
         let mmap = Arc::new(mmap);
 
@@ -255,7 +276,7 @@ impl StoreArchive {
                                 }
 
                                 members.push(ArchiveMember::Packed {
-                                    path: path.clone(),
+                                    path: path.as_ref().to_path_buf(),
                                     offset: cursor,
                                     // Len of source is the current offset, minus the header bytes, minus the cursor
                                     len: (offset.saturating_sub(512).saturating_sub(cursor as usize)
@@ -388,14 +409,14 @@ mod test {
             worker.sync().unwrap().await.unwrap();
         }
 
-        let store_archive = store.archive().await.unwrap();
+        let store_archive = store.archive();
         eprintln!("{:#?}", store_archive);
 
         let packed = store_archive.pack().await.unwrap();
         eprintln!("{:#?}", packed.journal_entries().unwrap());
 
         let store = store_archive.store_tar_path();
-        let store_archive = StoreArchive::unpack(store).await.unwrap();
+        let store_archive = StoreArchive::unpack(&store).await.unwrap();
         eprintln!("{store_archive:#?}");
         for member in store_archive.members() {
             let records = member.get_records().await.unwrap();

@@ -252,7 +252,7 @@ impl Record {
 
     /// Attempts to deserialize data to some type
     #[inline]
-    pub fn load<'de, T: Deserialize<'de>>(&'de self) -> Option<T> {
+    pub fn load<'de, T: Deserialize<'de> + 'de>(&'de self) -> Option<T> {
         match &self.data {
             Data::Bytes(bytes) if self.is_valid() => flexbuffers::from_slice(&bytes).ok(),
             Data::Virtual(bytes) if self.is_valid() => flexbuffers::from_slice(&bytes).ok(),
@@ -360,6 +360,12 @@ impl Record {
             std::io::ErrorKind::InvalidFilename,
             "File name was not in the expected record archive format",
         ))
+    }
+
+    /// Returns true if the backing data is virtual
+    #[inline]
+    pub fn is_virtual(&self) -> bool {
+        matches!(self.data, Data::Virtual(..))
     }
 }
 

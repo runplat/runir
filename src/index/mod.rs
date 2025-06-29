@@ -1,5 +1,6 @@
 mod storage;
 pub use storage::Storage;
+use tracing::{debug, trace};
 
 pub mod search;
 
@@ -22,13 +23,13 @@ pub type VecStorage<R> = Vec<R>;
 pub struct Index<R, S>
 where
     R: crate::IRecord,
-    S: Storage<Record = R>
+    S: Storage<Record = R>,
 {
     /// Record storage implementation
     storage: S,
 
     /// Reverse lookup hash map
-    /// 
+    ///
     /// Always maps IRecord::index_key() -> PutResult.key
     reverse: ahash::HashMap<u64, u64>,
 }
@@ -46,7 +47,7 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
     }
 
     /// Get a record from the index w/ a key returned from Index::index
-    /// 
+    ///
     /// Returns None if a record w/ this key could not be found
     #[inline]
     pub fn get(&self, key: u64) -> Option<&R> {
@@ -54,23 +55,23 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
     }
 
     /// Lookup a record by a ns / label pair
-    /// 
+    ///
     /// If a record was stored with a non-default namespace, that EXACT same
     /// namespace MUST be used in this function in order for the lookup to succeed
-    /// 
+    ///
     /// Example:
-    /// 
+    ///
     /// ```rs
     /// let mut index = HashMapIndex::default();
     /// let rec = Namespace::from("hello").store("world", ..);
     /// index.index(rec);
     /// assert!(index.lookup("hello", "world").is_some()) // This is Okay
-    /// 
+    ///
     /// let ns = Namespace::from("hello")... // You set some flags on the namespace
     /// let rec = ns.store("world", ..);
     /// index.index(rec);
-    /// assert!(!index.lookup("hello", "world").is_some()) 
-    /// // This will not find anything, 
+    /// assert!(!index.lookup("hello", "world").is_some())
+    /// // This will not find anything,
     /// // because by changing the options on the namespace,
     /// // makes it a different namespace
     /// ```
@@ -78,9 +79,31 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
     pub fn lookup(&self, ns: impl Into<crate::Namespace>, label: &str) -> Option<&R> {
         let ns = ns.into();
         let index_key = ns.key(label) ^ ns.chk();
-        self.reverse.get(&index_key).and_then(|k| {
-            self.get(*k)
-        })
+        self.reverse.get(&index_key).and_then(|k| self.get(*k))
+    }
+
+    /// Refreshes stored records from another index
+    ///
+    /// The other index is consdered newer, so the records in other will always
+    /// take precedence over the currently stored record
+    #[inline]
+    pub fn refresh(&mut self, other: &Self)
+    where
+        R: Clone,
+    {
+        for r in other.storage.iter_records() {
+            let ik = r.index_key();
+            if let Some(k) = self.reverse.get(&ik) {
+                debug!("existing key found, replacing");
+                // If the reverse lookup see that we already have the record stored, we need to replace it at that key
+                let replaced = self.storage.replace(*k, r.clone());
+                trace!(replaced, ik, at = *k, "refresh");
+            } else {
+                debug!("existing key is not found, indexing");
+                // TODO: Need index_with capabilities here
+                self.index(r.clone());
+            }
+        }
     }
 }
 
@@ -117,7 +140,8 @@ impl<R: crate::IRecord, S: Storage<Record = R>> From<Vec<R>> for Index<R, S> {
 #[cfg(test)]
 mod test {
     use crate::{
-        field, filter, namespace, query::QueryBuilder, HashMapStorage, IRecord, Record, RecordableExtensions, Worker
+        HashMapStorage, IRecord, Record, RecordableExtensions, Worker, field, filter, namespace,
+        query::QueryBuilder,
     };
 
     #[tokio::test]

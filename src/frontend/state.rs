@@ -1,0 +1,183 @@
+use crate::{
+    Namespace, Record, Store, VecIndex,
+    store::{ArchiveMember, StoreArchive},
+};
+use std::{
+    ops::Deref,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+type RecordSnapshot = Arc<VecIndex<Record>>;
+
+/// Wrapper over State to allow cloning
+#[derive(Default)]
+pub struct SharedState {
+    pub(crate) state: Arc<State>,
+    snapshot: Option<RecordSnapshot>,
+}
+
+/// Common state used w/ all frontends
+pub struct State {
+    /// Store only holds a reference to a queue, and a work_dir
+    ///
+    /// Most of the "store" logic happens in Worker and Record respectively
+    store: Store,
+    /// Map of indexes
+    indexes: dashmap::DashMap<PathBuf, VecIndex<Record>>,
+    /// Active archive members
+    members: dashmap::DashMap<PathBuf, ArchiveMember>,
+    /// Map of stored snapshots
+    snapshots: dashmap::DashMap<Snapshot, RecordSnapshot>,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub enum Snapshot {
+    /// Default from work_dir
+    Default,
+    // /// Imported from a pack
+    // Imported(PathBuf),
+}
+
+impl State {
+    /// Asynchronously flushes all pending archive-members in state
+    #[inline]
+    pub async fn flush(&self) -> std::io::Result<()> {
+        let store_archive = self.store.archive();
+
+        let mut snapshot = VecIndex::default();
+        for member in store_archive.members() {
+            let path = member.path().to_path_buf();
+            // This will create mem-mapped records from archive members
+            let records = member.get_records().await?;
+
+            let mut index = self.indexes.entry(path.clone()).or_default();
+            for r in records {
+                index.index(r.clone());
+                snapshot.index(r); // TODO: Use with_index here to handle merge policies later
+            }
+
+            self.members.insert(path, member.clone());
+        }
+        self.snapshots.insert(Snapshot::Default, Arc::new(snapshot));
+        Ok(())
+    }
+
+    /// Refreshes the indes of a target index from the data stored by an archive_member
+    ///
+    /// Returns true if data was found from the archive_member
+    #[inline]
+    pub fn refresh_index(&self, path: impl AsRef<Path>, target: &mut VecIndex<Record>) -> bool {
+        let mut updated = false;
+        if let Some(index) = self.indexes.get(path.as_ref()) {
+            target.refresh(&index);
+            updated = true;
+        }
+        updated
+    }
+
+    /// Performs a lookup from the default snapshot
+    #[inline]
+    pub fn lookup(&self, ns: impl Into<Namespace>, key: &str) -> Option<Record> {
+        self.snapshots
+            .get(&Snapshot::Default)
+            .and_then(|s| s.try_map(|f| f.lookup(ns, key)).ok())
+            .map(|r| r.clone())
+    }
+
+    /// Returns a stored snapshot
+    #[inline]
+    pub fn snapshot(&self, snapshot: Snapshot) -> RecordSnapshot {
+        self.snapshots.entry(snapshot).or_default().clone()
+    }
+
+    /// Saves state to output_directory
+    #[inline]
+    pub async fn save(&self, output_dir: impl Into<PathBuf>) -> std::io::Result<()> {
+        let archived = self
+            .members
+            .iter()
+            .map(|kv| kv.deref().clone())
+            .collect::<Vec<_>>();
+
+        let archive = StoreArchive {
+            archived,
+            output_dir: output_dir.into(),
+        };
+
+        archive.pack().await?;
+        Ok(())
+    }
+
+    /// Loads state from an work_dir
+    pub async fn load(work_dir: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let work_dir = work_dir.into();
+        let restored = StoreArchive::unpack(work_dir.join("store.tar")).await?;
+
+        let mut state = Self::default();
+        state.store = Store::work_dir(work_dir);
+
+        let mut snapshot = VecIndex::<Record>::default();
+        for mem in restored.members() {
+            for r in mem.get_records().await? {
+                snapshot.index(r);
+            }
+        }
+        state
+            .snapshots
+            .insert(Snapshot::Default, Arc::new(snapshot));
+        Ok(state)
+    }
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            store: Default::default(),
+            indexes: dashmap::DashMap::new(),
+            members: dashmap::DashMap::new(),
+            snapshots: dashmap::DashMap::new(),
+        }
+    }
+}
+
+impl SharedState {
+    /// Returns a reference to the store
+    #[inline]
+    pub fn store(&self) -> &Store {
+        &self.state.store
+    }
+
+    /// Updates the local snapshot from the shared state
+    #[inline]
+    pub fn update_snapshot(&mut self) {
+        let update = self.state.snapshot(Snapshot::Default);
+        self.snapshot.replace(update);
+    }
+
+    /// Returns a reference to the latest snapshot
+    ///
+    /// Note: update_snapshot() must be called in order to update this value
+    #[inline]
+    pub fn snapshot(&self) -> Option<&VecIndex<Record>> {
+        self.snapshot.as_deref()
+    }
+}
+
+impl Clone for SharedState {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            snapshot: self.snapshot.clone(),
+        }
+    }
+}
+
+impl From<State> for SharedState {
+    fn from(value: State) -> Self {
+        Self {
+            state: value.into(),
+            snapshot: None,
+        }
+    }
+}

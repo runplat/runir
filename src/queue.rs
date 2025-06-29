@@ -61,6 +61,18 @@ impl<R, const INITIAL_CAPACITY: usize> Queue<R, INITIAL_CAPACITY> {
         Self { queue, cancel: CancellationToken::default() }
     }
 
+    /// Returns the current length of the queue
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Returns true if the queue is empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
     /// Returns a queue Pusher
     /// 
     /// A pusher can be used to ensure records are pushed onto the queue

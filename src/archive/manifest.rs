@@ -5,6 +5,7 @@ use crate::IRecord;
 use super::JournalEntry;
 
 /// Manifest is a footer entry of all archives that includes metadata, provenance information, etc.
+#[derive(Clone)]
 pub struct Manifest {
     pub(crate) record: crate::Record,
 }

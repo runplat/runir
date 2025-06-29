@@ -107,8 +107,7 @@ mod virt;
 pub use virt::RecordExtent;
 pub use virt::VirtualData;
 
-mod frontend;
-pub use frontend::kv;
+pub mod frontend;
 
 mod queue;
 pub use queue::Queue;

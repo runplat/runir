@@ -32,6 +32,9 @@ pub trait Storage : Default {
 
     /// Returns a stream over all records in storage
     fn stream_records(&self) -> impl Stream<Item = &Self::Record> + Send;
+
+    /// Returns true if a record was replaced at key
+    fn replace(&mut self, key: u64, record: Self::Record) -> bool;
 }
 
 impl<R: crate::IRecord + Sync> Storage for ahash::HashMap<u64, R> {
@@ -55,6 +58,10 @@ impl<R: crate::IRecord + Sync> Storage for ahash::HashMap<u64, R> {
     fn stream_records(&self) -> impl Stream<Item = &Self::Record> + Send {
         futures::stream::iter(self.iter_records())
     }
+    
+    fn replace(&mut self, key: u64, record: Self::Record) -> bool {
+        self.insert(key, record).is_some()
+    }
 }
 
 impl<R: crate::IRecord + Sync> Storage for Vec<R> {
@@ -77,5 +84,13 @@ impl<R: crate::IRecord + Sync> Storage for Vec<R> {
 
     fn stream_records(&self) -> impl Stream<Item = &Self::Record> + Send {
         futures::stream::iter(self.iter_records())
+    }
+    
+    fn replace(&mut self, key: u64, record: Self::Record) -> bool {
+        if self.len() < key as usize {
+            return false;
+        }
+        self[key as usize] = record;
+        true
     }
 }
