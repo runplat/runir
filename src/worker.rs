@@ -1,25 +1,66 @@
 use crate::{
-    archive::{self, Entry, Manifest}, IRecord, Index, Namespace, RawRecordable, Record, Storage
+    IRecord, Index, Namespace, RawRecordable, Record, Storage, VecIndex,
+    archive::{self, Entry, archive_to},
+    store::{ArchiveMember, StoreSettings},
 };
-use futures::StreamExt;
+use bytes::Bytes;
+use crossbeam::utils::Backoff;
+use futures::{StreamExt, future::RemoteHandle};
 use serde::Serialize;
-use std::io::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::AsyncRead;
+
+pub type BackgroundSync = RemoteHandle<std::io::Result<()>>;
 
 /// A worker is an intermediary which handles a collection of records for a namespace
-#[derive(Clone)]
 pub struct Worker {
     /// Namespace this worker belongs to
     namespace: Namespace,
     /// Records being written by this worker
     records: Vec<Record>,
+    /// Store this worker is associated to
+    store: Option<StoreSettings>,
+    /// Record Cache
+    ///
+    /// Empty unless flush(..) is called
+    cache: VecIndex<Record>,
 }
 
 impl Worker {
+    /// Returns a reference to the worker's read cache
+    ///
+    /// Empty until flush(..) is called
+    #[inline]
+    pub fn cache(&self) -> &VecIndex<Record> {
+        &self.cache
+    }
+
+    /// Sets a store pusher on this worker
+    pub fn with_store(mut self, store: StoreSettings) -> Self {
+        self.store.replace(store);
+        self
+    }
+
     /// Returns a reference to the namespace of this worker
     #[inline]
     pub fn namespace(&self) -> &Namespace {
         &self.namespace
+    }
+
+    /// Stores an object into the current worker with name
+    ///
+    /// Returns true if the object was successfully stored, otherwise returns false
+    #[inline]
+    pub fn commit(&mut self, name: &str, obj: &[u8]) -> bool {
+        let record = self
+            .namespace
+            .record(name)
+            .commit(Bytes::copy_from_slice(obj));
+        if record.is_valid() {
+            self.records.push(record);
+            true
+        } else {
+            false
+        }
     }
 
     /// Stores an object into the current worker with name
@@ -104,50 +145,54 @@ impl Worker {
         Ok(())
     }
 
-    /// Archives the worker state to an output stream
+    /// Drains all records and caches them into the worker-cache,
+    /// and maps each record to an archive entry
+    pub fn flush(&mut self) -> impl Iterator<Item = Entry> {
+        self.records
+            .drain(..)
+            .inspect(|r| {
+                // TODO: use index_with here later
+                self.cache.index(r.clone());
+            })
+            .filter(|f| f.opts().is_archivable())
+            .map(|f| Entry::Record(f))
+    }
+
+    /// Begins synchronizing data with the store in the background
     ///
-    /// Returns a record containing a manifest of the contents written to the output stream
-    #[inline]
-    pub async fn archive_to(
-        &self,
-        output: impl AsyncWrite + Send + Unpin + 'static,
-    ) -> std::io::Result<Manifest> {
-        use futures::sink::SinkExt;
-        let encoder = archive::TapeEncoder::default();
+    /// Returns None if store settings are not configured for this worker, otherwise
+    /// returns a BackgroundSync future
+    pub fn sync(&mut self) -> std::io::Result<BackgroundSync> {
+        if let Some(settings) = self.store.clone() {
+            let output_path = settings.archive_path(&self.namespace);
+            let entries = self.flush().map(|e| Ok(e)).collect::<Vec<_>>();
+            let packer = settings.packer().clone();
 
-        let mut writer = tokio_util::codec::FramedWrite::new(output, encoder);
+            let handle = crate::util::spawn(async move {
+                let output = tokio::fs::File::create_new(&output_path).await?;
+                let stream = futures::stream::iter(entries);
+                let manifest = archive_to(stream, output).await?;
 
-        // Creates archive entries of all archivable records and encodes to the output stream
-        let mut stream = futures::stream::iter(
-            self.records
-                .iter()
-                .filter(|f| f.opts().is_archivable())
-                .map(|f| Ok(Entry::Record(f.clone()))),
-        );
+                let backoff = Backoff::new();
+                let mut member = ArchiveMember::Unpacked {
+                    path: output_path,
+                    manifest,
+                };
+                while let Some(retry) = packer.push(member) {
+                    member = retry;
+                    backoff.spin();
+                }
 
-        // Send a stream of entries
-        writer
-            .send_all(&mut stream)
-            .await
-            .map_err(|e| Error::new(std::io::ErrorKind::Interrupted, e))?;
+                Ok::<_, std::io::Error>(())
+            })?;
 
-        // Need to send this last to indicate the end of the archive
-        writer
-            .send(archive::Entry::Zeros)
-            .await
-            .map_err(|e| Error::new(std::io::ErrorKind::Interrupted, e))?;
-
-        // Applies the digest of the current state of the archive to all journal entries
-        writer.encoder_mut().stamp_source_digest();
-
-        // Close the writer
-        writer
-            .close()
-            .await
-            .map_err(|e| Error::new(std::io::ErrorKind::Interrupted, e))?;
-
-        let manifest = writer.encoder().create_manifest();
-        Ok(manifest)
+            Ok(handle)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Worker does not have any store settings",
+            ))
+        }
     }
 }
 
@@ -156,6 +201,8 @@ impl<T: Into<Namespace>> From<T> for Worker {
         Worker {
             namespace: value.into(),
             records: vec![],
+            store: None,
+            cache: VecIndex::default(),
         }
     }
 }
@@ -173,7 +220,7 @@ impl std::fmt::Debug for Worker {
 mod test {
     use crate::{
         RecordableExtensions, ToNamespace, Worker,
-        archive::{Entry, FileEntryReference},
+        archive::{Entry, FileEntryReference, archive_to},
     };
     use sha2::Digest;
     use toml::toml;
@@ -219,18 +266,13 @@ mod test {
 
         std::fs::remove_file("test.tar").ok();
         let archive_file = tokio::fs::File::create_new("test.tar").await.unwrap();
-        let manifest = worker.archive_to(archive_file).await.unwrap();
+        let entries = futures::stream::iter(worker.flush().map(|e| Ok(e)));
+        let manifest = archive_to(entries, archive_file).await.unwrap();
         assert!(manifest.is_valid());
 
         let mut restoring = Worker::from("test");
         let archive_file = tokio::fs::File::open("test.tar").await.unwrap();
         restoring.restore_from(archive_file).await.unwrap();
-
-        // let index = restoring.to_index();
-        // let value = index.find("record_one", "test");
-        // let toml = value.unwrap().load::<toml::Value>().unwrap();
-        // assert_eq!("hello world", toml["value"].as_str().unwrap());
-        // assert!(index.find("record_three", "test").is_none());
 
         let encoded = manifest.journal_entries().unwrap();
         assert_eq!(3, encoded.len());

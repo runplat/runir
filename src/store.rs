@@ -1,6 +1,7 @@
 use crate::{
-    Namespace, Record, VirtualData, Worker,
+    Namespace, Queue, Record, VirtualData, Worker,
     archive::{Entry, FileEntryReference, Manifest},
+    queue::Pusher,
 };
 use ahash::HashSet;
 use futures::StreamExt;
@@ -8,43 +9,74 @@ use sha2::{Digest, Sha256};
 use std::{path::PathBuf, sync::Arc};
 use tracing::error;
 
-/// Store coordinates multiple workers and namespaces
-#[derive(Default, Clone)]
+/// Store settings contains options for workers to use during
+/// their operations
+#[derive(Clone)]
+pub struct StoreSettings {
+    /// Ephemeral namespace
+    session_ns: Namespace,
+    /// Main working directory for storing unpacked archive-members
+    work_dir: PathBuf,
+    /// Queue for pushing ArchiveMembers for packing
+    packer: Pusher<ArchiveMember>,
+    // TODO:
+    // /// Indexer to use when writing records to any type of local index
+    // indexer: Indexer
+}
+
+impl StoreSettings {
+    /// Returns the path a member should use for their archive data
+    #[inline]
+    pub fn archive_path(&self, ns: &Namespace) -> PathBuf {
+        let archive_out = format!("{:x}_{}", ns.chk(), self.session_ns.chk());
+        self.work_dir.join(archive_out)
+    }
+
+    /// Returns an interface to push work to the store for packing
+    #[inline]
+    pub fn packer(&self) -> &Pusher<ArchiveMember> {
+        &self.packer
+    }
+}
+
+/// Store centralizes record archival by distributing a queue to workers
+/// which ingest incoming data
+///
+/// When Store::archive(..) is called, the queue will be flushed and all records will
+/// be written to an intermediate archive member
+///
+/// If data must be persisted long-term or for transport, a collection of members can be packed
+/// into a single archive file, at this point any left-over member artifacts can be purged
 pub struct Store {
-    /// Workers owned by this store
-    workers: Vec<Worker>,
+    /// Queue for receiving archive members for packing
+    pub(crate) packer: Queue<ArchiveMember>,
+    /// Working directory for this store
+    work_dir: PathBuf,
 }
 
 impl Store {
     /// Returns a mutable reference for a worker to a specific namespace
     #[inline]
-    pub fn namespace(&mut self, ns: impl Into<Namespace>) -> &mut Worker {
-        self.workers.push(Worker::from(ns));
-        self.workers.last_mut().expect("should exist")
+    pub fn namespace(&self, ns: impl Into<Namespace>) -> Worker {
+        Worker::from(ns).with_store(StoreSettings {
+            session_ns: Namespace::ephemeral(),
+            work_dir: self.work_dir.clone(),
+            packer: self.packer.pusher(),
+        })
     }
 
-    /// Builds and archive of the current state of the store
-    ///
-    /// Writes all intermediate files to tempdir
+    /// Flushes any pending packing requests to build a store archive
+    #[inline]
     pub async fn archive(&self) -> std::io::Result<StoreArchive> {
-        let tmp = std::env::temp_dir();
-
-        let build_id = Namespace::ephemeral();
-        let output_dir = tmp.join(format!("{:x}", build_id.chk()));
-
         let mut archived = vec![];
-        std::fs::create_dir(&output_dir)?;
 
-        for (idx, worker) in self.workers.iter().enumerate() {
-            let dest = output_dir.join(format!("{:x}_{:x}.tar", worker.namespace().chk(), idx));
-            let file = tokio::fs::File::create_new(&dest).await?;
-            let manifest = worker.archive_to(file).await?;
-            archived.push(ArchiveMember::Unpacked(dest, manifest));
+        for member in self.packer.flush() {
+            archived.push(member);
         }
 
         Ok(StoreArchive {
             archived,
-            output_dir,
+            output_dir: self.work_dir.clone(),
         })
     }
 }
@@ -62,7 +94,7 @@ pub struct StoreArchive {
 #[derive(Debug)]
 pub enum ArchiveMember {
     /// Archive member is in an intermediate state on disk
-    Unpacked(PathBuf, Manifest),
+    Unpacked { path: PathBuf, manifest: Manifest },
     /// Archive member is already packed
     Packed {
         /// Path to the source of this packed archive member
@@ -84,8 +116,8 @@ impl ArchiveMember {
     /// were returned
     pub async fn get_records(&self) -> std::io::Result<Vec<Record>> {
         match self {
-            ArchiveMember::Unpacked(path_buf, manifest) => {
-                let source = tokio::fs::File::open(path_buf).await?;
+            ArchiveMember::Unpacked { path, manifest } => {
+                let source = tokio::fs::File::open(path).await?;
                 let mmap = unsafe { memmap2::Mmap::map(&source)? };
                 let mmap = Arc::new(mmap);
 
@@ -132,7 +164,7 @@ impl ArchiveMember {
     #[inline]
     pub fn manifest(&self) -> &Manifest {
         match self {
-            ArchiveMember::Unpacked(.., manifest) => manifest,
+            ArchiveMember::Unpacked { manifest, .. } => manifest,
             ArchiveMember::Packed { manifest, .. } => manifest,
         }
     }
@@ -226,7 +258,8 @@ impl StoreArchive {
                                     path: path.clone(),
                                     offset: cursor,
                                     // Len of source is the current offset, minus the header bytes, minus the cursor
-                                    len: (offset.saturating_sub(512).saturating_sub(cursor as usize) as u32),
+                                    len: (offset.saturating_sub(512).saturating_sub(cursor as usize)
+                                        as u32),
                                     manifest,
                                 });
                             }
@@ -295,6 +328,15 @@ impl StoreArchive {
     }
 }
 
+impl Default for Store {
+    fn default() -> Self {
+        Self {
+            packer: Default::default(),
+            work_dir: std::env::temp_dir(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::IRecord;
@@ -303,9 +345,9 @@ mod test {
 
     #[tokio::test]
     async fn test_store_build_archive() {
-        let mut store = Store::default();
+        let store = Store::default();
         {
-            let worker = store.namespace("test_ns_1");
+            let mut worker = store.namespace("test_ns_1");
             assert!(worker.author("record_1", |mut b| {
                 b.start_map().push("value", "hello world");
                 b
@@ -315,10 +357,11 @@ mod test {
                 b.start_map().push("value", "goodbye world");
                 b
             }));
+            worker.sync().unwrap().await.unwrap();
         }
 
         {
-            let worker = store.namespace("test_ns_2");
+            let mut worker = store.namespace("test_ns_2");
             assert!(worker.author("record_1", |mut b| {
                 b.start_map().push("value", "hello world 2");
                 b
@@ -328,10 +371,11 @@ mod test {
                 b.start_map().push("value", "goodbye world 2");
                 b
             }));
+            worker.sync().unwrap().await.unwrap();
         }
 
         {
-            let worker = store.namespace("test_ns_1");
+            let mut worker = store.namespace("test_ns_1");
             assert!(worker.author("record_1", |mut b| {
                 b.start_map().push("value", "hello world 2");
                 b
@@ -341,6 +385,7 @@ mod test {
                 b.start_map().push("value", "goodbye world");
                 b
             }));
+            worker.sync().unwrap().await.unwrap();
         }
 
         let store_archive = store.archive().await.unwrap();
