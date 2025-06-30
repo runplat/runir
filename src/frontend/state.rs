@@ -25,6 +25,8 @@ pub struct SharedState {
 pub struct State {
     /// Name of the state frontend
     frontend: &'static str,
+    /// Instance ID (WIP)
+    instance: usize,
     /// Store only holds a reference to a queue, and a work_dir
     ///
     /// Most of the "store" logic happens in Worker and Record respectively
@@ -48,8 +50,9 @@ pub enum Snapshot {
 impl State {
     /// Set the frontend name for this state
     #[inline]
-    pub fn set_frontend<F: Frontend>(&mut self) {
+    pub fn set_frontend<F: Frontend>(&mut self, instance: usize) {
         self.frontend = F::NAME;
+        self.instance = instance;
     }
 
     /// Asynchronously flushes all pending archive-members in state
@@ -109,7 +112,7 @@ impl State {
         };
 
         archive.pack(&self.frontend).await?;
-        debug!("saved store archive to dir {:?}", archive.output_dir);
+        debug!(frontend = self.frontend, instance = self.instance, "saved store archive to dir {:?}", archive.output_dir);
         Ok(())
     }
 
@@ -130,7 +133,7 @@ impl State {
             Snapshot::Imported(store_tar.as_ref().to_path_buf()),
             imported.into(),
         );
-        debug!("imported {:?} to state", store_tar.as_ref());
+        debug!(frontend = self.frontend, instance = self.instance, "imported {:?} to state", store_tar.as_ref());
         Ok(())
     }
 
@@ -142,7 +145,7 @@ impl State {
         let restored = StoreArchive::unpack(&frontend_tar).await?;
 
         let mut state = Self::default();
-        state.set_frontend::<F>();
+        state.set_frontend::<F>(F::next_instance_id());
         state.store = Store::work_dir(&work_dir);
 
         let mut snapshot = VecIndex::<Record>::default();
@@ -154,7 +157,7 @@ impl State {
         state
             .snapshots
             .insert(Snapshot::Default, Arc::new(snapshot));
-        debug!("loaded state from {:?}", frontend_tar);
+        debug!(frontend = F::NAME, instance = state.instance, "loaded state from {:?}", frontend_tar);
         Ok(state)
     }
 }
@@ -163,6 +166,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             frontend: "store",
+            instance: 0,
             store: Default::default(),
             indexes: dashmap::DashMap::new(),
             members: dashmap::DashMap::new(),
@@ -182,6 +186,12 @@ impl SharedState {
     #[inline]
     pub fn store(&self) -> &Store {
         &self.state.store
+    }
+
+    /// Returns the frontend id
+    #[inline]
+    pub fn frontend_id(&self) -> (&'static str, usize) {
+        (self.state.frontend, self.state.instance)
     }
 
     /// Updates the local snapshot from the shared state

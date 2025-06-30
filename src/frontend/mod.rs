@@ -29,15 +29,25 @@ pub trait Frontend {
     /// Load the frontend from shared state
     fn from_shared(shared: state::SharedState) -> Self;
 
+    /// Creates a new frontend
     fn new() -> Self
     where
         Self: Sized,
     {
         let mut state = state::State::default();
-        state.set_frontend::<Self>();
+        state.set_frontend::<Self>(Self::next_instance_id());
 
         let shared = state::SharedState::from(state);
         Self::from_shared(shared)
+    }
+
+    /// Returns the next instance-id
+    /// 
+    /// Instance ID is an increasing integer shared by all frontends, used for tracking
+    fn next_instance_id() -> usize {
+        static INSTANCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    
+        INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns the archive name of this frontend
@@ -46,6 +56,8 @@ pub trait Frontend {
     }
 
     /// Returns true if the "default" store exists
+    /// 
+    /// Setting a RUNIR_WORK_DIR env variable can be used to configure this directory
     ///
     /// Returns an error if file system permissions do not exist
     fn default_store_exists() -> std::io::Result<bool> {
@@ -60,6 +72,8 @@ pub trait Frontend {
 
     /// Returns a path to the default "save" directory
     ///
+    /// Setting a RUNIR_WORK_DIR env variable can be used to configure this directory
+    /// 
     /// Returns an error if file system permissions do not exist
     fn default_save_dir() -> std::io::Result<std::path::PathBuf> {
         let dot_folder = format!(".{}", env!("CARGO_PKG_NAME"));
@@ -152,5 +166,12 @@ mod test {
     fn test_frontend_archive_name() {
         assert_eq!("test.tar", Test::archive_name());
         assert_eq!("test2.tar", Test2::archive_name());
+    }
+
+    #[test]
+    fn test_frontend_instance_id() {
+        assert_eq!(0, Test::next_instance_id());
+        assert_eq!(1, Test::next_instance_id());
+        assert_eq!(2, Test2::next_instance_id());
     }
 }
