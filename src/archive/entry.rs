@@ -107,6 +107,7 @@ impl Entry {
                 }
                 _ => None,
             }),
+            Entry::Reference(FileEntryReference { digest, .. }) => Some((Data::Empty, digest.clone().finalize().into())),
             _ => None,
         }
     }

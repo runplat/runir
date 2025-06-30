@@ -6,8 +6,12 @@ use crate::{
 use ahash::HashSet;
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
-use std::{path::{Path, PathBuf}, sync::Arc};
-use tracing::error;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::io::AsyncSeekExt;
+use tracing::{debug, error};
 
 /// Store settings contains options for workers to use during
 /// their operations
@@ -123,10 +127,7 @@ impl ArchiveMember {
     pub fn path(&self) -> &PathBuf {
         match self {
             ArchiveMember::Unpacked { path, .. } => path,
-            ArchiveMember::Packed {
-                path,
-                ..
-            } => path,
+            ArchiveMember::Packed { path, .. } => path,
         }
     }
 
@@ -206,14 +207,16 @@ impl StoreArchive {
                 "Path must be to an existing file",
             ));
         }
-        let output_dir = path.as_ref()
+        let output_dir = path
+            .as_ref()
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or(PathBuf::from("/"));
-        let references =
-            crate::archive::scan_for_references(tokio::fs::File::open(path.as_ref()).await.unwrap())
-                .await
-                .unwrap();
+        let references = crate::archive::scan_for_references(
+            tokio::fs::File::open(path.as_ref()).await.unwrap(),
+        )
+        .await
+        .unwrap();
 
         let source = tokio::fs::File::open(path.as_ref()).await?;
         let mmap = unsafe { memmap2::MmapOptions::new().map(&source)? };
@@ -268,7 +271,9 @@ impl StoreArchive {
                                 }
 
                                 if !records.is_empty() {
-                                    error!("Found orphaned records {:#?}", records);
+                                    error!("Found orphaned records {:#?}", records.iter().map(|r| hex::encode(r)).collect::<Vec<_>>());
+                                    error!("Manifest has: {:#?}", manifest.journal_entries()?);
+                                    error!("Manifest digest: {}", hex::encode(manifest.record.data.digest().finalize()));
                                     return Err(std::io::Error::new(
                                         std::io::ErrorKind::InvalidData,
                                         "Packed manifest is corrupted",
@@ -307,13 +312,34 @@ impl StoreArchive {
     /// Packs worker archives from the output directory into a single store archive
     pub async fn pack(&self, name: &str) -> std::io::Result<Manifest> {
         use futures::sink::SinkExt;
-        let encoder = crate::archive::TapeEncoder::default();
-        let dest = self.output_dir.join("PACKING");
-        let output = tokio::fs::File::create_new(&dest).await.inspect_err(|_| {
-            error!("Previous packing attempt did not succeed");
-        })?;
+        let completed_dest = self.store_tar_path(name);
 
-        let mut writer = tokio_util::codec::FramedWrite::new(output, encoder);
+        let mut append_mode = false;
+        let dest = self.output_dir.join("PACKING");
+
+        let file = if completed_dest.exists() {
+            debug!("Previous store found, attempting to append to store");
+            let grow_to = self.get_total_required_space()?;
+
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .read(true)
+                .open(&completed_dest)
+                .await?;
+
+            let cursor = file.seek(std::io::SeekFrom::End(-1024)).await?;
+            debug!("Setting cursor to {cursor}, growing to {}", cursor + grow_to + 1024);
+            append_mode = true;
+            file
+        } else {
+            let output = tokio::fs::File::create_new(&dest).await.inspect_err(|_| {
+                error!("Previous packing attempt did not succeed");
+            })?;
+            output
+        };
+
+        let encoder = crate::archive::TapeEncoder::default();
+        let mut writer = tokio_util::codec::FramedWrite::new(file, encoder);
 
         for member in self.archived.iter() {
             let records = member.get_records().await?;
@@ -326,13 +352,15 @@ impl StoreArchive {
             writer.send_all(&mut to_enc).await?;
         }
 
+        writer.send(Entry::Zeros).await?;
         writer.close().await?;
         writer.encoder_mut().stamp_source_digest();
 
         let manifest = writer.encoder_mut().create_manifest();
 
-        let completed_dest = self.store_tar_path(name);
-        std::fs::rename(dest, &completed_dest)?;
+        if !append_mode {
+            std::fs::rename(dest, &completed_dest)?;
+        }
         Ok(manifest)
     }
 
@@ -346,6 +374,16 @@ impl StoreArchive {
     #[inline]
     pub fn members(&self) -> impl Iterator<Item = &ArchiveMember> {
         self.archived.iter()
+    }
+
+    /// Returns the total required space to pack all archive members
+    #[inline]
+    pub fn get_total_required_space(&self) -> std::io::Result<u64> {
+        let mut space = 0;
+        for member in self.members() {
+            space += std::fs::metadata(member.path())?.len();
+        }
+        Ok(space)
     }
 }
 
@@ -365,6 +403,7 @@ mod test {
     use super::*;
 
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn test_store_build_archive() {
         let store = Store::default();
         {
@@ -425,5 +464,52 @@ mod test {
                 eprintln!("{} is valid!", r.uuid());
             }
         }
+
+        let store = Store::default();
+        {
+            let mut worker = store.namespace("test_ns_12");
+            assert!(worker.author("record_1", |mut b| {
+                b.start_map().push("value", "hello world");
+                b
+            }));
+
+            assert!(worker.author("record_2", |mut b| {
+                b.start_map().push("value", "goodbye world");
+                b
+            }));
+            worker.sync().unwrap().await.unwrap();
+        }
+
+        {
+            let mut worker = store.namespace("test_ns_22");
+            assert!(worker.author("record_1", |mut b| {
+                b.start_map().push("value", "hello world 2");
+                b
+            }));
+
+            assert!(worker.author("record_2", |mut b| {
+                b.start_map().push("value", "goodbye world 2");
+                b
+            }));
+            worker.sync().unwrap().await.unwrap();
+        }
+
+        {
+            let mut worker = store.namespace("test_ns_12");
+            assert!(worker.author("record_1", |mut b| {
+                b.start_map().push("value", "hello world 2");
+                b
+            }));
+
+            assert!(worker.author("record_2", |mut b| {
+                b.start_map().push("value", "goodbye world");
+                b
+            }));
+            worker.sync().unwrap().await.unwrap();
+        }
+
+        let store_archive = store.archive();
+        eprintln!("{:#?}", store_archive);
+        let _ = store_archive.pack("test").await.unwrap();
     }
 }

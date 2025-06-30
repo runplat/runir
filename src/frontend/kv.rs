@@ -26,7 +26,7 @@
 //! 
 //! Calling `save()` will flush all stored values from any kv-store handles assoicated to the originally opened handle.
 //! 
-//! Opening multiple KV frontends to the same save path (i.e. calling kv::open(..) twice from the same process) concurrently may result in overwrite conflicts.
+//! Opening multiple KV frontends to the same save path (i.e. calling kv::open(..) twice from the same process) concurrently may result in overwrite conflicts. See below section for "Concurrency and Multi writer Safety" for details.
 //! 
 //! ## KV Store Namespaces
 //! ```rs
@@ -84,15 +84,31 @@
 //! ..
 //! 
 //! thread ! {
-//!   // Each time kv.ns(..) is called, it creates a new "standalone" kv store
+//!   // Each call to kv.ns(..) creates a new "standalone" kv handle that manages local writes,
+//!   // while automatically flushing them to shared storage. This means all writes are immediately
+//!   // available through that same handle, even before being synced elsewhere.
+//!
+//!   // Flushing is triggered automatically in the background after each call to `put(..)`.
 //!   let ns = kv.ns("my_ns");
 //!   ns.refresh().await?;
-//!   
-//!   // Refresh ensures the stores index is populated w/ the latest values from across the system
+//!
+//!   // `refresh()` syncs the index with any values written by other handles in the same kv-store lineage.
 //!   assert_eq!(b"hello", ns.get("val1").unwrap());
 //! }
 //! ```
 //! 
+//! ## Concurrency and Multi-writer Safety
+//!
+//! - Cloning a `kv` store (e.g., via `.ns(..)` or manually sharing a `SharedState`) is **thread-safe**.
+//!   - All clones share a common index and record buffer.
+//!   - Use `refresh()` periodically to sync changes across threads.
+//!
+//! - **Opening multiple `kv` frontends independently** (e.g., via repeated `kv::open()`) is **not safe for concurrent writing to the same archive path**.
+//!   - These instances maintain separate snapshots and may overwrite each other's data when calling `save()`.
+//!   - In this case, `runir` does not coordinate or lock access to the backing file.
+//!
+//! **Guideline:** Share `SharedState` if you need multiple writers. Avoid multiple independent frontends writing to the same save path unless you're managing access externally.
+//!
 //! # Search Support
 //! 
 //! ```rs
