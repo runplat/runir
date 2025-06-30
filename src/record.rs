@@ -1,11 +1,11 @@
 use crate::{
-    Data, Namespace, Opts,
-    archive::{self, Entry, HeaderBuilder},
+    archive::{self, Entry, HeaderBuilder, Sha256Digest}, Data, Namespace, Opts
 };
 use ascii::AsAsciiStr;
 use bytes::Bytes;
 use crc::{CRC_64_MS, Crc, Digest};
 use serde::Deserialize;
+use sha2::Sha256;
 use std::{
     fmt::Debug, io::Error, sync::OnceLock, time::{Duration, SystemTime, UNIX_EPOCH}
 };
@@ -43,6 +43,9 @@ pub trait IRecord : Debug {
     /// Returns bytes that belong to this record
     fn bytes(&self) -> &[u8];
 
+    /// Returns a clone of the source Record IRecord was created from
+    fn to_record(&self) -> Record;
+
     /// Returns a flexbuffer reader over the flexbuffer root
     /// 
     /// Returns None if the current record data does not have a flexbuffer root
@@ -50,9 +53,12 @@ pub trait IRecord : Debug {
     fn peek(&self) -> Option<flexbuffers::Reader<&[u8]>> {
         flexbuffers::Reader::get_root(self.bytes()).ok()
     }
-
-    /// Returns a clone of the source Record IRecord was created from
-    fn to_record(&self) -> Record;
+    
+    /// Returns the content digest buffer for the data stored
+    #[inline]
+    fn content(&self) -> Sha256Digest {
+        <Sha256 as sha2::Digest>::digest(self.bytes()).into()
+    }
 }
 
 impl IRecord for Record {
