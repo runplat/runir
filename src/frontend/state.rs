@@ -10,6 +10,8 @@ use std::{
     sync::Arc,
 };
 
+use super::Frontend;
+
 type RecordSnapshot = Arc<VecIndex<Record>>;
 
 /// Wrapper over State to allow cloning
@@ -21,6 +23,8 @@ pub struct SharedState {
 
 /// Common state used w/ all frontends
 pub struct State {
+    /// Name of the state frontend
+    frontend: &'static str,
     /// Store only holds a reference to a queue, and a work_dir
     ///
     /// Most of the "store" logic happens in Worker and Record respectively
@@ -42,6 +46,12 @@ pub enum Snapshot {
 }
 
 impl State {
+    /// Set the frontend name for this state
+    #[inline]
+    pub fn set_frontend<F: Frontend>(&mut self) {
+        self.frontend = F::NAME;
+    }
+
     /// Asynchronously flushes all pending archive-members in state
     #[inline]
     pub async fn flush(&self) -> std::io::Result<()> {
@@ -98,8 +108,8 @@ impl State {
             output_dir: output_dir.into(),
         };
 
-        archive.pack().await?;
-        debug!("saved store arcive to dir {:?}", archive.output_dir);
+        archive.pack(&self.frontend).await?;
+        debug!("saved store archive to dir {:?}", archive.output_dir);
         Ok(())
     }
 
@@ -126,11 +136,13 @@ impl State {
 
     /// Loads state from a {WORK_DIR}/store.tar file
     #[inline]
-    pub async fn load(work_dir: impl Into<PathBuf>) -> std::io::Result<Self> {
+    pub async fn load<F: Frontend>(work_dir: impl Into<PathBuf>) -> std::io::Result<Self> {
         let work_dir = work_dir.into();
-        let restored = StoreArchive::unpack(work_dir.join("store.tar")).await?;
+        let frontend_tar = work_dir.join(F::archive_name());
+        let restored = StoreArchive::unpack(&frontend_tar).await?;
 
         let mut state = Self::default();
+        state.set_frontend::<F>();
         state.store = Store::work_dir(&work_dir);
 
         let mut snapshot = VecIndex::<Record>::default();
@@ -142,7 +154,7 @@ impl State {
         state
             .snapshots
             .insert(Snapshot::Default, Arc::new(snapshot));
-        debug!("loaded state from {:?}", work_dir);
+        debug!("loaded state from {:?}", frontend_tar);
         Ok(state)
     }
 }
@@ -150,6 +162,7 @@ impl State {
 impl Default for State {
     fn default() -> Self {
         Self {
+            frontend: "store",
             store: Default::default(),
             indexes: dashmap::DashMap::new(),
             members: dashmap::DashMap::new(),
@@ -159,6 +172,12 @@ impl Default for State {
 }
 
 impl SharedState {
+    /// Returns a reference to State
+    #[inline]
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+
     /// Returns a reference to the store
     #[inline]
     pub fn store(&self) -> &Store {

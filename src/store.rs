@@ -305,7 +305,7 @@ impl StoreArchive {
     }
 
     /// Packs worker archives from the output directory into a single store archive
-    pub async fn pack(&self) -> std::io::Result<Manifest> {
+    pub async fn pack(&self, name: &str) -> std::io::Result<Manifest> {
         use futures::sink::SinkExt;
         let encoder = crate::archive::TapeEncoder::default();
         let dest = self.output_dir.join("PACKING");
@@ -331,15 +331,15 @@ impl StoreArchive {
 
         let manifest = writer.encoder_mut().create_manifest();
 
-        let completed_dest = self.store_tar_path();
+        let completed_dest = self.store_tar_path(name);
         std::fs::rename(dest, &completed_dest)?;
         Ok(manifest)
     }
 
     /// Returns the output path of the store.tar
     #[inline]
-    pub fn store_tar_path(&self) -> PathBuf {
-        self.output_dir.join("store.tar")
+    pub fn store_tar_path(&self, name: &str) -> PathBuf {
+        self.output_dir.join(format!("{name}.tar"))
     }
 
     /// Returns members in the store archive
@@ -412,10 +412,10 @@ mod test {
         let store_archive = store.archive();
         eprintln!("{:#?}", store_archive);
 
-        let packed = store_archive.pack().await.unwrap();
+        let packed = store_archive.pack("test").await.unwrap();
         eprintln!("{:#?}", packed.journal_entries().unwrap());
 
-        let store = store_archive.store_tar_path();
+        let store = store_archive.store_tar_path("test");
         let store_archive = StoreArchive::unpack(&store).await.unwrap();
         eprintln!("{store_archive:#?}");
         for member in store_archive.members() {

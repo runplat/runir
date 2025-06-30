@@ -1,3 +1,130 @@
+//! # KV Frontend
+//!
+//! ## First-time Use
+//! To open or create a store, simply call `runir::kv::open()` or `runir::kv::new()`
+//!
+//! This store is *ephemeral* until `save()` or `save_as()` is called.
+//!
+//! This allows fast, in-memory operation by default, without requiring setup.
+//!
+//! ## Canonical KV Store API Example
+//! ```rs
+//! let kv = runir::kv::open().await;
+//! 
+//! // `put` returns a `BackgroundSync` handle, which can be awaited on to ensure the value has been stored
+//! let bg_sync = kv.put("value", b"hello world")?;
+//! 
+//! // It is however not required to `await` in order to retrieve the value
+//! bg_sync.forget();
+//! 
+//! // The value is always available immediately
+//! assert_eq!(b"hello world", kv.get("value"));
+//! 
+//! // Once save(..) is called, the same data will be persisted to disk and available on process restart
+//! kv.save().await?;
+//! ```
+//! 
+//! Calling `save()` will flush all stored values from any kv-store handles assoicated to the originally opened handle.
+//! 
+//! Opening multiple KV frontends to the same save path (i.e. calling kv::open(..) twice from the same process) concurrently may result in overwrite conflicts.
+//! 
+//! ## KV Store Namespaces
+//! ```rs
+//! let kv = runir::kv::open().await;
+//! 
+//! // Instead of baking namespaces into the key itself, you can namespace the entire store
+//! let ns_kv = kv.ns("my_namespace");
+//! ```
+//! 
+//! ## KV Store "serde" api
+//! ```rs
+//! let kv = runir::kv::open().await;
+//! 
+//! // This enables the kv store to be "object" aware
+//! let kv_serde = kv.serde();
+//! 
+//! // In this mode, any type that implements `serde::Serialize` may be used in `put(..)`
+//! kv_serde.put("value", &toml::toml! {
+//!     my_interesting_value = "hello"
+//! });
+//! 
+//! // Load the object back from the store to any type that implements `serde::Deserialize`
+//! let obj = kv_serde.load::<toml::Value>("value").unwrap();
+//! 
+//! // Or use peek(..) to map the data w/o allocating a new object
+//! let reader = obj.peek().unwrap();
+//! assert_eq!("hello", reader.as_map().idx("my_interesting_value").as_str())
+//! ```
+//! 
+//! ## KV Multi-Threaded Scenarios
+//! 
+//! Multi-threaded scenarios are supported by periodically calling, `refresh()`.
+//! 
+//! This allows threads to update their indicies in order to view records stored by different threads.
+//! 
+//! >
+//! > Note/WIP: 
+//! > Currently runir assumes idempotency, meaning all values in put(..) should be valid.
+//! > However, in the future "merge" policies will be supported in order to customize conflict resolution.
+//! > 
+//! > i.e. No merge policy == idempotent
+//! >
+//! 
+//! ```rs
+//! let kv = runir::kv::open().await;
+//! 
+//! // Pseudo-code: in two different threads
+//! 
+//! // Imagine two threads that are scoped to the same namespace
+//! thread ! {
+//!   let ns = kv.ns("my_ns");
+//!   ns.put("val1", b"hello")?.await?; // If you wish to ensure this is available
+//! }
+//! 
+//! ..
+//! 
+//! thread ! {
+//!   // Each time kv.ns(..) is called, it creates a new "standalone" kv store
+//!   let ns = kv.ns("my_ns");
+//!   ns.refresh().await?;
+//!   
+//!   // Refresh ensures the stores index is populated w/ the latest values from across the system
+//!   assert_eq!(b"hello", ns.get("val1").unwrap());
+//! }
+//! ```
+//! 
+//! # Search Support
+//! 
+//! ```rs
+//! use runir::query::*;
+//! 
+//! let kv = runir::kv::open().await?;
+//!
+//! // Since kv-store is backed by runir::Store, search functionality is made available by default
+//! for result in kv.search(field("value").contains("hello")) {
+//!     ..
+//! }
+//! ```
+//! 
+
+/// Opens a new or existing key-value store
+///
+/// Note: This store is *ephemeral* until `save()` or `save_as()` is called.
+///
+/// Sugar for `crate::frontend::open::<KeyValue>()`
+pub async fn open() -> std::io::Result<KeyValue> {
+    super::open::<KeyValue>().await
+}
+
+/// Opens a key-value store from dir
+///
+/// Note: This store is *ephemeral* until `save()` or `save_as()` is called.
+///
+/// Sugar for `crate::frontend::open_dir::<KeyValue>(..)`
+pub async fn open_dir(dir: impl Into<PathBuf>) -> std::io::Result<KeyValue> {
+    super::open_dir::<KeyValue>(dir).await
+}
+
 use crate::{
     IRecord, Namespace, Query, Record, Worker, search::iter::Search, worker::BackgroundSync,
 };
@@ -7,9 +134,11 @@ use std::{
     ops::{Deref, DerefMut},
     path::PathBuf,
 };
-use tracing::{debug, trace};
-
-use super::state::{SharedState, State};
+use tracing::trace;
+use super::{
+    Frontend,
+    state::SharedState,
+};
 
 /// Provides a put(..) function that takes a serializable object as the value
 pub trait Put<V> {
@@ -64,94 +193,16 @@ pub struct KeyValue {
     shared: SharedState,
 }
 
-/// Returns true if the "default" store exists
-///
-/// Returns an error if file system permissions do not exist
-pub fn default_store_exists() -> std::io::Result<bool> {
-    let dot_folder = format!(".{}", env!("CARGO_PKG_NAME"));
-    let dir = std::env::var("RUNIR_WORK_DIR")
-        .map(|w| PathBuf::from(w))
-        .ok()
-        .unwrap_or(std::env::current_dir()?.join(&dot_folder));
+impl Frontend for KeyValue {
+    const NAME: &str = "kv";
 
-    Ok(dir.join("store.tar").exists())
-}
-
-/// Returns a path to the default "save" directory
-///
-/// Returns an error if file system permissions do not exist
-pub fn default_save_dir() -> std::io::Result<PathBuf> {
-    let dot_folder = format!(".{}", env!("CARGO_PKG_NAME"));
-    let dir = std::env::var("RUNIR_WORK_DIR")
-        .map(|w| PathBuf::from(w))
-        .ok()
-        .unwrap_or(std::env::current_dir()?.join(&dot_folder));
-
-    if !dir.exists() && dir.ends_with(dot_folder) {
-        debug!("Creating .runir folder {dir:?}");
-        std::fs::create_dir(&dir)?;
-    } else if !dir.exists() {
-        // Since this is passed into the process, do not attempt to create directory unless opt-in
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "Directory set in RUNIR_WORK_DIR must exist",
-        ));
-    }
-
-    Ok(dir)
-}
-
-impl KeyValue {
-    /// Returns an empty KeyValue store
-    ///
-    /// The default WORK_DIR will be set to a temp directory
-    pub fn new() -> Self {
-        let shared = SharedState::default();
+    fn from_shared(shared: SharedState) -> Self {
         let worker = shared.store().namespace("default");
         Self { worker, shared }
     }
+}
 
-    /// Opens a new key-value store
-    ///
-    /// Note: This store is *ephemeral* until `save()` or `save_as()` is called.
-    ///
-    /// Calling `put()` or `get()` will work without error, but state will not persist
-    /// between program runs unless explicitly saved.
-    ///
-    /// This allows fast, in-memory operation by default, without requiring setup.
-    ///
-    /// # KV Store Opening Procedure
-    ///
-    /// If the RUNIR_KV_HOME env variable is not set, the key-value store will default to a temp-directory
-    /// for all file-system operations
-    ///
-    /// When KeyValue::save() is called, the kv_store will attempt to use "std::env::current_dir()/.runir/<CARGO_PKG>",
-    /// as the root directory of the store. If successful, the value of RUNIR_KV_HOME will be set via a .env_runir file written to
-    /// "std::env::current_dir()".
-    ///
-    /// At the start of the application, dotenvy will be used to re-hydrate env variables set in .env_runir.
-    ///
-    /// From that point on, the data stored in RUNIR_KV_HOME will continue to be used cleaned up, or deleted.
-    ///
-    /// If instead KeyValue::save_as(..) is used, this will follow the above env setup as above but with the user provided directory.
-    ///
-    /// WARN: If the current process does not have permissions for any of the above procedures, an error will be returned.
-    pub async fn open() -> std::io::Result<KeyValue> {
-        let state = if default_store_exists()? {
-            let save_dir = default_save_dir()?;
-            State::load(save_dir).await?
-        } else {
-            State::default()
-        };
-
-        let mut shared = SharedState::from(state);
-        shared.update_snapshot();
-        Ok(KeyValue {
-            worker: shared.store().namespace("default"),
-            shared,
-        })
-    }
-
+impl KeyValue {
     /// Saves the current state of the store to a well-known directory
     ///
     /// Note: This store is *ephemeral* until `save()` or `save_as()` is called.
@@ -169,10 +220,10 @@ impl KeyValue {
     /// If successful, this function will output a .env_runir file if it has not been set, (See KeyValue::open(..) for more details)
     ///
     /// WARN: If the current process does not have permissions for any of the above procedures, an error will be returned.
+    /// 
+    /// Sugar for `crate::frontend::save::<KeyValue>(..)`
     pub async fn save(&self) -> std::io::Result<()> {
-        let save_dir = default_save_dir()?;
-        self.shared.state.save(save_dir).await?;
-        Ok(())
+        super::save(self).await
     }
 
     /// Saves the current state of the store to a user-specified directory
@@ -185,9 +236,11 @@ impl KeyValue {
     /// This allows fast, in-memory operation by default, without requiring setup.
     ///
     /// (See KeyValue::save for details on operational behavior)
+    /// 
+    /// Sugar for `crate::frontend::save_as::<KeyValue>(..)`
     #[inline]
     pub async fn save_as(&self, to: impl Into<PathBuf>) -> std::io::Result<()> {
-        self.shared.state.save(to.into()).await
+        super::save_as(self, to).await
     }
 
     /// Returns a new key-value store scoped to a namespace
@@ -394,11 +447,17 @@ impl<'get> Get<'get, &'get [u8]> for KeyValue {
     }
 }
 
+impl AsRef<SharedState> for KeyValue {
+    fn as_ref(&self) -> &SharedState {
+        &self.shared
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use std::path::PathBuf;
     use super::{Get, KeyValue, Put};
-    use crate::{QueryBuilder, Record, field, filter, namespace};
+    use crate::{field, filter, frontend::Frontend, namespace, QueryBuilder, Record};
+    use std::path::PathBuf;
 
     #[test]
     fn test_kv_put_get() {
@@ -531,8 +590,9 @@ mod test {
 
         let _ = std::fs::create_dir(".test");
         kv.save().await.unwrap();
+        kv.save_as(".test").await.unwrap();
 
-        let kv = KeyValue::open().await.unwrap();
+        let kv = super::open().await.unwrap();
         let count = kv
             .search(
                 namespace("default")
@@ -542,12 +602,12 @@ mod test {
             .count();
         assert_eq!(1, count);
 
-        kv.shared.state.import(".test/store.tar").await.unwrap();
+        kv.shared.state.import(".test/kv.tar").await.unwrap();
         let imported = kv
             .shared
             .state
             .snapshot(crate::frontend::state::Snapshot::Imported(PathBuf::from(
-                ".test/store.tar",
+                ".test/kv.tar",
             )));
 
         let hello2 = imported.lookup("default", "hello2").unwrap();
