@@ -321,6 +321,10 @@ impl StoreArchive {
             debug!("Previous store found, attempting to append to store");
             let grow_to = self.get_total_required_space()?;
 
+            // TODO:
+            // Can optimize appending perf by doing a scan over existing entries to do a
+            // diff comparison with existing entries
+
             let mut file = tokio::fs::OpenOptions::new()
                 .write(true)
                 .read(true)
@@ -328,7 +332,8 @@ impl StoreArchive {
                 .await?;
 
             let cursor = file.seek(std::io::SeekFrom::End(-1024)).await?;
-            debug!("Setting cursor to {cursor}, growing to {}", cursor + grow_to + 1024);
+            let grow_to = cursor + grow_to + 1024;
+            debug!("Setting cursor to {cursor}, growing to {}", grow_to);
             append_mode = true;
             file
         } else {
