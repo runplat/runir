@@ -18,6 +18,13 @@
 pub mod kv;
 pub mod state;
 
+pub mod prelude {
+    pub use super::Frontend;
+    pub use super::kv::Get;
+    pub use super::kv::Put;
+    pub use super::kv;
+}
+
 /// Common trait for frontends to implement to provide common utilities
 pub trait Frontend {
     /// Name of the frontend
