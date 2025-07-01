@@ -1,5 +1,7 @@
 use crate::{
-    archive::{self, Entry, HeaderBuilder, Sha256Digest}, Data, Namespace, Opts
+    Data, Namespace, Opts,
+    archive::{self, Entry, HeaderBuilder, Sha256Digest},
+    util::Peek,
 };
 use ascii::AsAsciiStr;
 use bytes::Bytes;
@@ -7,7 +9,10 @@ use crc::{CRC_64_MS, Crc, Digest};
 use serde::Deserialize;
 use sha2::Sha256;
 use std::{
-    fmt::Debug, io::Error, sync::OnceLock, time::{Duration, SystemTime, UNIX_EPOCH}
+    fmt::Debug,
+    io::Error,
+    sync::OnceLock,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
@@ -18,14 +23,14 @@ fn crc_digest() -> Digest<'static, u64> {
 }
 
 /// IRecord provides an immutable front-end for record consumers and abstracts the inner type
-/// 
+///
 /// Implementations must gurantee,
-/// 
+///
 /// 1) The edge providing an IRecord must always do so from a source Record
 /// 2) An IRecord can be reversed into it's source Record
-/// 
+///
 /// WIP
-pub trait IRecord : Debug {
+pub trait IRecord: Debug {
     /// Key that should be used when indexing a type that implements IRecord
     fn index_key(&self) -> u64 {
         self.uuid().as_u64_pair().0 ^ self.ns_chk()
@@ -47,33 +52,15 @@ pub trait IRecord : Debug {
     fn to_record(&self) -> Record;
 
     /// Returns a flexbuffer reader over the flexbuffer root
-    /// 
+    ///
     /// Returns None if the current record data does not have a flexbuffer root
     #[inline]
-    fn peek(&self) -> Option<flexbuffers::Reader<&[u8]>> {
-        flexbuffers::Reader::get_root(self.bytes()).ok()
+    fn peek<'peek>(&'peek self) -> Option<crate::util::Peek<'peek>> {
+        flexbuffers::Reader::get_root(self.bytes())
+            .ok()
+            .map(Peek::from)
     }
 
-    /// Returns a flexbuffer map reader over the flexbuffer root
-    /// 
-    /// Returns None if the current record data does not have a flexbuffer root, or if
-    /// the flexbuffer root is not a map
-    #[inline]
-    fn peek_as_map(&self) -> Option<flexbuffers::MapReader<&[u8]>> {
-        flexbuffers::Reader::get_root(self.bytes()).ok().and_then(|r| r.get_map().ok())
-    }
-
-    /// Returns a flexbuffer reader over a key at the flexbuffer root as a map
-    /// 
-    /// Returns None if the current record data does not have a flexbuffer root, or if
-    /// the flexbuffer root is not a map
-    /// 
-    /// Note: If the key does not exist, this will still return a reader
-    #[inline]
-    fn peek_as_map_at(&self, key: &str) -> Option<flexbuffers::Reader<&[u8]>> {
-        self.peek_as_map().map(|k| k.idx(key))
-    }
-    
     /// Returns the content digest buffer for the data stored
     #[inline]
     fn content(&self) -> Sha256Digest {
@@ -108,16 +95,13 @@ impl IRecord for Record {
     }
 }
 
-pub trait PeekMap : IRecord {
+pub trait PeekMap: IRecord {
     /// Peeks at the flexbuffer root and return a value
     ///
     /// Returns None if data is not a flexbuffer root
     #[inline]
-    fn peek_map<O>(
-        &self,
-        peek: impl Fn(flexbuffers::Reader<&[u8]>) -> O,
-    ) -> Option<O> {
-        self.peek().map(|d| peek(d))
+    fn peek_map<O>(&self, peek: impl Fn(flexbuffers::Reader<&[u8]>) -> O) -> Option<O> {
+        self.peek().map(|d| peek((*d).clone()))
     }
 }
 

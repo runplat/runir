@@ -1,10 +1,15 @@
 mod name;
-use futures::future::RemoteHandle;
 pub use name::Name;
+
+mod peek;
+pub use peek::Peek;
+pub use peek::PeekExtensions;
 
 mod executor;
 pub use executor::Executor;
 pub use executor::TokioExecutor;
+
+use futures::future::RemoteHandle;
 
 /// Util for spawning futures into a runtime
 #[inline]
