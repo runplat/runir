@@ -76,3 +76,25 @@ impl<'peek> PeekExtensions<'peek> for Option<Peek<'peek>> {
         self.as_ref().and_then(|r| r.at(key))
     }
 }
+
+impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
+    #[inline]
+    fn bool(&'peek self) -> Option<bool> {
+        self.as_ref().and_then(|r| r.bool())
+    }
+
+    #[inline]
+    fn str(&'peek self) -> Option<&'peek str> {
+        self.as_ref().and_then(|r| r.str())
+    }
+
+    #[inline]
+    fn u64(&'peek self) -> Option<u64> {
+        self.as_ref().and_then(|r| r.u64())
+    }
+
+    #[inline]
+    fn at(&'peek self, key: &str) -> Option<Peek<'peek>> {
+        self.as_ref().and_then(|r| r.at(key))
+    }
+}
