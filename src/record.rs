@@ -62,6 +62,17 @@ pub trait IRecord : Debug {
     fn peek_as_map(&self) -> Option<flexbuffers::MapReader<&[u8]>> {
         flexbuffers::Reader::get_root(self.bytes()).ok().and_then(|r| r.get_map().ok())
     }
+
+    /// Returns a flexbuffer reader over a key at the flexbuffer root as a map
+    /// 
+    /// Returns None if the current record data does not have a flexbuffer root, or if
+    /// the flexbuffer root is not a map
+    /// 
+    /// Note: If the key does not exist, this will still return a reader
+    #[inline]
+    fn peek_as_map_at(&self, key: &str) -> Option<flexbuffers::Reader<&[u8]>> {
+        self.peek_as_map().map(|k| k.idx(key))
+    }
     
     /// Returns the content digest buffer for the data stored
     #[inline]
