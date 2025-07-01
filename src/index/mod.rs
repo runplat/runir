@@ -105,6 +105,12 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
             }
         }
     }
+
+    /// Returns a reference to inner storage
+    #[inline]
+    pub fn storage(&self) -> &S {
+        &self.storage
+    }
 }
 
 impl<R: crate::IRecord, S: Storage<Record = R>> AsRef<S> for Index<R, S> {
