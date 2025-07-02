@@ -31,6 +31,11 @@ pub trait PeekExtensions<'peek> {
 
     /// Returns a u64 if the current peek context is a u64
     fn u64(self) -> Option<u64>;
+
+    /// Returns a **filtered** iterator of u64 values
+    /// 
+    /// If the stored value is not a vector, returns None
+    fn iter_u64(self) -> Option<impl Iterator<Item = u64>>;
 }
 
 impl<'peek> PeekExtensions<'peek> for Peek<'peek> {
@@ -52,6 +57,11 @@ impl<'peek> PeekExtensions<'peek> for Peek<'peek> {
     #[inline]
     fn at(self, key: &str) -> Option<Peek<'peek>> {
         self.get_map().ok().map(|p| Peek(p.idx(key)))
+    }
+    
+    #[inline]
+    fn iter_u64(self) -> Option<impl Iterator<Item = u64>> {
+        self.get_vector().ok().map(|p| p.iter().filter_map(|r| r.get_u64().ok()))
     }
 }
 
@@ -75,6 +85,11 @@ impl<'peek> PeekExtensions<'peek> for Option<Peek<'peek>> {
     fn at(self, key: &str) -> Option<Peek<'peek>> {
         self.and_then(|r| r.at(key))
     }
+
+    #[inline]
+    fn iter_u64(self) -> Option<impl Iterator<Item = u64>> {
+        self.and_then(|r| r.iter_u64())
+    }
 }
 
 impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
@@ -96,5 +111,10 @@ impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
     #[inline]
     fn at(self, key: &str) -> Option<Peek<'peek>> {
         self.cloned().and_then(|r| r.at(key))
+    }
+
+    #[inline]
+    fn iter_u64(self) -> Option<impl Iterator<Item = u64>> {
+        self.cloned().and_then(|r| r.iter_u64())
     }
 }
