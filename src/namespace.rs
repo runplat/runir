@@ -26,7 +26,7 @@ impl<T: Into<Namespace>> ToNamespace for T {}
 ///
 /// Otherwise, the namespace is treated as ephemeral and will only be valid during the lifetime of
 /// the process
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct Namespace {
     k1: u64,
     k2: u64,
@@ -78,6 +78,18 @@ impl Namespace {
         }
     }
 
+    /// Const namespace creator 
+    #[inline]
+    pub const fn const_new(keys: [u64; 4], opts: Opts) -> Self {
+        Namespace {
+            k1: keys[0],
+            k2: keys[1],
+            k3: keys[2],
+            k4: keys[3],
+            opts,
+        }
+    }
+
     /// Returns an ephemeral namespace
     #[inline]
     pub fn ephemeral() -> Namespace {
@@ -120,12 +132,12 @@ impl Namespace {
         [
             uuid::Uuid::from_u64_pair(self.k1, self.k2),
             uuid::Uuid::from_u64_pair(self.k3, self.k4),
-            self.ns_uuid()
+            self.ns_uuid(),
         ]
     }
 
     /// Decodes the namespace
-    /// 
+    ///
     /// Returns None if the namespace chk value does not match the encoded chk value
     #[inline]
     pub fn decode(encoded: [uuid::Uuid; 3]) -> Option<Self> {

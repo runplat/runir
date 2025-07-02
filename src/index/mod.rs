@@ -143,6 +143,12 @@ impl<R: crate::IRecord, S: Storage<Record = R>> From<Vec<R>> for Index<R, S> {
     }
 }
 
+impl<R: crate::IRecord, S: Storage<Record = R> + Clone> Clone for Index<R, S> {
+    fn clone(&self) -> Self {
+        Self { storage: self.storage.clone(), reverse: self.reverse.clone() }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::{
