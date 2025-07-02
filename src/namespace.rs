@@ -28,8 +28,10 @@ impl<T: Into<Namespace>> ToNamespace for T {}
 /// the process
 #[derive(Clone)]
 pub struct Namespace {
-    /// Hashing core of the namespace
-    hasher_core: ahash::RandomState,
+    k1: u64,
+    k2: u64,
+    k3: u64,
+    k4: u64,
     /// Default record options
     opts: Opts,
 }
@@ -68,7 +70,10 @@ impl Namespace {
         let k4 = init_hash.hash_one(namespace);
 
         Namespace {
-            hasher_core: ahash::RandomState::with_seeds(k1, k2, k3, k4),
+            k1,
+            k2,
+            k3,
+            k4,
             opts: Opts::default(),
         }
     }
@@ -77,7 +82,10 @@ impl Namespace {
     #[inline]
     pub fn ephemeral() -> Namespace {
         Namespace {
-            hasher_core: ahash::RandomState::default(),
+            k1: 0,
+            k2: 0,
+            k3: 0,
+            k4: 0,
             opts: Opts::ephemeral(),
         }
     }
@@ -91,19 +99,47 @@ impl Namespace {
     /// Returns the key value for a label under this namespace
     #[inline]
     pub fn key(&self, label: &str) -> u64 {
-        self.hasher_core.hash_one(label)
+        self.hash_state().hash_one(label)
     }
 
     /// Returns the checksum value for the namespace
     #[inline]
     pub fn chk(&self) -> u64 {
-        self.hasher_core.hash_one(self.opts)
+        self.hash_state().hash_one(self.opts)
     }
 
     /// Returns a uuid representing this namespace
     #[inline]
     pub fn ns_uuid(&self) -> uuid::Uuid {
         uuid::Uuid::from_u64_pair(self.chk(), self.opts.encode())
+    }
+
+    /// Returns an encoding for this namespace
+    #[inline]
+    pub fn encode(&self) -> [uuid::Uuid; 3] {
+        [
+            uuid::Uuid::from_u64_pair(self.k1, self.k2),
+            uuid::Uuid::from_u64_pair(self.k3, self.k4),
+            self.ns_uuid()
+        ]
+    }
+
+    /// Decodes the namespace
+    /// 
+    /// Returns None if the namespace chk value does not match the encoded chk value
+    #[inline]
+    pub fn decode(encoded: [uuid::Uuid; 3]) -> Option<Self> {
+        let [(k1, k2), (k3, k4), (ns_chk, opts)] = encoded.map(|g| g.as_u64_pair());
+
+        let ns = Self {
+            k1,
+            k2,
+            k3,
+            k4,
+            opts: Opts::decode(opts),
+        };
+
+        Some(ns).filter(|n| n.chk() != ns_chk)
     }
 
     /// Returns the namespace-scoped options
@@ -162,15 +198,20 @@ impl Namespace {
         record.opts_mut().set_serialized_object(true);
         record
     }
+
+    /// Materialized the hash_state for this namespace
+    fn hash_state(&self) -> RandomState {
+        if self.k1 == 0 && self.k2 == 0 && self.k3 == 0 && self.k4 == 0 {
+            RandomState::new()
+        } else {
+            RandomState::with_seeds(self.k1, self.k2, self.k3, self.k4)
+        }
+    }
 }
 
 impl From<()> for Namespace {
     fn from(_: ()) -> Self {
-        Namespace {
-            // This means this namespace will be static within the same process
-            hasher_core: RandomState::with_seed(0),
-            opts: Opts::default(),
-        }
+        Namespace::new("")
     }
 }
 
