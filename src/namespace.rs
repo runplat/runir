@@ -151,7 +151,7 @@ impl Namespace {
             opts: Opts::decode(opts),
         };
 
-        Some(ns).filter(|n| n.chk() != ns_chk)
+        Some(ns).filter(|n| n.chk() == ns_chk)
     }
 
     /// Returns the namespace-scoped options

@@ -10,79 +10,79 @@
 //! ## Canonical KV Store API Example
 //! ```rs
 //! let kv = runir::kv::open().await;
-//! 
+//!
 //! // `put` returns a `BackgroundSync` handle, which can be awaited on to ensure the value has been stored
 //! let bg_sync = kv.put("value", b"hello world")?;
-//! 
+//!
 //! // It is however not required to `await` in order to retrieve the value
 //! bg_sync.forget();
-//! 
+//!
 //! // The value is always available immediately
 //! assert_eq!(b"hello world", kv.get("value"));
-//! 
+//!
 //! // Once save(..) is called, the same data will be persisted to disk and available on process restart
 //! kv.save().await?;
 //! ```
-//! 
+//!
 //! Calling `save()` will flush all stored values from any kv-store handles assoicated to the originally opened handle.
-//! 
+//!
 //! Opening multiple KV frontends to the same save path (i.e. calling kv::open(..) twice from the same process) concurrently may result in overwrite conflicts. See below section for "Concurrency and Multi writer Safety" for details.
-//! 
+//!
 //! ## KV Store Namespaces
 //! ```rs
 //! let kv = runir::kv::open().await;
-//! 
+//!
 //! // Instead of baking namespaces into the key itself, you can namespace the entire store
 //! let ns_kv = kv.ns("my_namespace");
 //! ```
-//! 
+//!
 //! ## KV Store "serde" api
 //! ```rs
 //! let kv = runir::kv::open().await;
-//! 
+//!
 //! // This enables the kv store to be "object" aware
 //! let kv_serde = kv.serde();
-//! 
+//!
 //! // In this mode, any type that implements `serde::Serialize` may be used in `put(..)`
 //! kv_serde.put("value", &toml::toml! {
 //!     my_interesting_value = "hello"
 //! });
-//! 
+//!
 //! // Load the object back from the store to any type that implements `serde::Deserialize`
 //! let obj = kv_serde.load::<toml::Value>("value").unwrap();
-//! 
+//!
 //! // Or use peek(..) to map the data w/o allocating a new object
 //! let reader = obj.peek().unwrap();
 //! assert_eq!("hello", reader.as_map().idx("my_interesting_value").as_str())
 //! ```
-//! 
+//!
 //! ## KV Multi-Threaded Scenarios
-//! 
+//!
 //! Multi-threaded scenarios are supported by periodically calling, `refresh()`.
-//! 
+//!
 //! This allows threads to update their indicies in order to view records stored by different threads.
-//! 
+//!
 //! >
-//! > Note/WIP: 
+//! > Note/WIP:
 //! > Currently runir assumes idempotency, meaning all values in put(..) should be valid.
 //! > However, in the future "merge" policies will be supported in order to customize conflict resolution.
-//! > 
+//! >
 //! > i.e. No merge policy == idempotent
 //! >
-//! 
+//!
 //! ```rs
 //! let kv = runir::kv::open().await;
-//! 
+//!
 //! // Pseudo-code: in two different threads
-//! 
+//!
 //! // Imagine two threads that are scoped to the same namespace
 //! thread ! {
 //!   let ns = kv.ns("my_ns");
 //!   ns.put("val1", b"hello")?.await?; // If you wish to ensure this is available
 //! }
-//! 
+//!
 //! ..
-//! 
+//!
 //! thread ! {
 //!   // Each call to kv.ns(..) creates a new "standalone" kv handle that manages local writes,
 //!   // while automatically flushing them to shared storage. This means all writes are immediately
@@ -96,7 +96,7 @@
 //!   assert_eq!(b"hello", ns.get("val1").unwrap());
 //! }
 //! ```
-//! 
+//!
 //! ## Concurrency and Multi-writer Safety
 //!
 //! - Cloning a `kv` store (e.g., via `.ns(..)` or manually sharing a `SharedState`) is **thread-safe**.
@@ -110,10 +110,10 @@
 //! **Guideline:** Share `SharedState` if you need multiple writers. Avoid multiple independent frontends writing to the same save path unless you're managing access externally.
 //!
 //! # Search Support
-//! 
+//!
 //! ```rs
 //! use runir::query::*;
-//! 
+//!
 //! let kv = runir::kv::open().await?;
 //!
 //! // Since kv-store is backed by runir::Store, search functionality is made available by default
@@ -121,7 +121,7 @@
 //!     ..
 //! }
 //! ```
-//! 
+//!
 
 /// Opens a new or existing key-value store
 ///
@@ -141,6 +141,7 @@ pub async fn open_dir(dir: impl Into<PathBuf>) -> std::io::Result<KeyValue> {
     super::open_dir::<KeyValue>(dir).await
 }
 
+use super::{Frontend, state::SharedState};
 use crate::{
     IRecord, Namespace, Query, Record, Worker, search::iter::Search, worker::BackgroundSync,
 };
@@ -151,10 +152,6 @@ use std::{
     path::PathBuf,
 };
 use tracing::trace;
-use super::{
-    Frontend,
-    state::SharedState,
-};
 
 /// Provides a put(..) function that takes a serializable object as the value
 pub trait Put<V> {
@@ -236,7 +233,7 @@ impl KeyValue {
     /// If successful, this function will output a .env_runir file if it has not been set, (See KeyValue::open(..) for more details)
     ///
     /// WARN: If the current process does not have permissions for any of the above procedures, an error will be returned.
-    /// 
+    ///
     /// Sugar for `crate::frontend::save::<KeyValue>(..)`
     pub async fn save(&self) -> std::io::Result<()> {
         super::save(self).await
@@ -252,7 +249,7 @@ impl KeyValue {
     /// This allows fast, in-memory operation by default, without requiring setup.
     ///
     /// (See KeyValue::save for details on operational behavior)
-    /// 
+    ///
     /// Sugar for `crate::frontend::save_as::<KeyValue>(..)`
     #[inline]
     pub async fn save_as(&self, to: impl Into<PathBuf>) -> std::io::Result<()> {
@@ -313,6 +310,19 @@ impl KeyValue {
             store.search(q)
         } else {
             self.worker.cache().search(q)
+        }
+    }
+
+    /// Puts a record into the kv store
+    #[inline]
+    pub fn put_raw(&mut self, record: Record) -> std::io::Result<BackgroundSync> {
+        if self.worker.push(record) {
+            self.worker.sync()
+        } else {
+            Err(Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Record could not be stored",
+            ))
         }
     }
 
@@ -472,7 +482,7 @@ impl AsRef<SharedState> for KeyValue {
 #[cfg(test)]
 mod test {
     use super::{Get, KeyValue, Put};
-    use crate::{field, filter, frontend::Frontend, namespace, QueryBuilder, Record};
+    use crate::{QueryBuilder, Record, field, filter, frontend::Frontend, namespace};
     use std::path::PathBuf;
 
     #[test]
