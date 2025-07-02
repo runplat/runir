@@ -34,8 +34,13 @@ pub trait PeekExtensions<'peek> {
 
     /// Returns a **filtered** iterator of u64 values
     /// 
-    /// If the stored value is not a vector, returns None
+    /// If the current value is not a vector, returns None
     fn iter_u64(self) -> Option<impl Iterator<Item = u64>>;
+
+    /// Returns an iterator of peek's from the current item
+    /// 
+    /// If the current value is not a vector, returns None
+    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>>;
 }
 
 impl<'peek> PeekExtensions<'peek> for Peek<'peek> {
@@ -61,7 +66,12 @@ impl<'peek> PeekExtensions<'peek> for Peek<'peek> {
     
     #[inline]
     fn iter_u64(self) -> Option<impl Iterator<Item = u64>> {
-        self.get_vector().ok().map(|p| p.iter().filter_map(|r| r.get_u64().ok()))
+        self.iter().map(|i| i.filter_map(|r| r.u64()))
+    }
+    
+    #[inline]
+    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+        self.get_vector().ok().map(|v| v.iter().map(|r| Peek(r)))
     }
 }
 
@@ -90,6 +100,11 @@ impl<'peek> PeekExtensions<'peek> for Option<Peek<'peek>> {
     fn iter_u64(self) -> Option<impl Iterator<Item = u64>> {
         self.and_then(|r| r.iter_u64())
     }
+    
+    #[inline]
+    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+        self.and_then(|r| r.iter())
+    }
 }
 
 impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
@@ -116,5 +131,10 @@ impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
     #[inline]
     fn iter_u64(self) -> Option<impl Iterator<Item = u64>> {
         self.cloned().and_then(|r| r.iter_u64())
+    }
+    
+    #[inline]
+    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+        self.cloned().and_then(|r| r.iter())
     }
 }
