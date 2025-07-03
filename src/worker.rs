@@ -19,12 +19,12 @@ pub struct Worker {
     namespace: Namespace,
     /// Records being written by this worker
     records: Vec<Record>,
-    /// Store this worker is associated to
-    store: Option<StoreSettings>,
     /// Record Cache
     ///
     /// Empty unless flush(..) is called
     cache: VecIndex<Record>,
+    /// Store this worker is associated to
+    store: Option<StoreSettings>,
 }
 
 impl Worker {

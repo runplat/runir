@@ -23,9 +23,6 @@ pub struct StoreSettings {
     work_dir: PathBuf,
     /// Queue for pushing ArchiveMembers for packing
     packer: Pusher<ArchiveMember>,
-    // TODO:
-    // /// Indexer to use when writing records to any type of local index
-    // indexer: Indexer
 }
 
 impl StoreSettings {

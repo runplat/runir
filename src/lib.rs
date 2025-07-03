@@ -110,6 +110,8 @@ pub use virt::VirtualData;
 pub mod frontend;
 pub use frontend::kv;
 
+pub mod bg;
+
 mod queue;
 pub use queue::Queue;
 
