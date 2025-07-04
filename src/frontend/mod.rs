@@ -124,7 +124,7 @@ pub async fn open<F: Frontend>() -> std::io::Result<F> {
 #[inline]
 pub async fn open_dir<F: Frontend>(dir: impl Into<std::path::PathBuf>) -> std::io::Result<F> {
     let state = state::State::load::<F>(dir).await?;
-    let mut shared = state::SharedState::from(state);
+    let shared = state::SharedState::from(state);
     shared.update_snapshot();
     Ok(F::from_shared(shared))
 }

@@ -142,13 +142,16 @@ pub async fn open_dir(dir: impl Into<PathBuf>) -> std::io::Result<KeyValue> {
 }
 
 use super::{Frontend, state::SharedState};
-use crate::{search::iter::Search, IRecord, Namespace, Query, Record, SharedWorker, ToNamespace, VecIndex};
+use crate::{
+    IRecord, Namespace, Query, Record, SharedWorker, ToNamespace, search::iter::Search,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     io::Error,
     ops::{Deref, DerefMut},
     path::PathBuf,
 };
+use tracing::{debug, error};
 
 /// Provides a put(..) function that takes a serializable object as the value
 pub trait Put<V> {
@@ -203,8 +206,6 @@ pub struct KeyValue {
     worker: SharedWorker,
     /// State that is shared across all workers
     shared: SharedState,
-    /// Local index
-    index: VecIndex<Record>,
 }
 
 impl Frontend for KeyValue {
@@ -216,7 +217,6 @@ impl Frontend for KeyValue {
             ns: ().to_namespace(),
             worker: SharedWorker::from(worker),
             shared,
-            index: Default::default()
         }
     }
 }
@@ -271,7 +271,6 @@ impl KeyValue {
             ns,
             worker: self.worker.clone(),
             shared: self.shared.clone(),
-            index: self.index.clone(),
         }
     }
 
@@ -283,25 +282,24 @@ impl KeyValue {
                 ns: self.ns.clone(),
                 worker: self.worker.clone(),
                 shared: self.shared.clone(),
-                index: self.index.clone(),
             },
         }
     }
 
     /// Refreshes the key value store's indexes
     #[inline]
-    pub async fn refresh(&mut self) -> std::io::Result<()> {
+    pub async fn refresh(&self) -> std::io::Result<()> {
         self.worker.sync()?.await?;
         self.shared.state.flush()?;
-        self.shared
-            .state
-            .refresh_index(&mut self.index);
         // self.worker.take_snapshot();
-        self.shared.update_snapshot();
         Ok(())
     }
 
     /// Searches over stored records w/ a query
+    /// 
+    /// This function will invoke a force_sync to ensure the search
+    /// happens over fresh data, For performant operations, lookup is more
+    /// likely desired
     #[inline]
     pub fn search<'q>(
         &'q self,
@@ -309,12 +307,9 @@ impl KeyValue {
     ) -> impl Iterator<Item = &'q Record> {
         let q = query.into();
 
-        if self.shared.snapshot().storage().is_empty() {
-            self.index.search(q)
-        } else {
-            // Switch to shared snapshot once it has data
-            self.shared.snapshot().search(q)
-        }
+        self.force_sync();
+
+        self.shared.snapshot().search(q)
     }
 
     /// Puts a record into the kv store
@@ -322,7 +317,7 @@ impl KeyValue {
     pub fn put_raw(&mut self, record: Record) -> std::io::Result<()> {
         if self.worker.push(record.clone()) {
             // self.worker.sync()
-            self.index.index(record);
+            //self.index.index(record);
             Ok(())
         } else {
             Err(Error::new(
@@ -332,12 +327,28 @@ impl KeyValue {
         }
     }
 
+    /// Forces a sync
+    #[inline]
+    fn force_sync(&self) {
+        debug!("Force sync invoked, blocking for a refresh");
+        if let Err(err) = futures::executor::block_on(self.refresh()) {
+            error!("Could not refresh {err}");
+        } else {
+            debug!("refresh completed, updating snapshot");
+            self.shared.update_snapshot();
+        }
+    }
+
     /// Lookup a record in the current namespace
     #[inline]
     fn lookup(&self, label: &str) -> Option<&Record> {
-        self.index
-            .lookup(self.ns.clone(), label)
-            .or_else(|| self.shared.snapshot().lookup(self.ns.clone(), label))
+        if self.shared.snapshot().storage().is_empty() {
+            self.force_sync();
+        }
+        self.shared.snapshot().lookup(self.ns.clone(), label).or_else(|| {
+            self.force_sync();
+            self.shared.snapshot().lookup(self.ns.clone(), label)
+        })
     }
 }
 
@@ -453,15 +464,18 @@ mod test {
     use std::path::PathBuf;
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_kv_put_get() {
         let mut kv = KeyValue::new();
 
         kv.put("hello", b"hello").unwrap();
 
         assert_eq!(b"hello", kv.get("hello").unwrap());
+        assert_eq!(b"hello", kv.get("hello").unwrap());
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_kv_put_get_serde() {
         let mut kv = KeyValue::new().serde();
 
@@ -475,7 +489,7 @@ mod test {
             },
         )
         .unwrap();
-        
+
         assert_eq!(
             "hello",
             kv.load::<toml::Value>("hello").unwrap()["other"]["values"]["also_important"]

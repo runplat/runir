@@ -1,3 +1,4 @@
+use parking_lot::RwLock;
 use tracing::debug;
 
 use crate::{
@@ -7,6 +8,7 @@ use crate::{
 use std::{
     ops::Deref,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
 };
 
@@ -14,11 +16,22 @@ use super::Frontend;
 
 type RecordSnapshot = Arc<VecIndex<Record>>;
 
+/// Type-alias over a snapshot cell
+type SnapshotCell = Arc<RwLock<Pin<Box<RecordSnapshot>>>>;
+
 /// Wrapper over State to allow cloning
-#[derive(Default)]
 pub struct SharedState {
     pub(crate) state: Arc<State>,
-    snapshot: RecordSnapshot,
+    snapshot: SnapshotCell,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self {
+            state: Default::default(),
+            snapshot: Arc::new(RwLock::new(Box::pin(RecordSnapshot::default()))),
+        }
+    }
 }
 
 /// Common state used w/ all frontends
@@ -112,7 +125,12 @@ impl State {
         };
 
         archive.pack(&self.frontend).await?;
-        debug!(frontend = self.frontend, instance = self.instance, "saved store archive to dir {:?}", archive.output_dir);
+        debug!(
+            frontend = self.frontend,
+            instance = self.instance,
+            "saved store archive to dir {:?}",
+            archive.output_dir
+        );
         Ok(())
     }
 
@@ -133,7 +151,12 @@ impl State {
             Snapshot::Imported(store_tar.as_ref().to_path_buf()),
             imported.into(),
         );
-        debug!(frontend = self.frontend, instance = self.instance, "imported {:?} to state", store_tar.as_ref());
+        debug!(
+            frontend = self.frontend,
+            instance = self.instance,
+            "imported {:?} to state",
+            store_tar.as_ref()
+        );
         Ok(())
     }
 
@@ -157,7 +180,12 @@ impl State {
         state
             .snapshots
             .insert(Snapshot::Default, Arc::new(snapshot));
-        debug!(frontend = F::NAME, instance = state.instance, "loaded state from {:?}", frontend_tar);
+        debug!(
+            frontend = F::NAME,
+            instance = state.instance,
+            "loaded state from {:?}",
+            frontend_tar
+        );
         Ok(state)
     }
 }
@@ -194,19 +222,33 @@ impl SharedState {
         (self.state.frontend, self.state.instance)
     }
 
-    /// Updates the local snapshot from the shared state
-    #[inline]
-    pub fn update_snapshot(&mut self) {
-        self.snapshot = self.state.snapshot(Snapshot::Default);
-    }
-
     /// Returns a reference to the latest snapshot
     ///
     /// Note: update_snapshot() must be called in order to update this value
     #[inline]
     pub fn snapshot(&self) -> &VecIndex<Record> {
-        &self.snapshot
+        let resource = self.snapshot.read();
+        let resource = resource.as_ref();
+        unsafe {
+            let inner = Pin::into_inner_unchecked(resource);
+            let cast = cast_ref(inner);
+            let cast = cast.as_ref();
+            cast.expect("should never be a null pointer")
+        }
     }
+
+    /// Borrows a mutable reference to the inner runtime
+    #[inline]
+    pub fn update_snapshot(&self) {
+        let mut resource = self.snapshot.write();
+        let mut resource = resource.as_mut();
+        *resource = self.state.snapshot(Snapshot::Default);
+    }
+}
+
+/// Casts a mutable reference to a raw mutable pointer
+fn cast_ref<T: ?Sized>(r: &T) -> *const T {
+    r
 }
 
 impl Clone for SharedState {
@@ -222,7 +264,7 @@ impl From<State> for SharedState {
     fn from(value: State) -> Self {
         Self {
             state: value.into(),
-            snapshot: Default::default(),
+            snapshot: Arc::new(RwLock::new(Box::pin(RecordSnapshot::default()))),
         }
     }
 }
