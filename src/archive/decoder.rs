@@ -1,4 +1,4 @@
-use super::{entry::FileEntryReference, Entry};
+use super::{Entry, entry::FileEntryReference};
 use crate::archive::Header;
 use bytes::{Buf, BufMut, BytesMut};
 use sha2::{Digest, Sha256};
@@ -18,66 +18,17 @@ pub struct TapeDecoder {
 impl TapeDecoder {
     /// Returns a tape recorder that only emits entry references
     pub fn references_only() -> Self {
-        Self { entries: vec![], digest_only: true, cursor: 0 }
-    }
-}
-
-enum Dest {
-    Bytes(BytesMut),
-    Digester {
-        digest: Sha256,
-        offset: usize,
-        len: usize,
-    }
-}
-
-impl Dest {
-    pub fn put_chunk(&mut self, chunk: &[u8]) {
-        match self {
-            Dest::Bytes(bytes_mut) => bytes_mut.put(chunk),
-            Dest::Digester {
-                digest,
-                len,
-                ..
-            } => {
-                digest.update(chunk);
-                *len += chunk.len();
-            },
+        Self {
+            entries: vec![],
+            digest_only: true,
+            cursor: 0,
         }
     }
 
-    pub fn len(&self) -> usize {
-        match self {
-            Dest::Bytes(bytes_mut) => bytes_mut.len(),
-            Dest::Digester { len, .. } => *len,
-        }
-    }
-
-    pub fn to_entry(self, header: Header) -> Entry {
-        match self {
-            Dest::Bytes(mut buf) => {
-                // Truncate the buffer to the exact size indicated by the header
-                buf.truncate(header.size() as usize);
-
-                let buf = buf.freeze();
-                Entry::regular(header, buf)
-            },
-            Dest::Digester { digest, offset, .. } => {
-                Entry::Reference(FileEntryReference { header, digest, offset })
-            },
-        }
-    }
-}
-
-impl Decoder for TapeDecoder {
-    type Item = Entry;
-
-    type Error = std::io::Error;
-
-    fn decode(
-        &mut self,
-        src: &mut bytes::BytesMut,
-    ) -> std::result::Result<Option<Self::Item>, Self::Error> {
+    /// Decodes an entry from a src buffer
+    ///
+    /// Returns Some(Entry) on every 512 block read from src
+    pub fn decode_from(&mut self, src: &mut BytesMut) -> std::io::Result<Option<Entry>> {
         // A tape archive is represented by 512-byte chunks
         if src.is_empty() {
             return Ok(None);
@@ -126,11 +77,18 @@ impl Decoder for TapeDecoder {
             if header.size() > 0 {
                 let size = header.size() as usize;
 
-                self.entries.push((header, if self.digest_only {
-                    Dest::Digester { digest: Sha256::new(), len: 0, offset: self.cursor + 512 }
-                } else {
-                    Dest::Bytes(BytesMut::with_capacity(size))
-                }));
+                self.entries.push((
+                    header,
+                    if self.digest_only {
+                        Dest::Digester {
+                            digest: Sha256::new(),
+                            len: 0,
+                            offset: self.cursor + 512,
+                        }
+                    } else {
+                        Dest::Bytes(BytesMut::with_capacity(size))
+                    },
+                ));
                 src.reserve(size);
             } else {
                 src.advance(512);
@@ -145,5 +103,63 @@ impl Decoder for TapeDecoder {
             self.cursor += 512;
         }
         Ok(Some(Entry::Pending))
+    }
+}
+
+enum Dest {
+    Bytes(BytesMut),
+    Digester {
+        digest: Sha256,
+        offset: usize,
+        len: usize,
+    },
+}
+
+impl Dest {
+    pub fn put_chunk(&mut self, chunk: &[u8]) {
+        match self {
+            Dest::Bytes(bytes_mut) => bytes_mut.put(chunk),
+            Dest::Digester { digest, len, .. } => {
+                digest.update(chunk);
+                *len += chunk.len();
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Dest::Bytes(bytes_mut) => bytes_mut.len(),
+            Dest::Digester { len, .. } => *len,
+        }
+    }
+
+    pub fn to_entry(self, header: Header) -> Entry {
+        match self {
+            Dest::Bytes(mut buf) => {
+                // Truncate the buffer to the exact size indicated by the header
+                buf.truncate(header.size() as usize);
+
+                let buf = buf.freeze();
+                Entry::regular(header, buf)
+            }
+            Dest::Digester { digest, offset, .. } => Entry::Reference(FileEntryReference {
+                header,
+                digest,
+                offset,
+            }),
+        }
+    }
+}
+
+impl Decoder for TapeDecoder {
+    type Item = Entry;
+
+    type Error = std::io::Error;
+
+    fn decode(
+        &mut self,
+        src: &mut bytes::BytesMut,
+    ) -> std::result::Result<Option<Self::Item>, Self::Error> {
+        self.decode_from(src)
     }
 }
