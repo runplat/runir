@@ -1,5 +1,7 @@
 pub mod iter {
-    use crate::{Query, Storage};
+    use ahash::{HashSet, HashSetExt};
+
+    use crate::{IRecord, Query, Storage};
 
     pub trait Search<S: Storage> : AsRef<S> {
         /// Searches the index with a query
@@ -12,9 +14,13 @@ pub mod iter {
             S: 'query,
             S::Record: 'query
         {
+            let mut dedupe = HashSet::new();
             let query = query.into();
             self.as_ref().iter_records()
-                .filter(move |r| query.matches(r))
+                .filter(move |r| {
+                    let matches = query.matches(r);
+                    dedupe.insert(r.content()) && matches
+                })
         }
     }
 

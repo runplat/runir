@@ -18,7 +18,7 @@ type RecordSnapshot = Arc<VecIndex<Record>>;
 #[derive(Default)]
 pub struct SharedState {
     pub(crate) state: Arc<State>,
-    snapshot: Option<RecordSnapshot>,
+    snapshot: RecordSnapshot,
 }
 
 /// Common state used w/ all frontends
@@ -53,6 +53,7 @@ impl State {
     pub fn set_frontend<F: Frontend>(&mut self, instance: usize) {
         self.frontend = F::NAME;
         self.instance = instance;
+        self.store.set_archive(F::NAME);
     }
 
     /// Asynchronously flushes all pending archive-members in state
@@ -63,6 +64,7 @@ impl State {
         let mut snapshot = VecIndex::default();
         for member in store_archive.members() {
             let path = member.path().to_path_buf();
+            debug!("packing member from {path:?}");
             // This will create mem-mapped records from archive members
             let records = member.get_records()?;
 
@@ -82,13 +84,11 @@ impl State {
     ///
     /// Returns true if data was found from the archive_member
     #[inline]
-    pub fn refresh_index(&self, path: impl AsRef<Path>, target: &mut VecIndex<Record>) -> bool {
-        let mut updated = false;
-        if let Some(index) = self.indexes.get(path.as_ref()) {
-            target.refresh(&index);
-            updated = true;
+    pub fn refresh_index(&self, target: &mut VecIndex<Record>) {
+        for member_index in self.indexes.iter() {
+            debug!("Updating index from member {:?}", member_index.key());
+            target.refresh(&member_index);
         }
-        updated
     }
 
     /// Returns a stored snapshot
@@ -197,16 +197,15 @@ impl SharedState {
     /// Updates the local snapshot from the shared state
     #[inline]
     pub fn update_snapshot(&mut self) {
-        let update = self.state.snapshot(Snapshot::Default);
-        self.snapshot.replace(update);
+        self.snapshot = self.state.snapshot(Snapshot::Default);
     }
 
     /// Returns a reference to the latest snapshot
     ///
     /// Note: update_snapshot() must be called in order to update this value
     #[inline]
-    pub fn snapshot(&self) -> Option<&VecIndex<Record>> {
-        self.snapshot.as_deref()
+    pub fn snapshot(&self) -> &VecIndex<Record> {
+        &self.snapshot
     }
 }
 
@@ -223,7 +222,7 @@ impl From<State> for SharedState {
     fn from(value: State) -> Self {
         Self {
             state: value.into(),
-            snapshot: None,
+            snapshot: Default::default(),
         }
     }
 }

@@ -3,6 +3,7 @@ use crate::{Namespace, RecordableExtensions, virt::RecordExtent};
 use bytes::{BufMut, Bytes};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::debug;
 
 /// Enumeration of encoded entry metadata collected by the tape encoder
 #[derive(Serialize, Deserialize, Clone)]
@@ -67,29 +68,30 @@ pub struct TapeEncoder {
 }
 
 impl TapeEncoder {
-    /// Stamps the current source digest on all entries in encoded journal
+    /// Stamps a manifest for the current state and clears the journal
     #[inline]
-    pub fn stamp_source_digest(&mut self) {
+    pub fn stamp_manifest(&mut self) -> Manifest {
         let source_digest = self.digest.clone().finalize();
         for enc in self.journal.iter_mut() {
             match enc {
                 JournalEntry::Extent { source, .. } => {
+                    debug!("Stamping source {source:x?} -> {:x}", source_digest);
                     source.copy_from_slice(source_digest.as_slice());
                 }
                 JournalEntry::Record(record_extent) => {
+                    debug!("Stamping source {:?} -> {:x}", record_extent.source, source_digest);
                     record_extent.source = source_digest.into();
                 }
             }
         }
-    }
 
-    /// Creates a manifest entry for the encoded entries
-    #[inline]
-    pub fn create_manifest(&self) -> Manifest {
         let manifest_name = format!("MANIFEST_{:x}", self.digest.clone().finalize());
         let mut record =
             Namespace::new("__runir_store").store(manifest_name.as_str(), self.journal.indexable());
         record.opts_mut().set_manifest_spec(true);
+
+        self.journal.clear();
+        self.digest = Sha256::new();
         Manifest { record }
     }
 

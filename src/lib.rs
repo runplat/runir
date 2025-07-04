@@ -15,6 +15,7 @@ pub use record::PeekMap;
 
 mod worker;
 pub use worker::Worker;
+pub use worker::SharedWorker;
 
 mod opts;
 pub use opts::Opts;
@@ -112,6 +113,8 @@ pub use frontend::kv;
 
 mod queue;
 pub use queue::Queue;
+
+pub mod bg;
 
 /// Provides extensions for configuring a type before it is committed as a record
 pub trait RecordableExtensions {

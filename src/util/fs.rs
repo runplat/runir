@@ -1,8 +1,8 @@
 #[cfg(feature = "tokio")]
 mod tokio {
+    use async_compat::CompatExt;
     use futures::{AsyncRead, AsyncSeek, AsyncWrite};
     use std::path::Path;
-    use tokio_util::compat::TokioAsyncReadCompatExt;
 
     /// Opens a file for read/write
     #[inline]

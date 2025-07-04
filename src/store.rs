@@ -1,21 +1,21 @@
 use crate::{
-    Namespace, Queue, Record, VirtualData, Worker,
-    archive::{Entry, FileEntryReference, Manifest},
-    queue::Pusher,
+    archive::{scan_for_references, Entry, FileEntryReference, Manifest}, queue::Pusher, Namespace, Queue, Record, VirtualData, Worker
 };
 use ahash::HashSet;
-use futures::{AsyncSeekExt, StreamExt, future::Either};
+use futures::{AsyncSeekExt, future::Either};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tracing::{debug, error};
+use tracing::{debug, error, trace};
 
 /// Store settings contains options for workers to use during
 /// their operations
 #[derive(Clone)]
 pub struct StoreSettings {
+    /// Name of the archive
+    archive: &'static str,
     /// Ephemeral namespace
     session_ns: Namespace,
     /// Main working directory for storing unpacked archive-members
@@ -30,8 +30,8 @@ pub struct StoreSettings {
 impl StoreSettings {
     /// Returns the path a member should use for their archive data
     #[inline]
-    pub fn archive_path(&self, ns: &Namespace) -> PathBuf {
-        let archive_out = format!("{:x}_{}", ns.chk(), self.session_ns.chk());
+    pub fn archive_path(&self) -> PathBuf {
+        let archive_out = format!("{}_{:x}", self.archive, self.session_ns.chk());
         self.work_dir.join(archive_out)
     }
 
@@ -55,22 +55,32 @@ pub struct Store {
     pub(crate) packer: Queue<ArchiveMember>,
     /// Working directory for this store
     work_dir: PathBuf,
+    /// Name of the archive
+    archive: &'static str,
 }
 
 impl Store {
+    /// Sets the archive name
+    #[inline]
+    pub fn set_archive(&mut self, archive: &'static str) {
+        self.archive = archive
+    }
+
     /// Returns a store w/ work_dir set
     #[inline]
     pub fn work_dir(path: impl Into<PathBuf>) -> Self {
         Self {
             packer: Default::default(),
             work_dir: path.into(),
+            archive: "store",
         }
     }
 
     /// Returns a mutable reference for a worker to a specific namespace
     #[inline]
-    pub fn namespace(&self, ns: impl Into<Namespace>) -> Worker {
-        Worker::from(ns).with_store(StoreSettings {
+    pub fn worker(&self) -> Worker {
+        Worker::default().with_store(StoreSettings {
+            archive: self.archive,
             session_ns: Namespace::ephemeral(),
             work_dir: self.work_dir.clone(),
             packer: self.packer.pusher(),
@@ -171,7 +181,7 @@ impl ArchiveMember {
                     // Since we're packed in a single file, the zero-byte paddings aren't going
                     // to be present, new_packed ensures the constructor is aware of this when validating
                     // the data before returning the record
-                    let data = VirtualData::new_packed(entry.clone(), mmap.clone())?;
+                    let data = VirtualData::new(entry.clone(), mmap.clone())?;
                     if let Some(rec) = data.materialize() {
                         records.push(rec);
                     }
@@ -315,26 +325,36 @@ impl StoreArchive {
     }
 
     /// Packs worker archives from the output directory into a single store archive
-    pub async fn pack(&self, name: &str) -> std::io::Result<Manifest> {
+    pub async fn pack(&self, name: &str) -> std::io::Result<()> {
         use futures::sink::SinkExt;
         let completed_dest = self.store_tar_path(name);
 
         let mut append_mode = false;
         let dest = self.output_dir.join("PACKING");
 
+        let mut existing = HashSet::default();
+
         let file = if completed_dest.exists() {
             debug!("Previous store found, attempting to append to store");
-            let grow_to = self.get_total_required_space()?;
-
-            // TODO:
-            // Can optimize appending perf by doing a scan over existing entries to do a
-            // diff comparison with existing entries
-
+            for r in scan_for_references(crate::util::fs::open(&completed_dest).await?).await? {
+                if let Entry::Reference(FileEntryReference {
+                    header,
+                    digest,
+                    offset,
+                }) = r
+                {
+                    let digest = digest.finalize();
+                    debug!(
+                        "Existing entry found \n\n\t{}\n\tdigest: {}\n\toffset: {offset}\n",
+                        header.name(),
+                        hex::encode(&digest[..])
+                    );
+                    existing.insert(digest);
+                }
+            }
             let mut file = crate::util::fs::open_rw(&completed_dest).await?;
-
             let cursor = file.seek(std::io::SeekFrom::End(-1024)).await?;
-            let grow_to = cursor + grow_to + 1024;
-            debug!("Setting cursor to {cursor}, growing to {}", grow_to);
+            debug!("Setting cursor to {cursor} for appending new entries");
             append_mode = true;
             Either::Left(file)
         } else {
@@ -348,27 +368,45 @@ impl StoreArchive {
 
         let mut writer = asynchronous_codec::FramedWrite::new(file, encoder);
 
+        let mut total_appended = 0 ;
+        let mut cleanup = vec![];
         for member in self.archived.iter() {
             let records = member.get_records()?;
-            let manifest = member.manifest();
-            let mut to_enc = std::pin::pin!(
-                futures::stream::iter(records.iter().map(|r| Ok(Entry::Record(r.clone())))).chain(
-                    futures::stream::once(async { Ok(Entry::Record(manifest.record.clone())) }),
-                )
-            );
-            writer.send_all(&mut to_enc).await?;
+            let including = records
+                .iter()
+                .filter(|r| {
+                    let new_rec = existing.insert(r.data.digest().finalize());
+                    debug!(inserting = new_rec, "dedupe");
+                    new_rec
+                })
+                .map(|r| Entry::Record(r.clone()));
+
+            let mut count = 0;
+            for r in including {
+                writer.feed(r).await?;
+                count += 1;
+            }
+
+            writer.flush().await?;
+
+            if count > 0 {
+                let manifest = writer.encoder_mut().stamp_manifest();
+                total_appended += count;
+                writer.feed(Entry::Record(manifest.record)).await?;
+            }
+
+            cleanup.push(member.path());
         }
 
+        writer.flush().await?;
         writer.send(Entry::Zeros).await?;
         writer.close().await?;
-        writer.encoder_mut().stamp_source_digest();
-
-        let manifest = writer.encoder_mut().create_manifest();
 
         if !append_mode {
             std::fs::rename(dest, &completed_dest)?;
         }
-        Ok(manifest)
+        trace!(append_mode, total_appended);
+        Ok(())
     }
 
     /// Returns the output path of the store.tar
@@ -397,6 +435,7 @@ impl StoreArchive {
 impl Default for Store {
     fn default() -> Self {
         Self {
+            archive: "store",
             packer: Default::default(),
             work_dir: std::env::temp_dir(),
         }
@@ -405,7 +444,7 @@ impl Default for Store {
 
 #[cfg(test)]
 mod test {
-    use crate::IRecord;
+    use crate::{IRecord, ToNamespace};
 
     use super::*;
 
@@ -414,52 +453,55 @@ mod test {
     async fn test_store_build_archive() {
         let store = Store::default();
         {
-            let mut worker = store.namespace("test_ns_1");
-            assert!(worker.author("record_1", |mut b| {
+            let mut worker = store.worker();
+
+            let ns = "test_ns_1".to_namespace();
+            assert!(worker.push(ns.author("record_1", |mut b| {
                 b.start_map().push("value", "hello world");
                 b
-            }));
+            })));
 
-            assert!(worker.author("record_2", |mut b| {
+            assert!(worker.push(ns.author("record_2", |mut b| {
                 b.start_map().push("value", "goodbye world");
                 b
-            }));
+            })));
             worker.sync().unwrap().await.unwrap();
         }
 
         {
-            let mut worker = store.namespace("test_ns_2");
-            assert!(worker.author("record_1", |mut b| {
+            let mut worker = store.worker();
+            let ns = "test_ns_2".to_namespace();
+            assert!(worker.push(ns.author("record_1", |mut b| {
                 b.start_map().push("value", "hello world 2");
                 b
-            }));
+            })));
 
-            assert!(worker.author("record_2", |mut b| {
+            assert!(worker.push(ns.author("record_2", |mut b| {
                 b.start_map().push("value", "goodbye world 2");
                 b
-            }));
+            })));
             worker.sync().unwrap().await.unwrap();
         }
 
         {
-            let mut worker = store.namespace("test_ns_1");
-            assert!(worker.author("record_1", |mut b| {
+            let mut worker = store.worker();
+            let ns = "test_ns_1".to_namespace();
+            assert!(worker.push(ns.author("record_1", |mut b| {
                 b.start_map().push("value", "hello world 2");
                 b
-            }));
+            })));
 
-            assert!(worker.author("record_2", |mut b| {
+            assert!(worker.push(ns.author("record_2", |mut b| {
                 b.start_map().push("value", "goodbye world");
                 b
-            }));
+            })));
             worker.sync().unwrap().await.unwrap();
         }
 
         let store_archive = store.archive();
         eprintln!("{:#?}", store_archive);
 
-        let packed = store_archive.pack("test").await.unwrap();
-        eprintln!("{:#?}", packed.journal_entries().unwrap());
+        store_archive.pack("test").await.unwrap();
 
         let store = store_archive.store_tar_path("test");
         let store_archive = StoreArchive::unpack(&store).await.unwrap();
@@ -474,44 +516,47 @@ mod test {
 
         let store = Store::default();
         {
-            let mut worker = store.namespace("test_ns_12");
-            assert!(worker.author("record_1", |mut b| {
+            let mut worker = store.worker();
+            let ns = "test_ns_12".to_namespace();
+            assert!(worker.push(ns.author("record_1", |mut b| {
                 b.start_map().push("value", "hello world");
                 b
-            }));
+            })));
 
-            assert!(worker.author("record_2", |mut b| {
+            assert!(worker.push(ns.author("record_2", |mut b| {
                 b.start_map().push("value", "goodbye world");
                 b
-            }));
+            })));
             worker.sync().unwrap().await.unwrap();
         }
 
         {
-            let mut worker = store.namespace("test_ns_22");
-            assert!(worker.author("record_1", |mut b| {
+            let mut worker = store.worker();
+            let ns = "test_ns_22".to_namespace();
+            assert!(worker.push(ns.author("record_1", |mut b| {
                 b.start_map().push("value", "hello world 2");
                 b
-            }));
+            })));
 
-            assert!(worker.author("record_2", |mut b| {
+            assert!(worker.push(ns.author("record_2", |mut b| {
                 b.start_map().push("value", "goodbye world 2");
                 b
-            }));
+            })));
             worker.sync().unwrap().await.unwrap();
         }
 
         {
-            let mut worker = store.namespace("test_ns_12");
-            assert!(worker.author("record_1", |mut b| {
+            let mut worker = store.worker();
+            let ns = "test_ns_12".to_namespace();
+            assert!(worker.push(ns.author("record_1", |mut b| {
                 b.start_map().push("value", "hello world 2");
                 b
-            }));
+            })));
 
-            assert!(worker.author("record_2", |mut b| {
+            assert!(worker.push(ns.author("record_2", |mut b| {
                 b.start_map().push("value", "goodbye world");
                 b
-            }));
+            })));
             worker.sync().unwrap().await.unwrap();
         }
 

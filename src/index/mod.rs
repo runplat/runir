@@ -152,8 +152,7 @@ impl<R: crate::IRecord, S: Storage<Record = R> + Clone> Clone for Index<R, S> {
 #[cfg(test)]
 mod test {
     use crate::{
-        HashMapStorage, IRecord, Record, RecordableExtensions, Worker, field, filter, namespace,
-        query::QueryBuilder,
+        field, filter, namespace, query::QueryBuilder, HashMapStorage, IRecord, Record, RecordableExtensions, ToNamespace, Worker
     };
 
     #[tokio::test]
@@ -161,35 +160,35 @@ mod test {
         use super::search::iter::Search;
         use toml::toml;
 
-        let mut worker = Worker::from("test_index_query");
-
+        let mut worker = Worker::default();
+        let ns = "test_index_query".to_namespace();
         assert!(
-            worker.store(
+            worker.push(ns.store(
                 "__record_1",
                 toml! {
                     value = "hello world"
                 }
                 .indexable()
             )
-        );
+        ));
 
-        assert!(worker.store(
+        assert!(worker.push(ns.store(
             "__record_2",
             &toml! {
                 value = "good dream world"
                 other = "hello dream world"
             }
-        ));
+        )));
 
         assert!(
-            worker.store(
+            worker.push(ns.store(
                 "__record_3",
                 toml! {
                     value = "do electric worlds dream of sheep, or say hello"
                 }
                 .indexable()
             )
-        );
+        ));
 
         let index = worker.to_index::<HashMapStorage<Record>>();
 

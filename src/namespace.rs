@@ -78,7 +78,7 @@ impl Namespace {
         }
     }
 
-    /// Const namespace creator 
+    /// Const namespace creator
     #[inline]
     pub const fn const_new(keys: [u64; 4], opts: Opts) -> Self {
         Namespace {
@@ -208,6 +208,13 @@ impl Namespace {
         ));
 
         record.opts_mut().set_serialized_object(true);
+        record
+    }
+
+    /// Authors a flexbuffer root that will become the committed value of the record
+    #[inline]
+    pub fn commit(&self, label: &str, commit: &[u8]) -> Record {
+        let record = self.record(label).commit(Bytes::copy_from_slice(commit));
         record
     }
 

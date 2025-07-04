@@ -1,7 +1,11 @@
-
-
 /// Abstracts the async runtime to a trait
 pub trait Executor {
+    /// Returns true if this executor can execute now
+    fn can_execute_now(&self) -> bool;
+
+    /// Returns true if this executor can execute inline
+    fn can_execute_inline(&self) -> bool;
+
     /// Spawns a future, or returns an error indicating spawning futures is unavailable
     fn spawn<T, F>(&self, fut: F) -> std::io::Result<futures::future::RemoteHandle<T>>
     where
@@ -45,10 +49,18 @@ mod tokio {
             T: Send,
             F: Future<Output = T> + Send + 'static,
         {
-            let (remote, handle) = fut.into_future().remote_handle();
+            let (remote, handle) = fut.remote_handle();
             let rt = get_tokio()?;
             rt.spawn(remote);
             Ok(handle)
+        }
+        
+        fn can_execute_now(&self) -> bool {
+            tokio::runtime::Handle::try_current().is_ok()
+        }
+        
+        fn can_execute_inline(&self) -> bool {
+            get_tokio().is_ok()
         }
     }
 }

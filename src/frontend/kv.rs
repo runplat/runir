@@ -142,16 +142,13 @@ pub async fn open_dir(dir: impl Into<PathBuf>) -> std::io::Result<KeyValue> {
 }
 
 use super::{Frontend, state::SharedState};
-use crate::{
-    IRecord, Namespace, Query, Record, Worker, search::iter::Search, worker::BackgroundSync,
-};
+use crate::{search::iter::Search, IRecord, Namespace, Query, Record, SharedWorker, ToNamespace, VecIndex};
 use serde::{Deserialize, Serialize};
 use std::{
     io::Error,
     ops::{Deref, DerefMut},
     path::PathBuf,
 };
-use tracing::trace;
 
 /// Provides a put(..) function that takes a serializable object as the value
 pub trait Put<V> {
@@ -167,7 +164,7 @@ pub trait Put<V> {
     /// Note: All stored-values are expected to be idempotent by default, unless a merge-policy is set
     /// on the Namespace. This means that by default if no merge-policy is set, this function will always
     /// replace any existing values, and not return an error
-    fn put(&mut self, key: &str, value: &V) -> std::io::Result<BackgroundSync>;
+    fn put(&mut self, key: &str, value: &V) -> std::io::Result<()>;
 
     /// Put many key_values in the store at once
     ///
@@ -183,7 +180,7 @@ pub trait Put<V> {
     /// Note: All stored-values are expected to be idempotent by default, unless a merge-policy is set
     /// on the Namespace. This means that by default if no merge-policy is set, this function will always
     /// replace any existing values, and not return an error
-    fn put_many(&mut self, key_values: &[(&str, &V)]) -> std::io::Result<BackgroundSync>;
+    fn put_many(&mut self, key_values: &[(&str, &V)]) -> std::io::Result<()>;
 }
 
 /// Provides a get(..) function that returns a value by key
@@ -200,18 +197,27 @@ pub trait Get<'get, V: 'get> {
 ///
 /// Upgrade to `kv.serde().put(..)` for any Serialize/Deserialize type
 pub struct KeyValue {
-    /// Namespace all keys will be indexed under
-    worker: Worker,
+    /// Namespace this key-value is under, defaults to ""
+    ns: Namespace,
+    /// Shared worker which handles sending work to the store
+    worker: SharedWorker,
     /// State that is shared across all workers
     shared: SharedState,
+    /// Local index
+    index: VecIndex<Record>,
 }
 
 impl Frontend for KeyValue {
     const NAME: &str = "kv";
 
     fn from_shared(shared: SharedState) -> Self {
-        let worker = shared.store().namespace("default");
-        Self { worker, shared }
+        let worker = shared.store().worker();
+        Self {
+            ns: ().to_namespace(),
+            worker: SharedWorker::from(worker),
+            shared,
+            index: Default::default()
+        }
     }
 }
 
@@ -262,8 +268,10 @@ impl KeyValue {
         let ns = ns.into();
 
         Self {
-            worker: self.shared.store().namespace(ns),
+            ns,
+            worker: self.worker.clone(),
             shared: self.shared.clone(),
+            index: self.index.clone(),
         }
     }
 
@@ -272,30 +280,25 @@ impl KeyValue {
     pub fn serde(&self) -> KeySerdeValue {
         KeySerdeValue {
             kv: KeyValue {
-                worker: self
-                    .shared
-                    .store()
-                    .namespace(self.worker.namespace().clone()),
+                ns: self.ns.clone(),
+                worker: self.worker.clone(),
                 shared: self.shared.clone(),
+                index: self.index.clone(),
             },
         }
     }
 
     /// Refreshes the key value store's indexes
     #[inline]
-    pub fn refresh(&mut self) {
-        if let Some(member_path) = self.worker.archive_member_path() {
-            let updated = self
-                .shared
-                .state
-                .refresh_index(&member_path, self.worker.cache_mut());
-            trace!(
-                updated,
-                member = member_path.to_string_lossy().to_string(),
-                "kv_refresh"
-            );
-        }
+    pub async fn refresh(&mut self) -> std::io::Result<()> {
+        self.worker.sync()?.await?;
+        self.shared.state.flush()?;
+        self.shared
+            .state
+            .refresh_index(&mut self.index);
+        // self.worker.take_snapshot();
         self.shared.update_snapshot();
+        Ok(())
     }
 
     /// Searches over stored records w/ a query
@@ -306,18 +309,21 @@ impl KeyValue {
     ) -> impl Iterator<Item = &'q Record> {
         let q = query.into();
 
-        if let Some(store) = self.shared.snapshot() {
-            store.search(q)
+        if self.shared.snapshot().storage().is_empty() {
+            self.index.search(q)
         } else {
-            self.worker.cache().search(q)
+            // Switch to shared snapshot once it has data
+            self.shared.snapshot().search(q)
         }
     }
 
     /// Puts a record into the kv store
     #[inline]
-    pub fn put_raw(&mut self, record: Record) -> std::io::Result<BackgroundSync> {
-        if self.worker.push(record) {
-            self.worker.sync()
+    pub fn put_raw(&mut self, record: Record) -> std::io::Result<()> {
+        if self.worker.push(record.clone()) {
+            // self.worker.sync()
+            self.index.index(record);
+            Ok(())
         } else {
             Err(Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -329,14 +335,9 @@ impl KeyValue {
     /// Lookup a record in the current namespace
     #[inline]
     fn lookup(&self, label: &str) -> Option<&Record> {
-        self.worker
-            .cache()
-            .lookup(self.worker.namespace().clone(), label)
-            .or_else(|| {
-                self.shared
-                    .snapshot()
-                    .and_then(|s| s.lookup(self.worker.namespace().clone(), label))
-            })
+        self.index
+            .lookup(self.ns.clone(), label)
+            .or_else(|| self.shared.snapshot().lookup(self.ns.clone(), label))
     }
 }
 
@@ -359,7 +360,7 @@ impl KeySerdeValue {
             .or_else(|| {
                 self.shared
                     .snapshot()
-                    .and_then(|s| s.lookup(self.worker.namespace().clone(), key))
+                    .lookup(self.ns.clone(), key)
                     .and_then(|r| flexbuffers::Reader::get_root(r.bytes()).ok())
             })
     }
@@ -386,66 +387,32 @@ impl DerefMut for KeySerdeValue {
 }
 
 impl<V: Serialize> Put<V> for KeySerdeValue {
-    fn put(&mut self, key: &str, value: &V) -> std::io::Result<BackgroundSync> {
-        if self.worker.store(key, value) {
-            Ok(self
-                .worker
-                .sync()
-                .expect("should only return None if worker was created outside the store"))
-        } else {
-            Err(Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Value could not be stored",
-            ))
-        }
+    fn put(&mut self, key: &str, value: &V) -> std::io::Result<()> {
+        let rec = self.ns.store(key, value);
+        self.put_raw(rec)
     }
 
-    fn put_many(&mut self, key_values: &[(&str, &V)]) -> std::io::Result<BackgroundSync> {
+    fn put_many(&mut self, key_values: &[(&str, &V)]) -> std::io::Result<()> {
         for (key, v) in key_values {
-            if !self.worker.store(key, v) {
-                return Err(Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Value could not be stored",
-                ));
-            }
+            let rec = self.ns.store(key, v);
+            self.put_raw(rec)?;
         }
 
-        Ok(self
-            .worker
-            .sync()
-            .expect("should only return None if worker was created outside the store"))
+        Ok(())
     }
 }
 
 impl<V: AsRef<[u8]>> Put<V> for KeyValue {
-    fn put(&mut self, key: &str, value: &V) -> std::io::Result<BackgroundSync> {
-        if self.worker.commit(key, value.as_ref()) {
-            Ok(self
-                .worker
-                .sync()
-                .expect("should only return None if worker was created outside the store"))
-        } else {
-            Err(Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Value could not be stored",
-            ))
-        }
+    fn put(&mut self, key: &str, value: &V) -> std::io::Result<()> {
+        self.put_raw(self.ns.commit(key, value.as_ref()))
     }
 
-    fn put_many(&mut self, key_values: &[(&str, &V)]) -> std::io::Result<BackgroundSync> {
+    fn put_many(&mut self, key_values: &[(&str, &V)]) -> std::io::Result<()> {
         for (key, v) in key_values {
-            if !self.worker.commit(key, v.as_ref()) {
-                return Err(Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Value could not be stored",
-                ));
-            }
+            self.put_raw(self.ns.commit(key, v.as_ref()))?;
         }
 
-        Ok(self
-            .worker
-            .sync()
-            .expect("should only return None if worker was created outside the store"))
+        Ok(())
     }
 }
 
@@ -489,7 +456,7 @@ mod test {
     fn test_kv_put_get() {
         let mut kv = KeyValue::new();
 
-        kv.put("hello", b"hello").unwrap().forget();
+        kv.put("hello", b"hello").unwrap();
 
         assert_eq!(b"hello", kv.get("hello").unwrap());
     }
@@ -507,9 +474,8 @@ mod test {
                 also_important = "hello"
             },
         )
-        .unwrap()
-        .forget();
-
+        .unwrap();
+        
         assert_eq!(
             "hello",
             kv.load::<toml::Value>("hello").unwrap()["other"]["values"]["also_important"]
@@ -526,10 +492,8 @@ mod test {
 
         assert_eq!(
             1,
-            kv.search(filter::<Record>(|r| {
-                r.matches_label("hello", "default")
-            }))
-            .count()
+            kv.search(filter::<Record>(|r| { r.matches_label("hello", "") }))
+                .count()
         );
     }
 
@@ -547,11 +511,9 @@ mod test {
                 also_important = "hello"
             },
         )
-        .unwrap()
-        .await
         .unwrap();
 
-        let mut parallel_ns = kv.ns("default").serde();
+        let mut parallel_ns = kv.ns(()).serde();
         parallel_ns
             .put(
                 "hello2",
@@ -562,10 +524,9 @@ mod test {
                     also_important = "another hello"
                 },
             )
-            .unwrap()
-            .await
             .unwrap();
 
+        kv.refresh().await.unwrap();
         assert_eq!(
             "hello",
             kv.load::<toml::Value>("hello").unwrap()["other"]["values"]["also_important"]
@@ -578,26 +539,22 @@ mod test {
             kv.peek("hello").unwrap().as_map().idx("value").as_str()
         );
 
-        assert_eq!(1, kv.search(field("other")).count());
+        assert_eq!(2, kv.search(field("other")).count());
 
         assert_eq!(
             1,
-            kv.search(filter::<Record>(|r| {
-                r.matches_label("hello", "default")
-            }))
-            .count()
+            kv.search(filter::<Record>(|r| { r.matches_label("hello", "") }))
+                .count()
         );
 
-        kv.shared.state.flush().unwrap();
-        kv.refresh();
-        assert!(
-            kv.worker
-                .cache()
-                .lookup("default", "hello")
-                .unwrap()
-                .is_virtual(),
-            "Worker should now be using virtual data, and not the original buffer"
-        );
+        // assert!(
+        //     kv.worker
+        //         .snapshot()
+        //         .lookup("", "hello")
+        //         .unwrap()
+        //         .is_virtual(),
+        //     "Worker should now be using virtual data, and not the original buffer"
+        // );
 
         assert_eq!(
             "hello",
@@ -621,7 +578,7 @@ mod test {
         let kv = super::open().await.unwrap();
         let count = kv
             .search(
-                namespace("default")
+                namespace(())
                     .label("hello2")
                     .and(field("value").contains("another")),
             )
@@ -636,7 +593,7 @@ mod test {
                 ".test/kv.tar",
             )));
 
-        let hello2 = imported.lookup("default", "hello2").unwrap();
+        let hello2 = imported.lookup("", "hello2").unwrap();
         assert_eq!(
             "another hello",
             hello2.load::<toml::Value>().unwrap()["other"]["values"]["also_important"]

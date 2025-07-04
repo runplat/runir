@@ -71,14 +71,12 @@ pub async fn archive_to(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))?;
 
     // Applies the digest of the current state of the archive to all journal entries
-    writer.encoder_mut().stamp_source_digest();
-
     // Close the writer
     writer
         .close()
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Interrupted, e))?;
 
-    let manifest = writer.encoder().create_manifest();
+    let manifest = writer.encoder_mut().stamp_manifest();
     Ok(manifest)
 }

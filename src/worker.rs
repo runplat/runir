@@ -1,107 +1,80 @@
-use std::path::PathBuf;
-
+use std::sync::Arc;
 use crate::{
-    IRecord, Index, Namespace, RawRecordable, Record, Storage, VecIndex,
+    IRecord, Index, Record, Storage,
     archive::{self, Entry, archive_to},
     store::{ArchiveMember, StoreSettings},
 };
-use bytes::Bytes;
 use crossbeam::utils::Backoff;
-use futures::{future::RemoteHandle, AsyncRead, StreamExt};
-use serde::Serialize;
+use futures::{AsyncRead, StreamExt, future::RemoteHandle};
+use tracing::debug;
 
+/// Type-alias for the type returned by Worker::sync(..)
 pub type BackgroundSync = RemoteHandle<std::io::Result<()>>;
 
+#[derive(Clone)]
+pub struct SharedWorker {
+    worker: Arc<parking_lot::RwLock<Worker>>,
+}
+
+impl SharedWorker {
+    /// Pushes a record to the inner worker
+    #[inline]
+    pub fn push(&self, rec: impl Into<Record>) -> bool {
+        self.worker.write().push(rec.into())
+    }
+
+    /// Calls sync on the underlying worker
+    ///
+    /// This will:
+    /// 1) Flush any pending records
+    /// 2) Push those records to the store for processing
+    /// 3) Index all records directly to the worker
+    #[inline]
+    pub fn sync(&self) -> std::io::Result<BackgroundSync> {
+        self.worker.write().sync()
+    }
+
+    // /// Takes a snapshot of the parent worker
+    // #[inline]
+    // pub fn take_snapshot(&mut self) {
+    //     self.snapshot = self.worker.read().cache().clone().into();
+    // }
+}
+
 /// A worker is an intermediary which handles a collection of records for a namespace
+#[derive(Default)]
 pub struct Worker {
-    /// Namespace this worker belongs to
-    namespace: Namespace,
+    // /// Namespace this worker belongs to
+    // namespace: Namespace,
     /// Records being written by this worker
     records: Vec<Record>,
     /// Store this worker is associated to
     store: Option<StoreSettings>,
-    /// Record Cache
-    ///
-    /// Empty unless flush(..) is called
-    cache: VecIndex<Record>,
+    // /// Record Cache
+    // ///
+    // /// Empty unless flush(..) is called
+    // cache: VecIndex<Record>,
 }
 
 impl Worker {
-    /// Returns a reference to the worker's read cache
-    ///
-    /// Empty until flush(..) is called
-    #[inline]
-    pub fn cache(&self) -> &VecIndex<Record> {
-        &self.cache
-    }
+    // /// Returns a reference to the worker's read cache
+    // ///
+    // /// Empty until flush(..) is called
+    // #[inline]
+    // pub fn cache(&self) -> &VecIndex<Record> {
+    //     &self.cache
+    // }
 
-    /// Returns a mutable reference to the workers cache
-    #[inline]
-    pub fn cache_mut(&mut self) -> &mut VecIndex<Record> {
-        &mut self.cache
-    }
+    // /// Returns a mutable reference to the workers cache
+    // #[inline]
+    // pub fn cache_mut(&mut self) -> &mut VecIndex<Record> {
+    //     &mut self.cache
+    // }
 
     /// Sets a store pusher on this worker
     pub fn with_store(mut self, store: StoreSettings) -> Self {
         self.store.replace(store);
         self
-    }
-
-    /// Returns a reference to the namespace of this worker
-    #[inline]
-    pub fn namespace(&self) -> &Namespace {
-        &self.namespace
-    }
-
-    /// Stores an object into the current worker with name
-    ///
-    /// Returns true if the object was successfully stored, otherwise returns false
-    #[inline]
-    pub fn commit(&mut self, name: &str, obj: &[u8]) -> bool {
-        let record = self
-            .namespace
-            .record(name)
-            .commit(Bytes::copy_from_slice(obj));
-        if record.is_valid() {
-            self.records.push(record);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Stores an object into the current worker with name
-    ///
-    /// Returns true if the object was successfully stored, otherwise returns false
-    #[inline]
-    pub fn store<'a, T: Serialize + 'a>(
-        &mut self,
-        name: &str,
-        obj: impl Into<RawRecordable<'a, T>>,
-    ) -> bool {
-        let record = self.namespace.store(name, obj);
-        if record.is_valid() {
-            self.records.push(record);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Authors a flexbuffer root that will become the committed value of the record
-    #[inline]
-    pub fn author(
-        &mut self,
-        name: &str,
-        author: impl Fn(flexbuffers::Builder) -> flexbuffers::Builder,
-    ) -> bool {
-        let record = self.namespace.author(name, author);
-        if record.is_valid() {
-            self.records.push(record);
-            true
-        } else {
-            false
-        }
     }
 
     /// Pushes a record onto this worker
@@ -110,7 +83,7 @@ impl Worker {
     /// the current worker's ns_chk
     #[inline]
     pub fn push(&mut self, record: Record) -> bool {
-        if record.ns_chk() == self.namespace.chk() {
+        if record.is_valid() {
             self.records.push(record);
             true
         } else {
@@ -152,31 +125,19 @@ impl Worker {
         Ok(())
     }
 
-    /// Drains all records and caches them into the worker-cache,
-    /// and maps each record to an archive entry
-    pub fn flush(&mut self) -> impl Iterator<Item = Entry> {
-        self.records
-            .drain(..)
-            .inspect(|r| {
-                // TODO: use index_with here later
-                self.cache.index(r.clone());
-            })
-            .filter(|f| f.opts().is_archivable())
-            .map(|f| Entry::Record(f))
-    }
-
     /// Begins synchronizing data with the store in the background
     ///
     /// Returns None if store settings are not configured for this worker, otherwise
     /// returns a BackgroundSync future
     pub fn sync(&mut self) -> std::io::Result<BackgroundSync> {
         if let Some(settings) = self.store.clone() {
-            let output_path = settings.archive_path(&self.namespace);
+            let output_path = settings.archive_path();
             let entries = self.flush().map(|e| Ok(e)).collect::<Vec<_>>();
             let packer = settings.packer().clone();
 
             let handle = crate::util::spawn(async move {
                 // TODO: Make this output stream modular, good enough for now
+                debug!("Creating new archive_member at {output_path:?}");
                 let output = crate::util::fs::create_new(&output_path).await?;
                 let stream = futures::stream::iter(entries);
                 let manifest = archive_to(stream, output).await?;
@@ -203,30 +164,45 @@ impl Worker {
         }
     }
 
-    /// Returns the archive member path used by this worker
-    #[inline]
-    pub fn archive_member_path(&self) -> Option<PathBuf> {
-        self.store.as_ref().map(|s| s.archive_path(&self.namespace))
+    /// Drains all records and caches them into the worker-cache,
+    /// and maps each record to an archive entry
+    fn flush(&mut self) -> impl Iterator<Item = Entry> + '_ {
+        self.records
+            .drain(..)
+            // .inspect(|r| {
+            //     // TODO: use index_with here later
+            //     self.cache.index(r.clone());
+            // })
+            .filter(|f| f.opts().is_archivable())
+            .map(|f| Entry::Record(f))
     }
 }
 
-impl<T: Into<Namespace>> From<T> for Worker {
-    fn from(value: T) -> Self {
-        Worker {
-            namespace: value.into(),
-            records: vec![],
-            store: None,
-            cache: VecIndex::default(),
-        }
-    }
-}
+// impl<T: Into<Namespace>> From<T> for Worker {
+//     fn from(value: T) -> Self {
+//         Worker {
+//             namespace: value.into(),
+//             records: vec![],
+//             store: None,
+//             cache: VecIndex::default(),
+//         }
+//     }
+// }
 
 impl std::fmt::Debug for Worker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Worker")
-            .field("namespace", &self.namespace.ns_uuid())
+            // .field("namespace", &self.namespace.ns_uuid())
             .field("records", &self.records)
             .finish()
+    }
+}
+
+impl From<Worker> for SharedWorker {
+    fn from(value: Worker) -> Self {
+        Self {
+            worker: Arc::new(parking_lot::RwLock::new(value)),
+        }
     }
 }
 
@@ -242,41 +218,45 @@ mod test {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_worker_archive_to() {
-        let mut worker = Worker::from("test".to_namespace());
-
+        let mut worker = Worker::default(); // ("test".to_namespace());
+        let ns = "test".to_namespace();
         assert!(
-            worker.store(
-                "record_one",
-                toml! {
-                    value = "hello world"
-                }
-                .indexable(),
+            worker.push(
+                ns.store(
+                    "record_one",
+                    toml! {
+                        value = "hello world"
+                    }
+                    .indexable(),
+                )
             )
         );
 
-        assert!(worker.store(
+        assert!(worker.push(ns.store(
             "record_two",
             &toml! {
                 value = "goodbye world"
             },
-        ));
+        )));
 
         assert!(
-            worker.store(
-                "record_three",
-                toml! {
-                    value = "goodbye world"
-                }
-                .no_archive(),
+            worker.push(
+                ns.store(
+                    "record_three",
+                    toml! {
+                        value = "goodbye world"
+                    }
+                    .no_archive(),
+                )
             )
         );
 
-        assert!(worker.author("record_four", |mut b| {
+        assert!(worker.push(ns.author("record_four", |mut b| {
             let mut map = b.start_map();
             map.push("value", "hello hello");
             map.end_map();
             b
-        },));
+        })));
 
         std::fs::remove_file("test.tar").ok();
         let archive_file = crate::util::fs::create_new("test.tar").await.unwrap();
@@ -284,7 +264,7 @@ mod test {
         let manifest = archive_to(entries, archive_file).await.unwrap();
         assert!(manifest.is_valid());
 
-        let mut restoring = Worker::from("test");
+        let mut restoring = Worker::default();
         let archive_file = crate::util::fs::open("test.tar").await.unwrap();
         restoring.restore_from(archive_file).await.unwrap();
 

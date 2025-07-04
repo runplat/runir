@@ -1,5 +1,4 @@
 use std::sync::{Arc, Weak};
-use tokio_util::sync::CancellationToken;
 
 const DEFAULT_QUEUE_SIZE: usize = 1000;
 
@@ -11,12 +10,11 @@ type WeakInnerQueue<R> = Weak<crossbeam::queue::ArrayQueue<R>>;
 /// Cloneable handle to a main queue that is push-only
 pub struct Pusher<R> {
     inner: WeakInnerQueue<R>,
-    shutdown: CancellationToken,
 }
 
 impl<R> Clone for Pusher<R> {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone(), shutdown: self.shutdown.clone() }
+        Self { inner: self.inner.clone() }
     }
 }
 
@@ -36,21 +34,12 @@ impl<R> Pusher<R> {
             Err(record) => Some(record),
         })
     }
-
-    /// Returns true if the queue no longer exists, this indicates any attempts to
-    /// push will not succeed
-    #[inline]
-    pub fn is_shutdown(&self) -> bool {
-        self.shutdown.is_cancelled()
-    }
 }
 
 /// Thread-safe write queue for Records
 pub struct Queue<R, const INITIAL_CAPACITY: usize = DEFAULT_QUEUE_SIZE> {
     /// Inner queue data structure
     queue: Arc<crossbeam::queue::ArrayQueue<R>>,
-    /// Cancellation token
-    cancel: CancellationToken
 }
 
 impl<R, const INITIAL_CAPACITY: usize> Queue<R, INITIAL_CAPACITY> {
@@ -58,7 +47,7 @@ impl<R, const INITIAL_CAPACITY: usize> Queue<R, INITIAL_CAPACITY> {
     #[inline]
     pub fn new() -> Self {
         let queue = Arc::new(crossbeam::queue::ArrayQueue::new(INITIAL_CAPACITY));
-        Self { queue, cancel: CancellationToken::default() }
+        Self { queue }
     }
 
     /// Returns the current length of the queue
@@ -80,7 +69,6 @@ impl<R, const INITIAL_CAPACITY: usize> Queue<R, INITIAL_CAPACITY> {
     pub fn pusher(&self) -> Pusher<R> {
         Pusher {
             inner: Arc::downgrade(&self.queue),
-            shutdown: self.cancel.child_token()
         }
     }
 
