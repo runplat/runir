@@ -351,11 +351,11 @@ impl StoreArchive {
         for member in self.archived.iter() {
             let records = member.get_records()?;
             let manifest = member.manifest();
-            let to_enc =
+            let mut to_enc = std::pin::pin!(
                 futures::stream::iter(records.iter().map(|r| Ok(Entry::Record(r.clone())))).chain(
                     futures::stream::once(async { Ok(Entry::Record(manifest.record.clone())) }),
-                );
-            tokio::pin!(to_enc);
+                )
+            );
             writer.send_all(&mut to_enc).await?;
         }
 

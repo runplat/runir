@@ -1,3 +1,4 @@
+#[cfg(feature = "tokio")]
 mod tokio {
     use futures::{AsyncRead, AsyncSeek, AsyncWrite};
     use std::path::Path;
@@ -31,4 +32,5 @@ mod tokio {
     }
 }
 
+#[cfg(feature = "tokio")]
 pub use tokio::*;

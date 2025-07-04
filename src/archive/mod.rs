@@ -56,7 +56,7 @@ pub async fn archive_to(
     let mut writer = asynchronous_codec::FramedWrite::new(output, encoder);
 
     // Creates archive entries of all archivable records and encodes to the output stream
-    tokio::pin!(stream);
+    let mut stream = std::pin::pin!(stream);
 
     // Send a stream of entries
     writer

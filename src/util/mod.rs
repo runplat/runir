@@ -7,7 +7,6 @@ pub use peek::PeekExtensions;
 
 mod executor;
 pub use executor::Executor;
-pub use executor::TokioExecutor;
 
 pub mod fs;
 
@@ -18,5 +17,6 @@ use futures::future::RemoteHandle;
 pub fn spawn<T: Send + 'static>(
     fut: impl Future<Output = T> + Send + 'static,
 ) -> std::io::Result<RemoteHandle<T>> {
-    TokioExecutor.spawn(fut)
+    #[cfg(feature = "tokio")]
+    executor::TokioExecutor.spawn(fut)
 }

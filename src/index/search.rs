@@ -39,8 +39,7 @@ pub mod stream {
         {
             stream! { 
                 let query = query.into();
-                let stream = self.as_ref().stream_records();
-                tokio::pin!(stream);
+                let mut stream = std::pin::pin!(self.as_ref().stream_records());
                 while let Some(next) = stream.next().await {
                     if query.matches(next) {
                         yield next;
