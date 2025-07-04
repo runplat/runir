@@ -129,9 +129,10 @@ impl State {
         let archive = StoreArchive {
             archived,
             output_dir: output_dir.into(),
+            archive: self.frontend
         };
 
-        archive.pack(&self.frontend).await?;
+        archive.pack().await?;
         debug!(
             frontend = self.frontend,
             instance = self.instance,

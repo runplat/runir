@@ -1,12 +1,13 @@
 use crate::{
-    archive::{scan_for_references, Entry, FileEntryReference, Manifest}, queue::Pusher, Namespace, Queue, Record, VirtualData, Worker
+    Namespace, Queue, Record, VirtualData, Worker,
+    archive::{Entry, FileEntryReference, Manifest, scan_for_references},
+    queue::Pusher,
 };
 use ahash::HashSet;
 use futures::{AsyncSeekExt, future::Either};
 use sha2::{Digest, Sha256};
 use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
+    path::{Path, PathBuf}, sync::{Arc, OnceLock}
 };
 use tracing::{debug, error, trace};
 
@@ -99,6 +100,7 @@ impl Store {
         StoreArchive {
             archived,
             output_dir: self.work_dir.clone(),
+            archive: self.archive,
         }
     }
 }
@@ -110,6 +112,8 @@ pub struct StoreArchive {
     pub(crate) archived: Vec<ArchiveMember>,
     /// Output directory of store files
     pub(crate) output_dir: PathBuf,
+    /// Name of the archive
+    pub(crate) archive: &'static str,
 }
 
 /// Enumeration of archive member state
@@ -210,7 +214,6 @@ impl StoreArchive {
     /// the content boundaries are found in order to create references into the file
     ///
     /// This allows records to be materialized from the store.tar without needing to expand.
-    #[inline]
     pub async fn unpack(path: impl AsRef<Path>) -> std::io::Result<Self> {
         if !path.as_ref().is_file() {
             return Err(std::io::Error::new(
@@ -218,16 +221,23 @@ impl StoreArchive {
                 "Path must be to an existing file",
             ));
         }
+
+        let archive = path
+            .as_ref()
+            .file_name()
+            .expect("should have a name")
+            .to_string_lossy()
+            .trim_end_matches(".tar")
+            .to_string();
+
         let output_dir = path
             .as_ref()
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or(PathBuf::from("/"));
-        let references = crate::archive::scan_for_references(
-            crate::util::fs::open(path.as_ref()).await.unwrap(),
-        )
-        .await
-        .unwrap();
+        let references =
+            crate::archive::scan_for_references(crate::util::fs::open(path.as_ref()).await?)
+                .await?;
 
         let source = std::fs::File::open(path.as_ref())?;
         let mmap = unsafe { memmap2::MmapOptions::new().map(&source)? };
@@ -323,13 +333,14 @@ impl StoreArchive {
         Ok(Self {
             archived: members,
             output_dir,
+            archive: intern_str(&archive)
         })
     }
 
     /// Packs worker archives from the output directory into a single store archive
-    pub async fn pack(&self, name: &str) -> std::io::Result<()> {
+    pub async fn pack(&self) -> std::io::Result<()> {
         use futures::sink::SinkExt;
-        let completed_dest = self.store_tar_path(name);
+        let completed_dest = self.store_tar_path();
 
         let mut append_mode = false;
         let dest = self.output_dir.join("PACKING");
@@ -370,7 +381,7 @@ impl StoreArchive {
 
         let mut writer = asynchronous_codec::FramedWrite::new(file, encoder);
 
-        let mut total_appended = 0 ;
+        let mut total_appended = 0;
         let mut cleanup = vec![];
         for member in self.archived.iter() {
             writer.encoder_mut().next_stamp();
@@ -401,8 +412,7 @@ impl StoreArchive {
             cleanup.push(member.path());
         }
 
-        writer.flush().await?;
-        writer.send(Entry::Zeros).await?;
+        writer.feed(Entry::Zeros).await?;
         writer.close().await?;
 
         if !append_mode {
@@ -414,8 +424,8 @@ impl StoreArchive {
 
     /// Returns the output path of the store.tar
     #[inline]
-    pub fn store_tar_path(&self, name: &str) -> PathBuf {
-        self.output_dir.join(format!("{name}.tar"))
+    pub fn store_tar_path(&self) -> PathBuf {
+        self.output_dir.join(format!("{}.tar", self.archive))
     }
 
     /// Returns members in the store archive
@@ -424,15 +434,7 @@ impl StoreArchive {
         self.archived.iter()
     }
 
-    /// Returns the total required space to pack all archive members
-    #[inline]
-    pub fn get_total_required_space(&self) -> std::io::Result<u64> {
-        let mut space = 0;
-        for member in self.members() {
-            space += std::fs::metadata(member.path())?.len();
-        }
-        Ok(space)
-    }
+    
 }
 
 impl Default for Store {
@@ -443,6 +445,48 @@ impl Default for Store {
             work_dir: std::env::temp_dir(),
         }
     }
+}
+
+static INTERNER: OnceLock<Interner> = OnceLock::new();
+
+pub(crate) fn intern_str(str: &str) -> &'static str {
+    let interner = INTERNER.get_or_init(Interner::default);
+    interner.intern(str)
+}
+
+#[derive(Default)]
+struct Interner {
+    strings: dashmap::DashSet<&'static str>,
+    check_list: dashmap::DashMap<u64, &'static str>,
+}
+
+impl Interner {
+    pub fn intern(&self, str: &str) -> &'static str {
+        use std::hash::Hash;
+        use std::hash::Hasher;
+        if let Some(v) = self.strings.get(str) {
+            &(*v)
+        } else {
+            let mut hasher = ahash::AHasher::default();
+            str.hash(&mut hasher);
+
+            let s = self.check_list.entry(hasher.finish()).or_insert_with(|| {
+                let interned: &'static str = Box::leak(str.to_string().into_boxed_str());
+                &interned
+            });
+
+            let s = &(*s);
+            self.strings.insert(s);
+            s
+        }
+    }
+}
+
+#[test]
+fn test_interner() {
+    let interner = Interner::default();
+    let hello_world = interner.intern("hello world");
+    assert_eq!("hello world", hello_world);
 }
 
 #[cfg(test)]
@@ -504,9 +548,9 @@ mod test {
         let store_archive = store.archive();
         eprintln!("{:#?}", store_archive);
 
-        store_archive.pack("test").await.unwrap();
+        store_archive.pack().await.unwrap();
 
-        let store = store_archive.store_tar_path("test");
+        let store = store_archive.store_tar_path();
         let store_archive = StoreArchive::unpack(&store).await.unwrap();
         eprintln!("{store_archive:#?}");
         for member in store_archive.members() {
@@ -570,6 +614,6 @@ mod test {
 
         let store_archive = store.archive();
         eprintln!("{:#?}", store_archive);
-        let _ = store_archive.pack("test").await.unwrap();
+        let _ = store_archive.pack().await.unwrap();
     }
 }

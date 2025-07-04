@@ -316,7 +316,7 @@ impl KeyValue {
 
     /// Puts a record into the kv store
     #[inline]
-    pub fn put_raw(&mut self, record: Record) -> std::io::Result<()> {
+    pub fn put_raw(&self, record: Record) -> std::io::Result<()> {
         if self.worker.push(record.clone()) {
             // self.worker.sync()
             //self.index.index(record);
@@ -350,7 +350,6 @@ impl KeyValue {
             debug!("snapshot is empty trying to load");
             self.force_sync();
         }
-
         self.shared
             .snapshot()
             .lookup(self.ns.clone(), label)

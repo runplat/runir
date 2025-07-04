@@ -24,7 +24,10 @@ pub enum Entry {
     ///
     /// Returned by the decoder to indicate that it is currently processing an actual entry
     Pending,
-    /// 512-byte zero block entry
+    /// During encoding, this variant indicates to the encoder the end of the encoding,
+    /// the encoder can then append 2 x 512 blocks
+    /// 
+    /// During decoding, this variant represents a single 512-block, since we decode frame by frame
     Zeros,
 }
 

@@ -33,45 +33,20 @@ impl SharedWorker {
     pub fn sync(&self) -> std::io::Result<BackgroundSync> {
         self.worker.write().sync()
     }
-
-    // /// Takes a snapshot of the parent worker
-    // #[inline]
-    // pub fn take_snapshot(&mut self) {
-    //     self.snapshot = self.worker.read().cache().clone().into();
-    // }
 }
 
 /// A worker is an intermediary which handles a collection of records for a namespace
 #[derive(Default)]
 pub struct Worker {
-    // /// Namespace this worker belongs to
-    // namespace: Namespace,
     /// Records being written by this worker
     records: Vec<Record>,
     /// Store this worker is associated to
     store: Option<StoreSettings>,
-    // /// Record Cache
-    // ///
-    // /// Empty unless flush(..) is called
-    // cache: VecIndex<Record>,
 }
 
 impl Worker {
-    // /// Returns a reference to the worker's read cache
-    // ///
-    // /// Empty until flush(..) is called
-    // #[inline]
-    // pub fn cache(&self) -> &VecIndex<Record> {
-    //     &self.cache
-    // }
-
-    // /// Returns a mutable reference to the workers cache
-    // #[inline]
-    // pub fn cache_mut(&mut self) -> &mut VecIndex<Record> {
-    //     &mut self.cache
-    // }
-
     /// Sets a store pusher on this worker
+    #[inline]
     pub fn with_store(mut self, store: StoreSettings) -> Self {
         self.store.replace(store);
         self
@@ -169,25 +144,10 @@ impl Worker {
     fn flush(&mut self) -> impl Iterator<Item = Entry> + '_ {
         self.records
             .drain(..)
-            // .inspect(|r| {
-            //     // TODO: use index_with here later
-            //     self.cache.index(r.clone());
-            // })
             .filter(|f| f.opts().is_archivable())
             .map(|f| Entry::Record(f))
     }
 }
-
-// impl<T: Into<Namespace>> From<T> for Worker {
-//     fn from(value: T) -> Self {
-//         Worker {
-//             namespace: value.into(),
-//             records: vec![],
-//             store: None,
-//             cache: VecIndex::default(),
-//         }
-//     }
-// }
 
 impl std::fmt::Debug for Worker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
