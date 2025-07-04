@@ -114,8 +114,6 @@ pub use frontend::kv;
 mod queue;
 pub use queue::Queue;
 
-pub mod bg;
-
 /// Provides extensions for configuring a type before it is committed as a record
 pub trait RecordableExtensions {
     /// Enables the record to be indexed

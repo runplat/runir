@@ -143,7 +143,7 @@ pub async fn open_dir(dir: impl Into<PathBuf>) -> std::io::Result<KeyValue> {
 
 use super::{Frontend, state::SharedState};
 use crate::{
-    IRecord, Namespace, Query, Record, SharedWorker, ToNamespace, search::iter::Search,
+    IRecord, Namespace, Query, Record, SharedWorker, ToNamespace, search::iter::Search, util::Peek,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -296,7 +296,7 @@ impl KeyValue {
     }
 
     /// Searches over stored records w/ a query
-    /// 
+    ///
     /// This function will invoke a force_sync to ensure the search
     /// happens over fresh data, For performant operations, lookup is more
     /// likely desired
@@ -309,7 +309,9 @@ impl KeyValue {
 
         self.force_sync();
 
-        self.shared.snapshot().search(q)
+        let snapshot = self.shared.snapshot();
+        debug!("{snapshot:?}");
+        snapshot.search(q)
     }
 
     /// Puts a record into the kv store
@@ -331,10 +333,12 @@ impl KeyValue {
     #[inline]
     fn force_sync(&self) {
         debug!("Force sync invoked, blocking for a refresh");
-        if let Err(err) = futures::executor::block_on(self.refresh()) {
+        if let Err(err) =
+            // TODO: If tokio is enabled, this MUST run on a multi-threaded runtime
+            futures::executor::block_on(crate::util::spawn_blocking(|| self.refresh()))
+        {
             error!("Could not refresh {err}");
         } else {
-            debug!("refresh completed, updating snapshot");
             self.shared.update_snapshot();
         }
     }
@@ -343,12 +347,17 @@ impl KeyValue {
     #[inline]
     fn lookup(&self, label: &str) -> Option<&Record> {
         if self.shared.snapshot().storage().is_empty() {
+            debug!("snapshot is empty trying to load");
             self.force_sync();
         }
-        self.shared.snapshot().lookup(self.ns.clone(), label).or_else(|| {
-            self.force_sync();
-            self.shared.snapshot().lookup(self.ns.clone(), label)
-        })
+
+        self.shared
+            .snapshot()
+            .lookup(self.ns.clone(), label)
+            .or_else(|| {
+                self.force_sync();
+                self.shared.snapshot().lookup(self.ns.clone(), label)
+            })
     }
 }
 
@@ -363,17 +372,8 @@ impl KeySerdeValue {
     ///
     /// Allows getting data from the object without deserializing it into a full type
     #[inline]
-    pub fn peek(&self, key: &str) -> Option<flexbuffers::Reader<&[u8]>> {
-        self.kv
-            .get(key)
-            .ok()
-            .and_then(|r| flexbuffers::Reader::get_root(r).ok())
-            .or_else(|| {
-                self.shared
-                    .snapshot()
-                    .lookup(self.ns.clone(), key)
-                    .and_then(|r| flexbuffers::Reader::get_root(r.bytes()).ok())
-            })
+    pub fn peek(&self, key: &str) -> Option<Peek> {
+        self.lookup(key).and_then(|r| r.peek())
     }
 
     /// Loads an object from the store
@@ -460,7 +460,9 @@ impl AsRef<SharedState> for KeyValue {
 #[cfg(test)]
 mod test {
     use super::{Get, KeyValue, Put};
-    use crate::{QueryBuilder, Record, field, filter, frontend::Frontend, namespace};
+    use crate::{
+        QueryBuilder, Record, field, filter, frontend::Frontend, namespace, util::PeekExtensions,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -499,7 +501,7 @@ mod test {
 
         assert_eq!(
             "really important value",
-            kv.peek("hello").unwrap().as_map().idx("value").as_str()
+            kv.peek("hello").at("value").str().unwrap()
         );
 
         assert_eq!(1, kv.search(field("other")).count());
@@ -511,7 +513,7 @@ mod test {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     #[tracing_test::traced_test]
     async fn test_kv_bg_sync() {
         let mut kv = KeyValue::new().serde();
@@ -540,7 +542,6 @@ mod test {
             )
             .unwrap();
 
-        kv.refresh().await.unwrap();
         assert_eq!(
             "hello",
             kv.load::<toml::Value>("hello").unwrap()["other"]["values"]["also_important"]
@@ -561,14 +562,14 @@ mod test {
                 .count()
         );
 
-        // assert!(
-        //     kv.worker
-        //         .snapshot()
-        //         .lookup("", "hello")
-        //         .unwrap()
-        //         .is_virtual(),
-        //     "Worker should now be using virtual data, and not the original buffer"
-        // );
+        assert!(
+            kv.shared
+                .snapshot()
+                .lookup("", "hello")
+                .unwrap()
+                .is_virtual(),
+            "Worker should now be using virtual data, and not the original buffer"
+        );
 
         assert_eq!(
             "hello",

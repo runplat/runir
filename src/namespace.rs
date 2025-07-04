@@ -6,6 +6,7 @@ use crate::Opts;
 use crate::RawRecordable;
 use crate::Record;
 use std::hash::Hash;
+use std::sync::OnceLock;
 
 /// Convenience function to explicitly convert to a namespace
 /// Enables fluent api for configuring the namespace
@@ -26,7 +27,6 @@ impl<T: Into<Namespace>> ToNamespace for T {}
 ///
 /// Otherwise, the namespace is treated as ephemeral and will only be valid during the lifetime of
 /// the process
-#[derive(Clone, Copy)]
 pub struct Namespace {
     k1: u64,
     k2: u64,
@@ -34,6 +34,7 @@ pub struct Namespace {
     k4: u64,
     /// Default record options
     opts: Opts,
+    random_state: OnceLock<RandomState>,
 }
 
 impl Hash for Namespace {
@@ -75,6 +76,7 @@ impl Namespace {
             k3,
             k4,
             opts: Opts::default(),
+            random_state: OnceLock::new(),
         }
     }
 
@@ -87,19 +89,24 @@ impl Namespace {
             k3: keys[2],
             k4: keys[3],
             opts,
+            random_state: OnceLock::new(),
         }
     }
 
     /// Returns an ephemeral namespace
     #[inline]
     pub fn ephemeral() -> Namespace {
-        Namespace {
+        let ns = Namespace {
             k1: 0,
             k2: 0,
             k3: 0,
             k4: 0,
             opts: Opts::ephemeral(),
-        }
+            random_state: OnceLock::new(),
+        };
+        // Lock-in a hash state early so that Namespace can be cloned
+        ns.hash_state();
+        ns
     }
 
     /// Returns a new empty record under this namespace
@@ -149,6 +156,7 @@ impl Namespace {
             k3,
             k4,
             opts: Opts::decode(opts),
+            random_state: OnceLock::new(),
         };
 
         Some(ns).filter(|n| n.chk() == ns_chk)
@@ -219,11 +227,25 @@ impl Namespace {
     }
 
     /// Materialized the hash_state for this namespace
-    fn hash_state(&self) -> RandomState {
+    fn hash_state(&self) -> &RandomState {
         if self.k1 == 0 && self.k2 == 0 && self.k3 == 0 && self.k4 == 0 {
-            RandomState::new()
+            self.random_state.get_or_init(RandomState::new)
         } else {
-            RandomState::with_seeds(self.k1, self.k2, self.k3, self.k4)
+            self.random_state
+                .get_or_init(|| RandomState::with_seeds(self.k1, self.k2, self.k3, self.k4))
+        }
+    }
+}
+
+impl Clone for Namespace {
+    fn clone(&self) -> Self {
+        Self {
+            k1: self.k1.clone(),
+            k2: self.k2.clone(),
+            k3: self.k3.clone(),
+            k4: self.k4.clone(),
+            opts: self.opts.clone(),
+            random_state: self.random_state.clone(),
         }
     }
 }
@@ -245,5 +267,29 @@ impl std::fmt::Debug for Namespace {
         f.debug_struct("Namespace")
             .field("ns_uuid", &self.ns_uuid())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    fn test_namespace_clone() {
+        let ns = "test".to_namespace();
+        let ns2 = "test".to_namespace();
+        assert_eq!(ns.chk(), ns2.chk());
+        assert_eq!(ns.chk(), ns.clone().chk());
+        assert_eq!(ns2.chk(), ns2.clone().chk());
+        assert_eq!(ns.clone().chk(), ns2.clone().chk());
+    }
+    
+    #[test]
+    fn test_namespace_ephemeral_clone() {
+        let ns = Namespace::ephemeral();
+        let ns2 = ns.clone();
+        assert_eq!(ns.chk(), ns2.chk());
+        assert_eq!(ns.chk(), ns.clone().chk());
+        assert_eq!(ns2.chk(), ns2.clone().chk());
+        assert_eq!(ns.clone().chk(), ns2.clone().chk());
     }
 }

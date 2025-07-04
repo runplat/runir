@@ -177,7 +177,9 @@ impl ArchiveMember {
                 let mmap = Arc::new(mmap);
 
                 let mut records = vec![];
-                for entry in manifest.journal_entries()?.iter() {
+                let entries = manifest.journal_entries()?;
+                debug!("Mapping journal entries {entries:#?}");
+                for entry in entries.iter() {
                     // Since we're packed in a single file, the zero-byte paddings aren't going
                     // to be present, new_packed ensures the constructor is aware of this when validating
                     // the data before returning the record
@@ -371,6 +373,7 @@ impl StoreArchive {
         let mut total_appended = 0 ;
         let mut cleanup = vec![];
         for member in self.archived.iter() {
+            writer.encoder_mut().next_stamp();
             let records = member.get_records()?;
             let including = records
                 .iter()
@@ -392,7 +395,7 @@ impl StoreArchive {
             if count > 0 {
                 let manifest = writer.encoder_mut().stamp_manifest();
                 total_appended += count;
-                writer.feed(Entry::Record(manifest.record)).await?;
+                writer.send(Entry::Record(manifest.record)).await?;
             }
 
             cleanup.push(member.path());
@@ -507,6 +510,11 @@ mod test {
         let store_archive = StoreArchive::unpack(&store).await.unwrap();
         eprintln!("{store_archive:#?}");
         for member in store_archive.members() {
+            eprintln!("{member:#?}");
+            for e in member.manifest().journal_entries().unwrap() {
+                eprintln!("{e:#?}");
+            }
+
             let records = member.get_records().unwrap();
             for r in records {
                 assert!(r.is_valid());

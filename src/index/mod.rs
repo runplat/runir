@@ -41,9 +41,13 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
     #[inline]
     pub fn index(&mut self, record: R) -> u64 {
         let index_key = record.index_key();
-        let result = self.storage.put(record);
-        self.reverse.insert(index_key, result.key);
-        result.key
+        if let Some(key) = self.reverse.get(&index_key) {
+            *key
+        } else {
+            let result = self.storage.put(record);
+            self.reverse.insert(index_key, result.key);
+            result.key
+        }
     }
 
     /// Get a record from the index w/ a key returned from Index::index

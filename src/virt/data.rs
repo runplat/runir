@@ -2,6 +2,7 @@ use crate::{Data, Record, archive::JournalEntry};
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 use std::{ops::Deref, sync::Arc};
+use tracing::trace;
 
 /// Virtual reference to journaled data
 ///
@@ -33,16 +34,17 @@ impl VirtualData {
     /// Returns an error if the source/content digests could not be verified
     #[inline]
     pub fn new(journaled: JournalEntry, mmap: Arc<Mmap>) -> std::io::Result<Self> {
-        let virt_ref = Self {
-            journaled,
-            mmap,
-        };
+        let virt_ref = Self { journaled, mmap };
         if virt_ref.is_valid() {
             Ok(virt_ref)
         } else {
             Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Provided data did not match source/content digest constraints",
+                format!(
+                    "Provided data did not match source/content digest constraints \n  Expected Source: {}\n  Actual Source: {}\n",
+                    hex::encode(virt_ref.journaled.source()),
+                    hex::encode(virt_ref.compute_source_digest())
+                ),
             ))
         }
     }
@@ -50,11 +52,19 @@ impl VirtualData {
     /// Returns true if the source/content digests match the current settings
     #[inline]
     pub fn is_valid(&self) -> bool {
-        let source_matches = self.compute_digest().as_slice() == self.journaled.source();
-        source_matches && Sha256::digest(&self).as_slice() == self.journaled.content()
+        let source_matches = self.compute_source_digest().as_slice() == self.journaled.source();
+        let content_matches = Sha256::digest(&self).as_slice() == self.journaled.content();
+
+        trace!(
+            source_matches,
+            content_matches,
+            joff = self.journaled.extent().0,
+            jlen = self.journaled.extent().1
+        );
+        source_matches && content_matches
     }
 
-    fn compute_digest(&self) -> [u8; 32] {
+    fn compute_source_digest(&self) -> [u8; 32] {
         Sha256::digest(&self.mmap[..]).into()
     }
 

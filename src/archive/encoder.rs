@@ -68,6 +68,13 @@ pub struct TapeEncoder {
 }
 
 impl TapeEncoder {
+    /// Ensures a fresh state for the next stamp
+    #[inline]
+    pub fn next_stamp(&mut self) {
+        self.journal.clear();
+        self.digest = Sha256::new();
+    }
+
     /// Stamps a manifest for the current state and clears the journal
     #[inline]
     pub fn stamp_manifest(&mut self) -> Manifest {
@@ -75,11 +82,11 @@ impl TapeEncoder {
         for enc in self.journal.iter_mut() {
             match enc {
                 JournalEntry::Extent { source, .. } => {
-                    debug!("Stamping source {source:x?} -> {:x}", source_digest);
+                    debug!("Stamping source for extent {source:x?} -> {:x}", source_digest);
                     source.copy_from_slice(source_digest.as_slice());
                 }
                 JournalEntry::Record(record_extent) => {
-                    debug!("Stamping source {:?} -> {:x}", record_extent.source, source_digest);
+                    debug!("Stamping source for record {:?} -> {:x}", record_extent.source, source_digest);
                     record_extent.source = source_digest.into();
                 }
             }

@@ -2,8 +2,7 @@ use parking_lot::RwLock;
 use tracing::debug;
 
 use crate::{
-    Record, Store, VecIndex,
-    store::{ArchiveMember, StoreArchive},
+    store::{ArchiveMember, StoreArchive}, Record, Storage, Store, VecIndex
 };
 use std::{
     ops::Deref,
@@ -74,7 +73,6 @@ impl State {
     pub fn flush(&self) -> std::io::Result<()> {
         let store_archive = self.store.archive();
 
-        let mut snapshot = VecIndex::default();
         for member in store_archive.members() {
             let path = member.path().to_path_buf();
             debug!("packing member from {path:?}");
@@ -84,12 +82,21 @@ impl State {
             let mut index = self.indexes.entry(path.clone()).or_default();
             for r in records {
                 index.index(r.clone());
-                snapshot.index(r); // TODO: Use with_index here to handle merge policies later
             }
 
             self.members.insert(path, member.clone());
         }
-        self.snapshots.insert(Snapshot::Default, Arc::new(snapshot));
+
+        // Recompute snapshot
+        let mut snapshot = VecIndex::default();
+        for i in self.indexes.iter() {
+            for r in i.storage().iter_records() {
+                snapshot.index(r.clone());
+            }
+        }
+        if !snapshot.storage().is_empty() {
+            self.snapshots.insert(Snapshot::Default, Arc::new(snapshot));
+        }
         Ok(())
     }
 

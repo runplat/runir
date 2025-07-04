@@ -20,3 +20,15 @@ pub fn spawn<T: Send + 'static>(
     #[cfg(feature = "tokio")]
     executor::TokioExecutor.spawn(fut)
 }
+
+/// Util for spawning futures into a runtime
+#[inline]
+pub fn spawn_blocking<F, R, O>(fut: F) -> impl Future<Output = O>
+where
+    F: FnOnce() -> R,
+    R: Future<Output = O>,
+    O: Send + 'static,
+{
+    #[cfg(feature = "tokio")]
+    executor::TokioExecutor.spawn_blocking(fut).unwrap()
+}

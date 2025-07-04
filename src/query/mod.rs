@@ -294,7 +294,9 @@ mod test {
     #[test]
     fn test_namespace() {
         let ns = Namespace::ephemeral();
-        let ns_filter = namespace(ns.clone());
+
+        let ns_clone = ns.clone();
+        let ns_filter = namespace(ns_clone.clone());
 
         let rec = ns.store(
             "record_1",
@@ -302,7 +304,7 @@ mod test {
                 value = "foo"
             },
         );
-        assert!(ns_filter.matches(&rec));
+        assert!(ns_filter.matches(&rec), "original: {} clone: {}", ns.chk(), ns_clone.chk());
 
         let other_ns = Namespace::ephemeral();
         let rec = other_ns.store(
