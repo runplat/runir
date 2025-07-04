@@ -16,20 +16,30 @@ use error::Error;
 mod handle;
 pub use handle::Handle;
 
-mod stdfs;
+mod file;
 
-use std::{ops::Deref, str::FromStr, sync::OnceLock};
+use std::{fmt::Display, ops::Deref, str::FromStr, sync::OnceLock};
 use crate::Opts;
 use dashmap::{DashMap, DashSet};
 use uuid::Uuid;
 
 /// Opens an address for reading and returns a Handle
 #[inline]
-pub fn open(address: &Address) -> Result<Handle> {
-    if let Some(open_fn) = interner().open.get(address.scheme) {
-        open_fn(address)
+pub(super) fn open(address: impl AsRef<Address>) -> Result<Handle> {
+    if let Some(open_fn) = interner().open.get(address.as_ref().scheme) {
+        open_fn(address.as_ref())
     } else {
-        Err(anyhow::anyhow!("Scheme is unregistered, {}", address.scheme).into())
+        Err(anyhow::anyhow!("Scheme is unregistered, {}", address.as_ref().scheme).into())
+    }
+}
+
+/// Opens an address for reading and writing and returns a Handle
+#[inline]
+pub(super) fn open_rw(address: impl AsRef<Address>) -> Result<Handle> {
+    if let Some(rw_open) = interner().rw_open.get(address.as_ref().scheme) {
+        rw_open(address.as_ref())
+    } else {
+        Err(anyhow::anyhow!("Scheme is unregistered, {}", address.as_ref().scheme).into())
     }
 }
 
@@ -37,31 +47,21 @@ pub fn open(address: &Address) -> Result<Handle> {
 /// 
 /// Returns an error if the Object could not be created
 #[inline]
-pub fn create_new(address: &Address) -> Result<Handle> {
-    if let Some(create_new_fn) = interner().create_new.get(address.scheme) {
-        create_new_fn(address)
+pub(super) fn create_new(address: impl AsRef<Address>) -> Result<Handle> {
+    if let Some(create_new_fn) = interner().create_new.get(address.as_ref().scheme) {
+        create_new_fn(address.as_ref())
     } else {
-        Err(anyhow::anyhow!("Scheme is unregistered, {}", address.scheme).into())
-    }
-}
-
-/// Opens an address for reading and writing and returns a Handle
-#[inline]
-pub fn open_rw(address: &Address) -> Result<Handle> {
-    if let Some(rw_open) = interner().rw_open.get(address.scheme) {
-        rw_open(address)
-    } else {
-        Err(anyhow::anyhow!("Scheme is unregistered, {}", address.scheme).into())
+        Err(anyhow::anyhow!("Scheme is unregistered, {}", address.as_ref().scheme).into())
     }
 }
 
 /// Moves an object into a container
 #[inline]
-pub fn move_obj(address: &Address, container: Container) -> Result<Handle> {
-    if let Some(move_obj_fn) = interner().move_obj.get(address.scheme) {
-        move_obj_fn(address, container)
+pub fn move_obj(address: impl AsRef<Address>, container: Container) -> Result<()> {
+    if let Some(move_obj_fn) = interner().move_obj.get(address.as_ref().scheme) {
+        move_obj_fn(address.as_ref(), container)
     } else {
-        Err(anyhow::anyhow!("Scheme is unregistered, {}", address.scheme).into())
+        Err(anyhow::anyhow!("Scheme is unregistered, {}", address.as_ref().scheme).into())
     }
 }
 
@@ -81,7 +81,7 @@ pub type ReadWriteOpenFn = fn(&Address) -> Result<Handle>;
 /// Moves the data from the address to the target container.
 /// 
 /// Must return an error if the object could not be moved 
-pub type MoveObjFn = fn(&Address, Container) -> Result<Handle>;
+pub type MoveObjFn = fn(&Address, Container) -> Result<()>;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -110,7 +110,7 @@ pub trait Scheme {
     fn rw_open(address: &Address) -> Result<Handle>;
 
     /// Moves an object from an address to a different container
-    fn move_obj(address: &Address, to: Container) -> Result<Handle>;
+    fn move_obj(address: &Address, to: Container) -> Result<()>;
 
     /// Create the specified container
     fn create(container: Container) -> Result<()>;
@@ -150,6 +150,24 @@ impl Address {
     #[inline]
     pub fn is_archive_member(&self) -> bool {
         matches!(self.object, Object::ArchiveMember { .. })
+    }
+
+    /// Returns the name of the inner object
+    #[inline]
+    pub fn name(&self) -> String {
+        self.object.to_string()
+    }
+
+    pub fn to_staging(self) -> Self {
+        Self { scheme: self.scheme, container: Container::Staging, object: self.object }
+    }
+
+    pub fn to_work(self) -> Self {
+        Self { scheme: self.scheme, container: Container::Work, object: self.object }
+    }
+
+    pub fn to_shared(self) -> Self {
+        Self { scheme: self.scheme, container: Container::Shared, object: self.object }
     }
 }
 
@@ -275,6 +293,42 @@ impl Object {
             }
             ok => Some(ok),
         }
+    }
+}
+
+impl Display for Object {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let display = if matches!(self, Object::Query(..)) {
+            if let Some(resolved) = self.clone().resolve(){
+                resolved
+            } else {
+                return Ok(());
+            }
+        } else {
+            self.clone()
+        };
+
+        match display {
+            Object::ArchiveEntry { ns_chk, uuid, opts } => {
+                write!(f, "{ns_chk:x}_{}_{}", uuid.as_simple(), opts.encode())
+            },
+            Object::ArchiveMember { session, ns_chk, archive } => {
+                write!(f, "{session:x}_{ns_chk:x}_{archive}")
+            },
+            Object::Archive(arch) => {
+                write!(f, "{arch}")
+            },
+            Object::Misc(misc) => {
+                write!(f, "{misc}")
+            },
+            _ => Ok(())
+        }
+    }
+}
+
+impl AsRef<Address> for Address {
+    fn as_ref(&self) -> &Address {
+        self
     }
 }
 

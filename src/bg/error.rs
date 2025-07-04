@@ -32,3 +32,9 @@ impl From<std::io::Error> for Error {
         Self { inner: anyhow!(value) }
     }
 }
+
+impl From<Error> for std::io::Error {
+    fn from(value: Error) -> Self {
+        std::io::Error::new(std::io::ErrorKind::Other, value.inner)
+    }
+}
