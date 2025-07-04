@@ -4,13 +4,12 @@ use crate::{
     queue::Pusher,
 };
 use ahash::HashSet;
-use futures::StreamExt;
+use futures::{AsyncSeekExt, StreamExt, future::Either};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::io::AsyncSeekExt;
 use tracing::{debug, error};
 
 /// Store settings contains options for workers to use during
@@ -136,10 +135,10 @@ impl ArchiveMember {
     /// Note: These records will always be virtual based records, this gurantees that
     /// records returned from an archive member were available on disk when the records
     /// were returned
-    pub async fn get_records(&self) -> std::io::Result<Vec<Record>> {
+    pub fn get_records(&self) -> std::io::Result<Vec<Record>> {
         match self {
             ArchiveMember::Unpacked { path, manifest } => {
-                let source = tokio::fs::File::open(path).await?;
+                let source = std::fs::File::open(path)?;
                 let mmap = unsafe { memmap2::Mmap::map(&source)? };
                 let mmap = Arc::new(mmap);
 
@@ -158,7 +157,7 @@ impl ArchiveMember {
                 manifest,
                 path,
             } => {
-                let source = tokio::fs::File::open(path).await?;
+                let source = std::fs::File::open(path)?;
                 let mmap = unsafe {
                     memmap2::MmapOptions::new()
                         .offset(*offset)
@@ -213,12 +212,12 @@ impl StoreArchive {
             .map(|p| p.to_path_buf())
             .unwrap_or(PathBuf::from("/"));
         let references = crate::archive::scan_for_references(
-            tokio::fs::File::open(path.as_ref()).await.unwrap(),
+            crate::util::fs::open(path.as_ref()).await.unwrap(),
         )
         .await
         .unwrap();
 
-        let source = tokio::fs::File::open(path.as_ref()).await?;
+        let source = std::fs::File::open(path.as_ref())?;
         let mmap = unsafe { memmap2::MmapOptions::new().map(&source)? };
         let mmap = Arc::new(mmap);
 
@@ -271,9 +270,15 @@ impl StoreArchive {
                                 }
 
                                 if !records.is_empty() {
-                                    error!("Found orphaned records {:#?}", records.iter().map(|r| hex::encode(r)).collect::<Vec<_>>());
+                                    error!(
+                                        "Found orphaned records {:#?}",
+                                        records.iter().map(|r| hex::encode(r)).collect::<Vec<_>>()
+                                    );
                                     error!("Manifest has: {:#?}", manifest.journal_entries()?);
-                                    error!("Manifest digest: {}", hex::encode(manifest.record.data.digest().finalize()));
+                                    error!(
+                                        "Manifest digest: {}",
+                                        hex::encode(manifest.record.data.digest().finalize())
+                                    );
                                     return Err(std::io::Error::new(
                                         std::io::ErrorKind::InvalidData,
                                         "Packed manifest is corrupted",
@@ -325,29 +330,26 @@ impl StoreArchive {
             // Can optimize appending perf by doing a scan over existing entries to do a
             // diff comparison with existing entries
 
-            let mut file = tokio::fs::OpenOptions::new()
-                .write(true)
-                .read(true)
-                .open(&completed_dest)
-                .await?;
+            let mut file = crate::util::fs::open_rw(&completed_dest).await?;
 
             let cursor = file.seek(std::io::SeekFrom::End(-1024)).await?;
             let grow_to = cursor + grow_to + 1024;
             debug!("Setting cursor to {cursor}, growing to {}", grow_to);
             append_mode = true;
-            file
+            Either::Left(file)
         } else {
-            let output = tokio::fs::File::create_new(&dest).await.inspect_err(|_| {
+            let output = crate::util::fs::create_new(&dest).await.inspect_err(|_| {
                 error!("Previous packing attempt did not succeed");
             })?;
-            output
+            Either::Right(output)
         };
 
         let encoder = crate::archive::TapeEncoder::default();
-        let mut writer = tokio_util::codec::FramedWrite::new(file, encoder);
+
+        let mut writer = asynchronous_codec::FramedWrite::new(file, encoder);
 
         for member in self.archived.iter() {
-            let records = member.get_records().await?;
+            let records = member.get_records()?;
             let manifest = member.manifest();
             let to_enc =
                 futures::stream::iter(records.iter().map(|r| Ok(Entry::Record(r.clone())))).chain(
@@ -463,7 +465,7 @@ mod test {
         let store_archive = StoreArchive::unpack(&store).await.unwrap();
         eprintln!("{store_archive:#?}");
         for member in store_archive.members() {
-            let records = member.get_records().await.unwrap();
+            let records = member.get_records().unwrap();
             for r in records {
                 assert!(r.is_valid());
                 eprintln!("{} is valid!", r.uuid());

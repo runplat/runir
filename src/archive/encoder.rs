@@ -3,7 +3,6 @@ use crate::{Namespace, RecordableExtensions, virt::RecordExtent};
 use bytes::{BufMut, Bytes};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio_util::codec::Encoder;
 
 /// Enumeration of encoded entry metadata collected by the tape encoder
 #[derive(Serialize, Deserialize, Clone)]
@@ -140,14 +139,12 @@ fn zero_block() -> Bytes {
     Bytes::from_iter(std::iter::repeat('\0' as u8).take(512))
 }
 
-impl Encoder<Entry> for TapeEncoder {
+impl asynchronous_codec::Encoder for TapeEncoder {
+    type Item<'a> = Entry;
+
     type Error = std::io::Error;
 
-    fn encode(
-        &mut self,
-        item: Entry,
-        dst: &mut bytes::BytesMut,
-    ) -> std::result::Result<(), Self::Error> {
+    fn encode(&mut self, item: Self::Item<'_>, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
         self.encode_to(item, dst)
     }
 }

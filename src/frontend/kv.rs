@@ -588,7 +588,7 @@ mod test {
             .count()
         );
 
-        kv.shared.state.flush().await.unwrap();
+        kv.shared.state.flush().unwrap();
         kv.refresh();
         assert!(
             kv.worker

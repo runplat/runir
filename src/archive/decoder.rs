@@ -2,7 +2,6 @@ use super::{Entry, entry::FileEntryReference};
 use crate::archive::Header;
 use bytes::{Buf, BufMut, BytesMut};
 use sha2::{Digest, Sha256};
-use tokio_util::codec::Decoder;
 
 /// Struct for decoding a tape archive file (tar)
 #[derive(Default)]
@@ -151,15 +150,12 @@ impl Dest {
     }
 }
 
-impl Decoder for TapeDecoder {
+impl asynchronous_codec::Decoder for TapeDecoder {
     type Item = Entry;
 
     type Error = std::io::Error;
 
-    fn decode(
-        &mut self,
-        src: &mut bytes::BytesMut,
-    ) -> std::result::Result<Option<Self::Item>, Self::Error> {
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         self.decode_from(src)
     }
 }

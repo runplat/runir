@@ -68,6 +68,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asynchronous-codec"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a860072022177f903e59730004fb5dc13db9275b79bb2aef7ba8ce831956c233"
+dependencies = [
+ "bytes",
+ "futures-sink",
+ "futures-util",
+ "memchr",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -733,6 +746,7 @@ dependencies = [
  "ahash",
  "ascii",
  "async-stream",
+ "asynchronous-codec",
  "bitflags 2.9.1",
  "bytes",
  "crc",
@@ -967,6 +981,7 @@ checksum = "66a539a9ad6d5d281510d5bd368c973d636c02dbf8a67300bfb6b950696ad7df"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "pin-project-lite",
  "tokio",

@@ -57,14 +57,14 @@ impl State {
 
     /// Asynchronously flushes all pending archive-members in state
     #[inline]
-    pub async fn flush(&self) -> std::io::Result<()> {
+    pub fn flush(&self) -> std::io::Result<()> {
         let store_archive = self.store.archive();
 
         let mut snapshot = VecIndex::default();
         for member in store_archive.members() {
             let path = member.path().to_path_buf();
             // This will create mem-mapped records from archive members
-            let records = member.get_records().await?;
+            let records = member.get_records()?;
 
             let mut index = self.indexes.entry(path.clone()).or_default();
             for r in records {
@@ -122,7 +122,7 @@ impl State {
         let restored = StoreArchive::unpack(store_tar.as_ref()).await?;
         let mut imported = VecIndex::default();
         for member in restored.members() {
-            let records = member.get_records().await?;
+            let records = member.get_records()?;
 
             for r in records {
                 imported.index(r.clone());
@@ -150,7 +150,7 @@ impl State {
 
         let mut snapshot = VecIndex::<Record>::default();
         for mem in restored.members() {
-            for r in mem.get_records().await? {
+            for r in mem.get_records()? {
                 snapshot.index(r);
             }
         }

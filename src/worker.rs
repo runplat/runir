@@ -7,9 +7,8 @@ use crate::{
 };
 use bytes::Bytes;
 use crossbeam::utils::Backoff;
-use futures::{StreamExt, future::RemoteHandle};
+use futures::{future::RemoteHandle, AsyncRead, StreamExt};
 use serde::Serialize;
-use tokio::io::AsyncRead;
 
 pub type BackgroundSync = RemoteHandle<std::io::Result<()>>;
 
@@ -136,7 +135,7 @@ impl Worker {
         input: impl AsyncRead + Send + Unpin + 'static,
     ) -> std::io::Result<()> {
         let decoder = archive::TapeDecoder::default();
-        let mut reader = tokio_util::codec::FramedRead::new(input, decoder);
+        let mut reader = asynchronous_codec::FramedRead::new(input, decoder);
 
         while let Some(entry) = reader.next().await {
             if matches!(
@@ -178,7 +177,7 @@ impl Worker {
 
             let handle = crate::util::spawn(async move {
                 // TODO: Make this output stream modular, good enough for now
-                let output = tokio::fs::File::create_new(&output_path).await?;
+                let output = crate::util::fs::create_new(&output_path).await?;
                 let stream = futures::stream::iter(entries);
                 let manifest = archive_to(stream, output).await?;
 
@@ -280,20 +279,20 @@ mod test {
         },));
 
         std::fs::remove_file("test.tar").ok();
-        let archive_file = tokio::fs::File::create_new("test.tar").await.unwrap();
+        let archive_file = crate::util::fs::create_new("test.tar").await.unwrap();
         let entries = futures::stream::iter(worker.flush().map(|e| Ok(e)));
         let manifest = archive_to(entries, archive_file).await.unwrap();
         assert!(manifest.is_valid());
 
         let mut restoring = Worker::from("test");
-        let archive_file = tokio::fs::File::open("test.tar").await.unwrap();
+        let archive_file = crate::util::fs::open("test.tar").await.unwrap();
         restoring.restore_from(archive_file).await.unwrap();
 
         let encoded = manifest.journal_entries().unwrap();
         assert_eq!(3, encoded.len());
         eprintln!("{encoded:#x?}");
 
-        let archive_file = tokio::fs::File::open("test.tar").await.unwrap();
+        let archive_file = crate::util::fs::open("test.tar").await.unwrap();
         let references = crate::archive::scan_for_references(archive_file)
             .await
             .unwrap();

@@ -24,14 +24,14 @@ pub use manifest::Manifest;
 /// Scans an input tape archive and returns references
 #[inline]
 pub async fn scan_for_references(
-    input: impl tokio::io::AsyncRead + Send + Unpin + 'static,
+    input: impl futures::AsyncRead + Send + Unpin + 'static,
 ) -> std::io::Result<Vec<Entry>> {
     use futures::StreamExt;
 
     let mut references = vec![];
 
     let decoder = TapeDecoder::references_only();
-    let mut reader = tokio_util::codec::FramedRead::new(input, decoder);
+    let mut reader = asynchronous_codec::FramedRead::new(input, decoder);
 
     while let Some(entry) = reader.next().await {
         if matches!(entry, Ok(Entry::Reference { .. })) {
@@ -48,12 +48,12 @@ pub async fn scan_for_references(
 #[inline]
 pub async fn archive_to(
     stream: impl futures::Stream<Item = std::io::Result<Entry>> + '_,
-    output: impl tokio::io::AsyncWrite + Send + Unpin + 'static,
+    output: impl futures::AsyncWrite + Send + Unpin + 'static,
 ) -> std::io::Result<Manifest> {
     use futures::sink::SinkExt;
     let encoder = TapeEncoder::default();
 
-    let mut writer = tokio_util::codec::FramedWrite::new(output, encoder);
+    let mut writer = asynchronous_codec::FramedWrite::new(output, encoder);
 
     // Creates archive entries of all archivable records and encodes to the output stream
     tokio::pin!(stream);

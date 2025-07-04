@@ -9,6 +9,8 @@ mod executor;
 pub use executor::Executor;
 pub use executor::TokioExecutor;
 
+pub mod fs;
+
 use futures::future::RemoteHandle;
 
 /// Util for spawning futures into a runtime
