@@ -93,7 +93,7 @@ async fn main() -> std::io::Result<()> {
                 KvCommands::Get(lookup_record) => {
                     let LookupRecord { key, format } = lookup_record;
 
-                    if let Some(value) = kv.get_raw(&key) {
+                    if let Some(value) = kv.ns(ns).get_raw(&key) {
                         if value.opts().is_object() {
                             match format {
                                 Some(format) => match format {
