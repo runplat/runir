@@ -1,5 +1,7 @@
 //! # KV Frontend
 //!
+//! The `kv` frontend provides a familiar key-value store interface on top of `runir` primitives (Namespace, Record)
+//! 
 //! ## First-time Use
 //! To open or create a store, simply call `runir::kv::open()` or `runir::kv::new()`
 //!
@@ -314,6 +316,22 @@ impl KeyValue {
         }
     }
 
+    /// Get a record from the kv store
+    #[inline]
+    pub fn get_raw(&self, key: &str) -> Option<&Record> {
+        if self.shared.snapshot().storage().is_empty() {
+            debug!("Snapshot is empty trying to load");
+            self.force_sync();
+        }
+        self.shared
+            .snapshot()
+            .lookup(self.ns.clone(), key)
+            .or_else(|| {
+                self.force_sync();
+                self.shared.snapshot().lookup(self.ns.clone(), key)
+            })
+    }
+
     /// Returns a new snapshot of the kv-store
     #[inline]
     pub fn take_snapshot(&self) -> VecIndex<Record> {
@@ -347,22 +365,6 @@ impl KeyValue {
             self.shared.update_snapshot();
         }
     }
-
-    /// Lookup a record in the current namespace
-    #[inline]
-    fn lookup(&self, label: &str) -> Option<&Record> {
-        if self.shared.snapshot().storage().is_empty() {
-            debug!("Snapshot is empty trying to load");
-            self.force_sync();
-        }
-        self.shared
-            .snapshot()
-            .lookup(self.ns.clone(), label)
-            .or_else(|| {
-                self.force_sync();
-                self.shared.snapshot().lookup(self.ns.clone(), label)
-            })
-    }
 }
 
 /// Wraps a key-value store and provides a put/get interface that is aware of serde-values
@@ -378,7 +380,7 @@ impl KeySerdeValue {
     /// Allows getting data from the object without deserializing it into a full type
     #[inline]
     pub fn peek(&self, key: &str) -> impl PeekExtensions {
-        self.lookup(key).and_then(|r| r.peek())
+        self.get_raw(key).and_then(|r| r.peek())
     }
 
     /// Loads an object from the store
@@ -432,7 +434,7 @@ impl<V: AsRef<[u8]>> Put<V> for KeyValue {
 
 impl<'get, V: Deserialize<'get> + 'get> Get<'get, V> for KeySerdeValue {
     fn get<'from: 'get>(&'from self, key: &str) -> std::io::Result<V> {
-        match self.lookup(key).and_then(|r| r.load::<V>()) {
+        match self.get_raw(key).and_then(|r| r.load::<V>()) {
             Some(r) => Ok(r),
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -444,7 +446,7 @@ impl<'get, V: Deserialize<'get> + 'get> Get<'get, V> for KeySerdeValue {
 
 impl<'get> Get<'get, &'get [u8]> for KeyValue {
     fn get<'from: 'get>(&'from self, key: &str) -> std::io::Result<&'get [u8]> {
-        match self.lookup(key).map(|r| r.bytes()) {
+        match self.get_raw(key).map(|r| r.bytes()) {
             Some(r) => Ok(r),
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
