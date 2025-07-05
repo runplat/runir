@@ -1,8 +1,12 @@
-use std::{path::PathBuf, process::exit};
+mod cmd;
+use cmd::LookupRecord;
+use cmd::CreateRecord;
+use cmd::ObjectType;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::process::exit;
+use clap::{Args, Parser, Subcommand};
 use runir::{IRecord, ToNamespace, frontend::Frontend};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
 /// CLI Utilities for development w/ `runir` frontends
@@ -38,48 +42,12 @@ enum KvCommands {
     Put(CreateRecord),
     /// Gets a record from the kv store
     Get(LookupRecord),
+    /// Shows information for a stored record
+    Info(LookupRecord),
 }
 
 #[derive(Args)]
 struct KVSystem {}
-
-/// Args for looking up records
-#[derive(Args)]
-struct LookupRecord {
-    /// Formats the output to a specific object format
-    ///
-    /// If the stored record is not an object, this argument will be ignored.
-    #[clap(long, short = 'o')]
-    format: Option<ObjectType>,
-    /// Record key
-    key: String,
-}
-
-#[derive(Args)]
-struct CreateRecord {
-    /// Value being stored is to be recognized as an Object type
-    ///
-    /// When object types are stored as records they will be deserialized and reserialized into runir's internal format.
-    /// This means that, the content digest of the original data will not be saved to the record
-    ///
-    /// If no option is used, content will be committed to the record as-is.
-    #[clap(long, short)]
-    object: Option<ObjectType>,
-    /// Path to the file to create the record from
-    ///
-    /// If a path is not set, then the default input will be read from stdin
-    #[clap(long, short)]
-    file: Option<PathBuf>,
-    /// Record key
-    key: String,
-}
-
-#[derive(ValueEnum, Clone, Debug)]
-enum ObjectType {
-    Yaml,
-    Json,
-    Toml,
-}
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -102,7 +70,6 @@ async fn main() -> std::io::Result<()> {
             let kv = if !KeyValue::default_store_exists().unwrap_or_default() {
                 debug!("Initializing default store");
                 let mut kv = runir::kv::open().await?;
-                kv.ns(ns);
                 kv.put(
                     "__init__runir__version",
                     &env!("CARGO_PKG_VERSION").as_bytes(),
@@ -110,43 +77,18 @@ async fn main() -> std::io::Result<()> {
                 kv.save().await?;
                 kv
             } else {
-                let kv = runir::kv::open().await?.ns(ns);
+                let kv = runir::kv::open().await?;
                 kv
             };
 
             match kv_config.command {
                 KvCommands::Put(create_record) => {
-                    let CreateRecord { object, file, key } = create_record;
-                    if let Some(obj) = object {
-                        debug!("Object format enabled {obj:?}");
-                        match obj {
-                            ObjectType::Yaml => {
-                                // TODO
-                            }
-                            ObjectType::Json => {
-                                // TODO
-                            }
-                            ObjectType::Toml => {
-                                // TODO
-                                let toml = if let Some(file) = file {
-                                    tokio::fs::read_to_string(file).await?
-                                } else {
-                                    let mut toml_content = String::new();
-                                    tokio::io::stdin().read_to_string(&mut toml_content).await?;
-                                    toml_content
-                                };
-
-                                let toml = toml::from_str::<toml::Value>(&toml).map_err(|e| {
-                                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-                                })?;
-
-                                kv.serde().put(&key, &toml)?;
-                                kv.refresh().await?;
-                                kv.save().await?;
-                            }
-                        }
-                    } else {
-                    }
+                    let record = create_record.build(ns).await?;
+                    kv.put_raw(record)?;
+                    kv.refresh().await?;
+                    kv.save().await?;
+                    eprintln!("Stored");
+                    return Ok(());
                 }
                 KvCommands::Get(lookup_record) => {
                     let LookupRecord { key, format } = lookup_record;
@@ -167,6 +109,49 @@ async fn main() -> std::io::Result<()> {
                         } else {
                             tokio::io::stdout().write_all(value.bytes()).await?;
                         }
+                    } else {
+                        eprintln!("Object not found");
+                        exit(1)
+                    }
+                },
+                KvCommands::Info(lookup_record) => {
+                    let LookupRecord { key, .. } = lookup_record;
+
+                    if let Some(value) = kv.get_raw(&key) {
+                        let content = format!("sha256:{}", hex::encode(value.content()));
+                        let is_virtual = value.is_virtual();
+                        let is_valid = value.is_valid();
+                        let uuid = value.uuid().as_simple().to_string();
+                        let opts = value.opts();
+                        let is_archivable =  opts.is_archivable();
+                        let is_idempotent = opts.is_idempotent();
+                        let is_indexable = opts.is_indexable();
+                        let is_object = opts.is_object();
+                        let is_manifest = opts.is_manifest();
+                        let size = value.bytes().len();
+                        let ts = time::UtcDateTime::from_unix_timestamp(value.ts() as i64).expect("should be valid timestamp").to_string();
+                        let age = format!("{:#?}", value.age());
+                        
+                        println!("{}", toml::toml! {
+                            uuid = uuid
+                            ts = ts
+
+                            [data]
+                            content = content
+                            size = size
+
+                            [archive_state]
+                            is_virtual = is_virtual
+                            is_valid = is_valid
+                            age = age
+
+                            [opts]
+                            is_archivable = is_archivable
+                            is_idempotent = is_idempotent
+                            is_indexable = is_indexable
+                            is_object = is_object
+                            is_manifest = is_manifest
+                        });
                     } else {
                         eprintln!("Object not found");
                         exit(1)
