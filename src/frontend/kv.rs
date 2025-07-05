@@ -9,92 +9,66 @@
 //!
 //! ## Canonical KV Store API Example
 //! ```rs
-//! let kv = runir::kv::open().await;
+//! let mut kv = runir::kv::new();
 //!
-//! // `put` returns a `BackgroundSync` handle, which can be awaited on to ensure the value has been stored
-//! let bg_sync = kv.put("value", b"hello world")?;
-//!
-//! // It is however not required to `await` in order to retrieve the value
-//! bg_sync.forget();
+//! kv.put("value", b"hello world")?;
 //!
 //! // The value is always available immediately
-//! assert_eq!(b"hello world", kv.get("value"));
+//! assert_eq!(b"hello world", kv.get("value").unwrap());
 //!
 //! // Once save(..) is called, the same data will be persisted to disk and available on process restart
 //! kv.save().await?;
 //! ```
 //!
-//! Calling `save()` will flush all stored values from any kv-store handles assoicated to the originally opened handle.
+//! Calling `save()` will flush all stored values from any kv-store handles associated to the originally opened handle.
 //!
-//! Opening multiple KV frontends to the same save path (i.e. calling kv::open(..) twice from the same process) concurrently may result in overwrite conflicts. See below section for "Concurrency and Multi writer Safety" for details.
+//! Opening multiple KV frontends to the same save path (i.e. calling kv::open(..) twice from the same process) concurrently may result in overwrite conflicts. See below section for "Concurrency and Multi-writer Safety" for details.
 //!
 //! ## KV Store Namespaces
 //! ```rs
-//! let kv = runir::kv::open().await;
+//! let kv = runir::kv::open().await?;
 //!
 //! // Instead of baking namespaces into the key itself, you can namespace the entire store
 //! let ns_kv = kv.ns("my_namespace");
 //! ```
 //!
-//! ## KV Store "serde" api
+//! ## KV Store "serde" API
 //! ```rs
-//! let kv = runir::kv::open().await;
+//! let kv = runir::kv::open().await?;
 //!
-//! // This enables the kv store to be "object" aware
 //! let kv_serde = kv.serde();
 //!
-//! // In this mode, any type that implements `serde::Serialize` may be used in `put(..)`
 //! kv_serde.put("value", &toml::toml! {
 //!     my_interesting_value = "hello"
 //! });
 //!
-//! // Load the object back from the store to any type that implements `serde::Deserialize`
 //! let obj = kv_serde.load::<toml::Value>("value").unwrap();
 //!
-//! // Or use peek(..) to map the data w/o allocating a new object
 //! let reader = obj.peek().unwrap();
 //! assert_eq!("hello", reader.as_map().idx("my_interesting_value").as_str())
 //! ```
 //!
 //! ## KV Multi-Threaded Scenarios
 //!
-//! Multi-threaded scenarios are supported by periodically calling, `refresh()`.
+//! Multi-threaded scenarios are supported by calling `refresh()` when necessary.
 //!
-//! This allows threads to update their indicies in order to view records stored by different threads.
-//!
-//! >
-//! > Note/WIP:
-//! > Currently runir assumes idempotency, meaning all values in put(..) should be valid.
-//! > However, in the future "merge" policies will be supported in order to customize conflict resolution.
-//! >
-//! > i.e. No merge policy == idempotent
-//! >
+//! This allows threads to update their indices in order to view records stored by different threads.
 //!
 //! ```rs
-//! let kv = runir::kv::open().await;
+//! let kv = runir::kv::open().await?;
 //!
-//! // Pseudo-code: in two different threads
+//! // In two different threads:
 //!
-//! // Imagine two threads that are scoped to the same namespace
-//! thread ! {
-//!   let ns = kv.ns("my_ns");
-//!   ns.put("val1", b"hello")?.await?; // If you wish to ensure this is available
-//! }
+//! thread::spawn(move || {
+//!     let ns = kv.ns("my_ns");
+//!     ns.put("val1", b"hello").unwrap();
+//! });
 //!
-//! ..
-//!
-//! thread ! {
-//!   // Each call to kv.ns(..) creates a new "standalone" kv handle that manages local writes,
-//!   // while automatically flushing them to shared storage. This means all writes are immediately
-//!   // available through that same handle, even before being synced elsewhere.
-//!
-//!   // Flushing is triggered automatically in the background after each call to `put(..)`.
-//!   let ns = kv.ns("my_ns");
-//!   ns.refresh().await?;
-//!
-//!   // `refresh()` syncs the index with any values written by other handles in the same kv-store lineage.
-//!   assert_eq!(b"hello", ns.get("val1").unwrap());
-//! }
+//! thread::spawn(move || {
+//!     let ns = kv.ns("my_ns");
+//!     ns.refresh();
+//!     assert_eq!(b"hello", ns.get("val1").unwrap());
+//! });
 //! ```
 //!
 //! ## Concurrency and Multi-writer Safety
@@ -103,7 +77,7 @@
 //!   - All clones share a common index and record buffer.
 //!   - Use `refresh()` periodically to sync changes across threads.
 //!
-//! - **Opening multiple `kv` frontends independently** (e.g., via repeated `kv::open()`) is **not safe for concurrent writing to the same archive path**.
+//! - **Opening multiple `kv` frontends independently** (e.g., via repeated `kv::open()` or `kv::new()`) is **not safe for concurrent writing to the same archive path**.
 //!   - These instances maintain separate snapshots and may overwrite each other's data when calling `save()`.
 //!   - In this case, `runir` does not coordinate or lock access to the backing file.
 //!
@@ -116,12 +90,36 @@
 //!
 //! let kv = runir::kv::open().await?;
 //!
-//! // Since kv-store is backed by runir::Store, search functionality is made available by default
 //! for result in kv.search(field("value").contains("hello")) {
-//!     ..
+//!     // work with `&Record`
 //! }
 //! ```
 //!
+//! //! ## Zero-Copy Field Access with `peek()`
+//!
+//! Access individual fields in stored structured data without full deserialization:
+//!
+//! ```rs
+//! let kv = runir::kv::open().await?;
+//! let serde_kv = kv.serde();
+//!
+//! serde_kv.put("config", &toml::toml! {
+//!     auth = { token = "abc123" }
+//! })?;
+//!
+//! // Later...
+//!
+//! let token = kv.serde()
+//!     .peek("config")
+//!     .in_ref()["auth"]["token"]
+//!     .str()
+//!     .unwrap();
+//!
+//! assert_eq!("abc123", token);
+//! ```
+//!
+//! This is ideal for quick field access from nested structures (like TOML/JSON),
+//! and avoids panics, allocations, or full deserialization unless requested.
 
 /// Opens a new or existing key-value store
 ///
@@ -143,7 +141,8 @@ pub async fn open_dir(dir: impl Into<PathBuf>) -> std::io::Result<KeyValue> {
 
 use super::{Frontend, state::SharedState};
 use crate::{
-    IRecord, Namespace, Query, Record, SharedWorker, ToNamespace, search::iter::Search, util::Peek,
+    IRecord, Namespace, Query, Record, SharedWorker, ToNamespace, VecIndex, search::iter::Search,
+    util::PeekExtensions,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -157,11 +156,6 @@ use tracing::{debug, error};
 pub trait Put<V> {
     /// Puts a value in the store to key
     ///
-    /// Returns a BackgroundSync, which is a future that returns after the sync data has been queued
-    /// for packing. Reading a value from the thread it was written on is always immediately available.
-    ///
-    /// Note: If waiting for the result of the background sync isn't desired `.forget(..)` can be called.
-    ///
     /// Returns an Error if stored data could not be validated
     ///
     /// Note: All stored-values are expected to be idempotent by default, unless a merge-policy is set
@@ -170,13 +164,6 @@ pub trait Put<V> {
     fn put(&mut self, key: &str, value: &V) -> std::io::Result<()>;
 
     /// Put many key_values in the store at once
-    ///
-    /// This is more effecient then calling put(..) multiple times if all key_values are known ahead of time.
-    ///
-    /// Returns a BackgroundSync, which is a future that returns after the sync data has been queued
-    /// for packing. Reading a value from the thread it was written on is always immediately available.
-    ///
-    /// Note: If waiting for the result of the background sync isn't desired `.forget(..)` can be called.
     ///
     /// Returns an Error if stored data could not be validated
     ///
@@ -199,6 +186,7 @@ pub trait Get<'get, V: 'get> {
 /// Get started using `kv.put(..)` with raw bytes
 ///
 /// Upgrade to `kv.serde().put(..)` for any Serialize/Deserialize type
+#[derive(Clone)]
 pub struct KeyValue {
     /// Namespace this key-value is under, defaults to ""
     ns: Namespace,
@@ -235,8 +223,6 @@ impl KeyValue {
     ///
     /// If this is the first time the store has saved, this function will ensure the store's working directory
     /// is available and configured.
-    ///
-    /// If successful, this function will output a .env_runir file if it has not been set, (See KeyValue::open(..) for more details)
     ///
     /// WARN: If the current process does not have permissions for any of the above procedures, an error will be returned.
     ///
@@ -289,17 +275,20 @@ impl KeyValue {
     /// Refreshes the key value store's indexes
     #[inline]
     pub async fn refresh(&self) -> std::io::Result<()> {
+        // Sync any work pending from workers
         self.worker.sync()?.await?;
+
+        // Flushes all work to disk-backed stores and updates indicies
         self.shared.state.flush()?;
-        // self.worker.take_snapshot();
         Ok(())
     }
 
-    /// Searches over stored records w/ a query
+    /// Searches over stored records using a query.
     ///
-    /// This function will invoke a force_sync to ensure the search
-    /// happens over fresh data, For performant operations, lookup is more
-    /// likely desired
+    /// This function will invoke `force_sync()` to ensure the search operates on the latest data.
+    ///
+    /// If performance is critical (e.g., within a tight loop), consider using [`KeyValue::take_snapshot()`],
+    /// which returns a stable, read-only view of the current data and exposes the same `search(..)` API.
     #[inline]
     pub fn search<'q>(
         &'q self,
@@ -309,17 +298,13 @@ impl KeyValue {
 
         self.force_sync();
 
-        let snapshot = self.shared.snapshot();
-        debug!("{snapshot:?}");
-        snapshot.search(q)
+        self.shared.snapshot().search(q)
     }
 
     /// Puts a record into the kv store
     #[inline]
     pub fn put_raw(&self, record: Record) -> std::io::Result<()> {
         if self.worker.push(record.clone()) {
-            // self.worker.sync()
-            //self.index.index(record);
             Ok(())
         } else {
             Err(Error::new(
@@ -329,12 +314,32 @@ impl KeyValue {
         }
     }
 
-    /// Forces a sync
+    /// Returns a new snapshot of the kv-store
+    #[inline]
+    pub fn take_snapshot(&self) -> VecIndex<Record> {
+        self.shared.snapshot().clone()
+    }
+
+    /// Forces a sync of the underlying store.
+    ///
+    /// This is a blocking operation and is only invoked automatically under specific conditions:
+    /// - If the current snapshot is empty during a `lookup`
+    /// - If a `lookup(..)` fails (returns `None`) — in this case, `force_sync()` is retried automatically
+    /// - If [`KeyValue::search()`] is used
+    ///
+    /// It ensures the freshest possible view of the data without introducing additional latency
+    /// during normal reads.
+    ///
+    /// ⚠️ **Note:** If the `tokio` feature is enabled, this must be called within a multithreaded tokio runtime,
+    /// as it internally invokes `spawn_blocking(..)` and awaits the result.
+    ///
+    /// This function is not intended for frequent use in performance-critical paths. Prefer `refresh()`
+    /// in async contexts or use `take_snapshot()` when manual control is desired.
     #[inline]
     fn force_sync(&self) {
         debug!("Force sync invoked, blocking for a refresh");
         if let Err(err) =
-            // TODO: If tokio is enabled, this MUST run on a multi-threaded runtime
+            // NOTE: If tokio is enabled, this MUST run on a multi-threaded tokio-runtime
             futures::executor::block_on(crate::util::spawn_blocking(|| self.refresh()))
         {
             error!("Could not refresh {err}");
@@ -347,7 +352,7 @@ impl KeyValue {
     #[inline]
     fn lookup(&self, label: &str) -> Option<&Record> {
         if self.shared.snapshot().storage().is_empty() {
-            debug!("snapshot is empty trying to load");
+            debug!("Snapshot is empty trying to load");
             self.force_sync();
         }
         self.shared
@@ -361,17 +366,18 @@ impl KeyValue {
 }
 
 /// Wraps a key-value store and provides a put/get interface that is aware of serde-values
+#[derive(Clone)]
 pub struct KeySerdeValue {
     /// Inner KV Store
     kv: KeyValue,
 }
 
 impl KeySerdeValue {
-    /// Peek at the stored object w/ a flexbuffer Reader
+    /// Peek at the stored object w/ PeekExtentions
     ///
     /// Allows getting data from the object without deserializing it into a full type
     #[inline]
-    pub fn peek(&self, key: &str) -> Option<Peek> {
+    pub fn peek(&self, key: &str) -> impl PeekExtensions {
         self.lookup(key).and_then(|r| r.peek())
     }
 
@@ -398,14 +404,12 @@ impl DerefMut for KeySerdeValue {
 
 impl<V: Serialize> Put<V> for KeySerdeValue {
     fn put(&mut self, key: &str, value: &V) -> std::io::Result<()> {
-        let rec = self.ns.store(key, value);
-        self.put_raw(rec)
+        self.put_raw(self.ns.store(key, value))
     }
 
     fn put_many(&mut self, key_values: &[(&str, &V)]) -> std::io::Result<()> {
         for (key, v) in key_values {
-            let rec = self.ns.store(key, v);
-            self.put_raw(rec)?;
+            self.put_raw(self.ns.store(key, v))?;
         }
 
         Ok(())
@@ -460,7 +464,8 @@ impl AsRef<SharedState> for KeyValue {
 mod test {
     use super::{Get, KeyValue, Put};
     use crate::{
-        QueryBuilder, Record, field, filter, frontend::Frontend, namespace, util::PeekExtensions,
+        IRecord, QueryBuilder, Record, field, filter, frontend::Frontend, namespace,
+        util::PeekExtensions, util::PeekRefExtensions,
     };
     use std::path::PathBuf;
 
@@ -550,7 +555,7 @@ mod test {
 
         assert_eq!(
             "really important value",
-            kv.peek("hello").unwrap().as_map().idx("value").as_str()
+            kv.peek("hello").at("value").str().unwrap_or_default()
         );
 
         assert_eq!(2, kv.search(field("other")).count());
@@ -613,6 +618,41 @@ mod test {
             hello2.load::<toml::Value>().unwrap()["other"]["values"]["also_important"]
                 .as_str()
                 .unwrap()
+        );
+
+        assert_eq!(
+            "another hello",
+            hello2
+                .peek()
+                .at_path(["other", "values", "also_important"])
+                .str()
+                .unwrap()
+        );
+
+        assert_eq!(
+            Some("another hello"),
+            hello2.peek().in_ref()["other"]["values"]["also_important"].str()
+        );
+
+        assert_eq!(
+            None,
+            hello2.peek().in_ref()["other"]["values"]["doesn't exist"].str()
+        );
+
+        let other_values = hello2.peek().in_ref()["other"]["values"].clone();
+        assert_eq!(
+            Some("another hello"),
+            other_values.clone()["also_important"].str()
+        );
+        assert_eq!(
+            Some("another hello"),
+            other_values.clone()["also_important"].str()
+        );
+        assert_eq!(None, other_values.clone()["doesn't exist"].str());
+
+        assert_eq!(
+            Some("another hello"),
+            kv.serde().peek("hello2").in_ref()["other"]["values"]["also_important"].str()
         );
     }
 }

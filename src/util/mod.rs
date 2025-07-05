@@ -4,6 +4,7 @@ pub use name::Name;
 mod peek;
 pub use peek::Peek;
 pub use peek::PeekExtensions;
+pub use peek::PeekRefExtensions;
 
 mod executor;
 pub use executor::Executor;
