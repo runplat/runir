@@ -107,12 +107,22 @@ impl Worker {
     pub fn sync(&mut self) -> std::io::Result<BackgroundSync> {
         if let Some(settings) = self.store.clone() {
             let output_path = settings.archive_path();
-            let entries = self.flush().map(|e| Ok(e)).collect::<Vec<_>>();
+            let mut total_size = 0;
+            let entries = self.flush().inspect(|r| {
+                total_size += r.header().size();
+                total_size += 512;
+                total_size += 512 - (total_size % 512);
+            }).map(|e| Ok(e)).collect::<Vec<_>>();
             let packer = settings.packer().clone();
 
             let handle = crate::util::spawn(async move {
                 // TODO: Make this output stream modular, good enough for now
-                debug!("Creating new archive_member at {output_path:?}");
+                /*
+                16MiB = 32678 512-blocks,
+                    1 record = min 2 blocks
+                    16384 records max per 16 MiB
+                 */
+                debug!(total_size, "Creating new archive_member at {output_path:?}");
                 let output = crate::util::fs::create_new(&output_path).await?;
                 let stream = futures::stream::iter(entries);
                 let manifest = archive_to(stream, output).await?;

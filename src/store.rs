@@ -1,7 +1,5 @@
 use crate::{
-    Namespace, Queue, Record, VirtualData, Worker,
-    archive::{Entry, FileEntryReference, Manifest, scan_for_references},
-    queue::Pusher,
+    archive::{scan_for_references, Entry, FileEntryReference, Manifest}, queue::Pusher, IRecord, Namespace, Queue, Record, VirtualData, Worker
 };
 use ahash::HashSet;
 use futures::{AsyncSeekExt, future::Either};
@@ -356,13 +354,16 @@ impl StoreArchive {
                     offset,
                 }) = r
                 {
-                    let digest = digest.finalize();
-                    debug!(
-                        "Existing entry found \n\n\t{}\n\tdigest: {}\n\toffset: {offset}\n",
-                        header.name(),
-                        hex::encode(&digest[..])
-                    );
-                    existing.insert(digest);
+                    if let Some((_, id, _)) = header.split_name_for_record() {
+                        let (key, _) = id.as_u64_pair();
+                        let digest = digest.finalize();
+                        debug!(
+                            "Existing entry found \n\n\t{}\n\tdigest: {}\n\toffset: {offset}\n",
+                            header.name(),
+                            hex::encode(&digest[..])
+                        );
+                        existing.insert((key, digest));
+                    }
                 }
             }
             let mut file = crate::util::fs::open_rw(&completed_dest).await?;
@@ -389,7 +390,7 @@ impl StoreArchive {
             let including = records
                 .iter()
                 .filter(|r| {
-                    let new_rec = existing.insert(r.data.digest().finalize());
+                    let new_rec = existing.insert((r.uuid().as_u64_pair().0, r.data.digest().finalize()));
                     debug!(inserting = new_rec, "dedupe");
                     new_rec
                 })
@@ -499,9 +500,9 @@ mod test {
     #[tracing_test::traced_test]
     async fn test_store_build_archive() {
         let store = Store::default();
-        {
-            let mut worker = store.worker();
+        let mut worker = store.worker();
 
+        {
             let ns = "test_ns_1".to_namespace();
             assert!(worker.push(ns.author("record_1", |mut b| {
                 b.start_map().push("value", "hello world");
@@ -512,11 +513,9 @@ mod test {
                 b.start_map().push("value", "goodbye world");
                 b
             })));
-            worker.sync().unwrap().await.unwrap();
         }
 
         {
-            let mut worker = store.worker();
             let ns = "test_ns_2".to_namespace();
             assert!(worker.push(ns.author("record_1", |mut b| {
                 b.start_map().push("value", "hello world 2");
@@ -527,11 +526,9 @@ mod test {
                 b.start_map().push("value", "goodbye world 2");
                 b
             })));
-            worker.sync().unwrap().await.unwrap();
         }
 
         {
-            let mut worker = store.worker();
             let ns = "test_ns_1".to_namespace();
             assert!(worker.push(ns.author("record_1", |mut b| {
                 b.start_map().push("value", "hello world 2");
@@ -542,9 +539,9 @@ mod test {
                 b.start_map().push("value", "goodbye world");
                 b
             })));
-            worker.sync().unwrap().await.unwrap();
         }
 
+        worker.sync().unwrap().await.unwrap();
         let store_archive = store.archive();
         eprintln!("{:#?}", store_archive);
 

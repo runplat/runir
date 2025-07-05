@@ -3,7 +3,6 @@ use crate::{Namespace, RecordableExtensions, virt::RecordExtent};
 use bytes::{BufMut, Bytes};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::debug;
 
 /// Enumeration of encoded entry metadata collected by the tape encoder
 #[derive(Serialize, Deserialize, Clone)]
@@ -82,11 +81,9 @@ impl TapeEncoder {
         for enc in self.journal.iter_mut() {
             match enc {
                 JournalEntry::Extent { source, .. } => {
-                    debug!("Stamping source for extent {source:x?} -> {:x}", source_digest);
                     source.copy_from_slice(source_digest.as_slice());
                 }
                 JournalEntry::Record(record_extent) => {
-                    debug!("Stamping source for record {:?} -> {:x}", record_extent.source, source_digest);
                     record_extent.source = source_digest.into();
                 }
             }
