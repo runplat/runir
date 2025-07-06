@@ -77,7 +77,6 @@ impl State {
         for member in store_archive.members() {
             let path = member.path().to_path_buf();
             debug!("packing member from {path:?}");
-            // This will create mem-mapped records from archive members
             let records = member.get_records()?;
 
             if records.is_empty() {
