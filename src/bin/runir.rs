@@ -9,9 +9,12 @@ use runir::{IRecord, ToNamespace, frontend::Frontend};
 use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
-/// CLI Utilities for development w/ `runir` frontends
+/// CLI Utilities for development with `runir` frontends
 #[derive(Parser)]
 struct Runir {
+    /// Enables and outputs debug logs to stderr
+    #[arg(long, short)]
+    debug: bool,
     /// Namespace setting
     ///
     /// All records are stored under a namespace.
@@ -46,20 +49,21 @@ enum KvCommands {
     Info(LookupRecord),
 }
 
-#[derive(Args)]
-struct KVSystem {}
-
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let filter = tracing_subscriber::EnvFilter::from_default_env();
-       // .add_directive("runir=debug".parse().unwrap());
+    let program = Runir::parse();
+
+    let mut filter = tracing_subscriber::EnvFilter::from_default_env(); 
+    
+    if program.debug {
+        filter = filter.add_directive("runir=debug".parse().unwrap());   
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .compact()
         .init();
-
-    let program = Runir::parse();
 
     let ns = program.namespace.to_namespace();
 
@@ -91,10 +95,10 @@ async fn main() -> std::io::Result<()> {
                     return Ok(());
                 }
                 KvCommands::Get(lookup_record) => {
-                    let LookupRecord { label, format, object_format } = lookup_record;
+                    let LookupRecord { label, format } = lookup_record;
                     if let Some(value) = kv.ns(ns).get_raw(&label) {
                         if value.opts().is_object() {
-                            match format.map(|f| f.resolve()).or(object_format) {
+                            match format.and_then(|f| f.resolve()) {
                                 Some(format) => match format {
                                     ObjectFormat::Yaml => todo!(),
                                     ObjectFormat::Json => todo!(),

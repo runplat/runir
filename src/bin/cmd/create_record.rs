@@ -1,27 +1,16 @@
 use std::path::PathBuf;
-
 use clap::Args;
 use runir::{Namespace, Record};
 use tokio::io::AsyncReadExt;
 use tracing::debug;
-
-use crate::cmd::ObjectFormat;
-
-use super::ObjectFormatArgs;
+use super::ObjectFormat;
+use super::Format;
 
 /// Provides interface and functions for creating records
 #[derive(Args)]
 pub struct CreateRecord {
-    /// Value being stored is to be recognized as an Object type
-    ///
-    /// When object types are stored as records they will be deserialized and reserialized into runir's internal format.
-    /// This means that, the content digest of the original data will not be saved to the record
-    ///
-    /// If no option is used, content will be committed to the record as-is.
-    #[clap(short)]
-    object_format: Option<ObjectFormat>,
     #[clap(flatten)]
-    format: Option<ObjectFormatArgs>,
+    format: Option<Format>,
     /// Path to the file to create the record from
     ///
     /// If a path is not set, then the default input will be read from stdin
@@ -33,10 +22,10 @@ pub struct CreateRecord {
 
 impl CreateRecord {
     pub async fn build(&self, ns: Namespace) -> std::io::Result<Record> {
-        let CreateRecord { format: object_format, object_format: object_ty, file, label } = self;
-        if let Some(obj) = object_format.clone().map(|o| o.resolve()).or(object_ty.clone()) {
-            debug!("Object format enabled {obj:?}");
-            match obj {
+        let CreateRecord { format, file, label } = self;
+        if let Some(format) = format.as_ref().and_then(|f| f.resolve()) {
+            debug!("Object format enabled {format:?}");
+            match format {
                 ObjectFormat::Yaml => {
                     // TODO
                 }
