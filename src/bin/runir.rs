@@ -1,7 +1,7 @@
 mod cmd;
 use cmd::LookupRecord;
 use cmd::CreateRecord;
-use cmd::ObjectType;
+use cmd::ObjectFormat;
 
 use std::process::exit;
 use clap::{Args, Parser, Subcommand};
@@ -91,15 +91,14 @@ async fn main() -> std::io::Result<()> {
                     return Ok(());
                 }
                 KvCommands::Get(lookup_record) => {
-                    let LookupRecord { key, format } = lookup_record;
-
-                    if let Some(value) = kv.ns(ns).get_raw(&key) {
+                    let LookupRecord { label, format, object_format } = lookup_record;
+                    if let Some(value) = kv.ns(ns).get_raw(&label) {
                         if value.opts().is_object() {
-                            match format {
+                            match format.map(|f| f.resolve()).or(object_format) {
                                 Some(format) => match format {
-                                    ObjectType::Yaml => todo!(),
-                                    ObjectType::Json => todo!(),
-                                    ObjectType::Toml => {
+                                    ObjectFormat::Yaml => todo!(),
+                                    ObjectFormat::Json => todo!(),
+                                    ObjectFormat::Toml => {
                                         let toml = value.load::<toml::Value>().unwrap();
                                         println!("{}", toml::to_string_pretty(&toml).unwrap());
                                     }
@@ -115,9 +114,9 @@ async fn main() -> std::io::Result<()> {
                     }
                 },
                 KvCommands::Info(lookup_record) => {
-                    let LookupRecord { key, .. } = lookup_record;
+                    let LookupRecord { label, .. } = lookup_record;
 
-                    if let Some(value) = kv.get_raw(&key) {
+                    if let Some(value) = kv.get_raw(&label) {
                         let content = format!("sha256:{}", hex::encode(value.content()));
                         let is_virtual = value.is_virtual();
                         let is_valid = value.is_valid();
