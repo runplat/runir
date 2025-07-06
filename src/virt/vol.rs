@@ -1,5 +1,6 @@
 use crate::{
-    archive::{Entry, TapeEncoder}, store::ArchiveMember, Record
+    archive::{Entry, TapeEncoder},
+    store::ArchiveMember,
 };
 use asynchronous_codec::{FramedWrite, FramedWriteParts};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -15,10 +16,10 @@ use std::{
     sync::Arc,
 };
 
-use super::{data::BackingData, VirtualData};
+use super::{VirtualData, data::BackingData};
 
-pub const KIB: usize = 2^10;
-pub const MIB: usize = 2^20;
+pub const KIB: usize = 2usize.pow(10);
+pub const MIB: usize = 2usize.pow(20);
 pub const MIB16: usize = MIB * 16;
 
 /// Super trait for types that [`Volume<T>`] can use as it's binary store
@@ -122,12 +123,11 @@ impl<T: VolumeTarget> Volume<T> {
     }
 
     /// Encodes a series of Records using [TapeEncoder] and writes them sequentially into the underlying target
-    pub async fn write_batch(self, batch: Vec<Record>) -> std::io::Result<Self> {
+    pub async fn write_batch(self, batch: Vec<Entry>) -> std::io::Result<Self> {
         let mut writer = FramedWrite::new(self.target, self.encoder);
 
         for r in batch {
-            let entry = Entry::Record(r);
-            writer.feed(entry).await?;
+            writer.feed(r).await?;
         }
 
         writer.close().await?;
@@ -158,10 +158,21 @@ impl<T: VolumeTarget> Volume<T> {
     #[inline]
     pub fn swap_and_archive(&mut self, next: T) -> std::io::Result<ArchiveMember> {
         let target = std::mem::replace(&mut self.target, next);
+        let encoder = std::mem::replace(&mut self.encoder, TapeEncoder::default());
+
+        let to_archive = Self { target, encoder };
+        to_archive.to_archive()
+    }
+
+    /// Consumes the volume and returns an archive member
+    #[inline]
+    pub fn to_archive(mut self) -> std::io::Result<ArchiveMember> {
+        let target = self.target;
         let path = target.path().as_ref().to_path_buf();
+        
         let target = target.freeze()?;
         let manifest = self.encoder.stamp_manifest();
-        
+
         let mut records = vec![];
         let entries = manifest.journal_entries()?;
         let count = entries.len();
@@ -173,9 +184,16 @@ impl<T: VolumeTarget> Volume<T> {
         }
 
         if count != records.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Would have returned partial data"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Would have returned partial data",
+            ));
         }
-        Ok(ArchiveMember::Volume { path, manifest, records })
+        Ok(ArchiveMember::Volume {
+            path,
+            manifest,
+            records,
+        })
     }
 }
 
@@ -245,8 +263,11 @@ impl VolumeTarget for MemoryMappedTarget {
         self.path.as_path()
     }
 
-    fn freeze(self) ->  std::io::Result<Self::Bytes> {
-        Ok(FrozenMmap { len: self.pos, inner: Arc::new(self.inner.make_read_only()?) })
+    fn freeze(self) -> std::io::Result<Self::Bytes> {
+        Ok(FrozenMmap {
+            len: self.pos,
+            inner: Arc::new(self.inner.make_read_only()?),
+        })
     }
 }
 
@@ -367,7 +388,10 @@ impl<T: AsMut<[u8]>> AsMut<[u8]> for CursorTarget<T> {
 
 #[cfg(test)]
 mod test {
-    use crate::{util::{PeekExtensions, PeekRefExtensions}, IRecord, ToNamespace, VecIndex};
+    use crate::{
+        IRecord, ToNamespace, VecIndex,
+        util::{PeekExtensions, PeekRefExtensions},
+    };
 
     use super::*;
     use futures::AsyncWriteExt;
@@ -422,80 +446,165 @@ mod test {
 
         let mut records = vec![];
 
-        records.push(ns.store("test_1", &toml::toml! {
-            value = "test_1"
-        }));
+        records.push(ns.store(
+            "test_1",
+            &toml::toml! {
+                value = "test_1"
+            },
+        ));
 
+        records.push(ns.store(
+            "test_2",
+            &toml::toml! {
+                value = "test_2"
+            },
+        ));
 
-        records.push(ns.store("test_2", &toml::toml! {
-            value = "test_2"
-        }));
+        records.push(ns.store(
+            "test_3",
+            &toml::toml! {
+                value = "test_3"
+            },
+        ));
 
-        records.push(ns.store("test_3", &toml::toml! {
-            value = "test_3"
-        }));
+        records.push(ns.store(
+            "test_4",
+            &toml::toml! {
+                value = "test_4"
+            },
+        ));
 
-        records.push(ns.store("test_4", &toml::toml! {
-            value = "test_4"
-        }));
+        records.push(ns.store(
+            "test_5",
+            &toml::toml! {
+                value = "test_5"
+            },
+        ));
 
-        records.push(ns.store("test_5", &toml::toml! {
-            value = "test_5"
-        }));
+        let mut volume = volume.write_batch(records.drain(..).map(|r| Entry::Record(r)).collect()).await.unwrap();
 
-        let mut volume = volume.write_batch(records).await.unwrap();
-
-        let member = volume.swap_and_archive(new_memory_target("<inline>", MIB)).unwrap();
+        let member = volume
+            .swap_and_archive(new_memory_target("<inline>", MIB))
+            .unwrap();
         let index: VecIndex<_> = member.get_records().unwrap().into();
-        assert_eq!("test_1", index.lookup((), "test_1").unwrap().peek().in_ref()["value"].str().unwrap());
-        assert_eq!("test_2", index.lookup((), "test_2").unwrap().peek().in_ref()["value"].str().unwrap());
-        assert_eq!("test_3", index.lookup((), "test_3").unwrap().peek().in_ref()["value"].str().unwrap());
-        assert_eq!("test_4", index.lookup((), "test_4").unwrap().peek().in_ref()["value"].str().unwrap());
-        assert_eq!("test_5", index.lookup((), "test_5").unwrap().peek().in_ref()["value"].str().unwrap());
+        assert_eq!(
+            "test_1",
+            index.lookup((), "test_1").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
+        assert_eq!(
+            "test_2",
+            index.lookup((), "test_2").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
+        assert_eq!(
+            "test_3",
+            index.lookup((), "test_3").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
+        assert_eq!(
+            "test_4",
+            index.lookup((), "test_4").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
+        assert_eq!(
+            "test_5",
+            index.lookup((), "test_5").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
         assert!(volume.encoder.is_empty());
     }
 
     #[tokio::test]
     async fn test_volume_swap_and_snapshot_mmap() {
-        let volume = Volume::new(new_mmap_target("test_volume_swap_and_snapshot_mmap.0.bin", MIB as u64).unwrap());
+        let volume = Volume::new(
+            new_mmap_target("test_volume_swap_and_snapshot_mmap.0.bin", MIB as u64).unwrap(),
+        );
 
         let ns = ().to_namespace();
 
         let mut records = vec![];
 
-        records.push(ns.store("test_1", &toml::toml! {
-            value = "test_1"
-        }));
+        records.push(ns.store(
+            "test_1",
+            &toml::toml! {
+                value = "test_1"
+            },
+        ));
 
+        records.push(ns.store(
+            "test_2",
+            &toml::toml! {
+                value = "test_2"
+            },
+        ));
 
-        records.push(ns.store("test_2", &toml::toml! {
-            value = "test_2"
-        }));
+        records.push(ns.store(
+            "test_3",
+            &toml::toml! {
+                value = "test_3"
+            },
+        ));
 
-        records.push(ns.store("test_3", &toml::toml! {
-            value = "test_3"
-        }));
+        records.push(ns.store(
+            "test_4",
+            &toml::toml! {
+                value = "test_4"
+            },
+        ));
 
-        records.push(ns.store("test_4", &toml::toml! {
-            value = "test_4"
-        }));
+        records.push(ns.store(
+            "test_5",
+            &toml::toml! {
+                value = "test_5"
+            },
+        ));
 
-        records.push(ns.store("test_5", &toml::toml! {
-            value = "test_5"
-        }));
+        let mut volume = volume.write_batch(records.drain(..).map(|r| Entry::Record(r)).collect()).await.unwrap();
 
-        let mut volume = volume.write_batch(records).await.unwrap();
-
-        let member = volume.swap_and_archive(new_mmap_target("test_volume_swap_and_snapshot_mmap.1.bin", MIB as u64).unwrap()).unwrap();
+        let member = volume
+            .swap_and_archive(
+                new_mmap_target("test_volume_swap_and_snapshot_mmap.1.bin", MIB as u64).unwrap(),
+            )
+            .unwrap();
         let index: VecIndex<_> = member.get_records().unwrap().into();
-        assert_eq!("test_1", index.lookup((), "test_1").unwrap().peek().in_ref()["value"].str().unwrap());
-        assert_eq!("test_2", index.lookup((), "test_2").unwrap().peek().in_ref()["value"].str().unwrap());
-        assert_eq!("test_3", index.lookup((), "test_3").unwrap().peek().in_ref()["value"].str().unwrap());
-        assert_eq!("test_4", index.lookup((), "test_4").unwrap().peek().in_ref()["value"].str().unwrap());
-        assert_eq!("test_5", index.lookup((), "test_5").unwrap().peek().in_ref()["value"].str().unwrap());
+        assert_eq!(
+            "test_1",
+            index.lookup((), "test_1").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
+        assert_eq!(
+            "test_2",
+            index.lookup((), "test_2").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
+        assert_eq!(
+            "test_3",
+            index.lookup((), "test_3").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
+        assert_eq!(
+            "test_4",
+            index.lookup((), "test_4").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
+        assert_eq!(
+            "test_5",
+            index.lookup((), "test_5").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
         assert!(volume.encoder.is_empty());
     }
-
 
     #[tokio::test]
     async fn test_volume_swap_and_snapshot_mmap_anon() {
@@ -505,36 +614,77 @@ mod test {
 
         let mut records = vec![];
 
-        records.push(ns.store("test_1", &toml::toml! {
-            value = "test_1"
-        }));
+        records.push(ns.store(
+            "test_1",
+            &toml::toml! {
+                value = "test_1"
+            },
+        ));
 
+        records.push(ns.store(
+            "test_2",
+            &toml::toml! {
+                value = "test_2"
+            },
+        ));
 
-        records.push(ns.store("test_2", &toml::toml! {
-            value = "test_2"
-        }));
+        records.push(ns.store(
+            "test_3",
+            &toml::toml! {
+                value = "test_3"
+            },
+        ));
 
-        records.push(ns.store("test_3", &toml::toml! {
-            value = "test_3"
-        }));
+        records.push(ns.store(
+            "test_4",
+            &toml::toml! {
+                value = "test_4"
+            },
+        ));
 
-        records.push(ns.store("test_4", &toml::toml! {
-            value = "test_4"
-        }));
+        records.push(ns.store(
+            "test_5",
+            &toml::toml! {
+                value = "test_5"
+            },
+        ));
 
-        records.push(ns.store("test_5", &toml::toml! {
-            value = "test_5"
-        }));
+        let mut volume = volume.write_batch(records.drain(..).map(|r| Entry::Record(r)).collect()).await.unwrap();
 
-        let mut volume = volume.write_batch(records).await.unwrap();
-
-        let member = volume.swap_and_archive(new_mmap_anon_target("<inline>", MIB).unwrap()).unwrap();
+        let member = volume
+            .swap_and_archive(new_mmap_anon_target("<inline>", MIB).unwrap())
+            .unwrap();
         let index: VecIndex<_> = member.get_records().unwrap().into();
-        assert_eq!("test_1", index.lookup((), "test_1").unwrap().peek().in_ref()["value"].str().unwrap());
-        assert_eq!("test_2", index.lookup((), "test_2").unwrap().peek().in_ref()["value"].str().unwrap());
-        assert_eq!("test_3", index.lookup((), "test_3").unwrap().peek().in_ref()["value"].str().unwrap());
-        assert_eq!("test_4", index.lookup((), "test_4").unwrap().peek().in_ref()["value"].str().unwrap());
-        assert_eq!("test_5", index.lookup((), "test_5").unwrap().peek().in_ref()["value"].str().unwrap());
+        assert_eq!(
+            "test_1",
+            index.lookup((), "test_1").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
+        assert_eq!(
+            "test_2",
+            index.lookup((), "test_2").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
+        assert_eq!(
+            "test_3",
+            index.lookup((), "test_3").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
+        assert_eq!(
+            "test_4",
+            index.lookup((), "test_4").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
+        assert_eq!(
+            "test_5",
+            index.lookup((), "test_5").unwrap().peek().in_ref()["value"]
+                .str()
+                .unwrap()
+        );
         assert!(volume.encoder.is_empty());
     }
 }

@@ -1,11 +1,12 @@
-use std::sync::Arc;
 use crate::{
     IRecord, Index, Record, Storage,
-    archive::{self, Entry, archive_to},
-    store::{ArchiveMember, StoreSettings},
+    archive::Entry,
+    store::StoreSettings,
+    vol::{Volume, new_memory_target},
 };
 use crossbeam::utils::Backoff;
-use futures::{AsyncRead, StreamExt, future::RemoteHandle};
+use futures::future::RemoteHandle;
+use std::sync::Arc;
 use tracing::debug;
 
 /// Type-alias for the type returned by Worker::sync(..)
@@ -76,65 +77,48 @@ impl Worker {
         index
     }
 
-    /// Restores the worker state from an input stream
-    #[inline]
-    pub async fn restore_from(
-        &mut self,
-        input: impl AsyncRead + Send + Unpin + 'static,
-    ) -> std::io::Result<()> {
-        let decoder = archive::TapeDecoder::default();
-        let mut reader = asynchronous_codec::FramedRead::new(input, decoder);
-
-        while let Some(entry) = reader.next().await {
-            if matches!(
-                entry,
-                Ok(Entry::Other(..)) | Ok(Entry::Zeros) | Ok(Entry::Pending)
-            ) {
-                continue;
-            }
-
-            let record = entry.and_then(|e| Record::restore(e))?;
-            self.records.push(record);
-        }
-
-        Ok(())
-    }
-
     /// Begins synchronizing data with the store in the background
     ///
     /// Returns None if store settings are not configured for this worker, otherwise
     /// returns a BackgroundSync future
     pub fn sync(&mut self) -> std::io::Result<BackgroundSync> {
         if let Some(settings) = self.store.clone() {
-            let output_path = settings.archive_path();
+            let archive_path = settings.archive_path();
             let mut total_size = 0;
-            let entries = self.flush().inspect(|r| {
-                total_size += r.header().size();
-                total_size += 512;
-                total_size += 512 - (total_size % 512);
-            }).map(|e| Ok(e)).collect::<Vec<_>>();
+            let entries = self
+                .flush()
+                .inspect(|r| {
+                    total_size += r.header().size();
+                    total_size += 512;
+                    total_size += 512 - (total_size % 512);
+                })
+                .collect::<Vec<_>>();
             let packer = settings.packer().clone();
 
             let handle = crate::util::spawn(async move {
-                // TODO: Make this output stream modular, good enough for now
                 /*
                 16MiB = 32678 512-blocks,
                     1 record = min 2 blocks
                     16384 records max per 16 MiB
                  */
-                debug!(total_size, "Creating new archive_member at {output_path:?}");
-                let output = crate::util::fs::create_new(&output_path).await?;
-                let stream = futures::stream::iter(entries);
-                let manifest = archive_to(stream, output).await?;
+                if !entries.is_empty() {
+                    /*
+                       TODO:
+                       For now this uses an in-memory volume to store entries before pushing the member to the store
 
-                let backoff = Backoff::new();
-                let mut member = ArchiveMember::Unpacked {
-                    path: output_path,
-                    manifest,
-                };
-                while let Some(retry) = packer.push(member) {
-                    member = retry;
-                    backoff.spin();
+                       Ideally, some pipeline exists that manages going from Vec<Records> -> Volume -> ArchiveMember,
+                       that can be plugged-in below, and specified in StoreSettings
+                    */
+                    debug!(total_size, "Creating new archive_member for {archive_path:?}");
+                    let output = Volume::new(new_memory_target(archive_path, total_size));
+                    let mut member = output.write_batch(entries).await?.to_archive()?;
+                    let backoff = Backoff::new();
+                    while let Some(retry) = packer.push(member) {
+                        member = retry;
+                        backoff.spin();
+                    }
+                } else {
+                    debug!("No new entries to sync");
                 }
 
                 Ok::<_, std::io::Error>(())
@@ -180,9 +164,8 @@ impl From<Worker> for SharedWorker {
 mod test {
     use crate::{
         RecordableExtensions, ToNamespace, Worker,
-        archive::{Entry, FileEntryReference, archive_to},
+        vol::{MIB, Volume, new_memory_target},
     };
-    use sha2::Digest;
     use toml::toml;
 
     #[tokio::test]
@@ -228,34 +211,13 @@ mod test {
             b
         })));
 
-        std::fs::remove_file("test.tar").ok();
-        let archive_file = crate::util::fs::create_new("test.tar").await.unwrap();
-        let entries = futures::stream::iter(worker.flush().map(|e| Ok(e)));
-        let manifest = archive_to(entries, archive_file).await.unwrap();
-        assert!(manifest.is_valid());
-
-        let mut restoring = Worker::default();
-        let archive_file = crate::util::fs::open("test.tar").await.unwrap();
-        restoring.restore_from(archive_file).await.unwrap();
-
-        let encoded = manifest.journal_entries().unwrap();
-        assert_eq!(3, encoded.len());
-        eprintln!("{encoded:#x?}");
-
-        let archive_file = crate::util::fs::open("test.tar").await.unwrap();
-        let references = crate::archive::scan_for_references(archive_file)
+        let archive_file = Volume::new(new_memory_target("<inline>", MIB));
+        let archive = archive_file
+            .write_batch(worker.flush().collect())
             .await
+            .unwrap()
+            .to_archive()
             .unwrap();
-        for reference in references {
-            if let Entry::Reference(FileEntryReference {
-                header,
-                digest,
-                offset,
-            }) = reference
-            {
-                eprintln!("offset: {offset}, digest: {:x}", digest.finalize());
-                eprintln!("{header}");
-            }
-        }
+        assert!(archive.manifest().is_valid());
     }
 }

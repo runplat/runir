@@ -32,7 +32,7 @@ impl StoreSettings {
     /// Returns the path a member should use for their archive data
     #[inline]
     pub fn archive_path(&self) -> PathBuf {
-        let archive_out = format!("{}_{:x}", self.archive, self.session_ns.chk());
+        let archive_out = format!("{}_{:x}_{:x}", self.archive, self.session_ns.chk(), Namespace::ephemeral().chk());
         self.work_dir.join(archive_out)
     }
 
@@ -222,6 +222,7 @@ impl ArchiveMember {
                     return Err(Error::new(std::io::ErrorKind::InvalidData, "Records in archive member do not match received manifest"))
                 }
 
+                debug!(count = validated.len(), "Validated records from volume member");
                 Ok(validated)
             }
         }

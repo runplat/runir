@@ -66,7 +66,7 @@ pub trait PeekExtensions<'peek> {
     /// This method returns a value that implements [`std::ops::Index`] with reference semantics,
     /// allowing chained syntax like:
     ///
-    /// ```
+    /// ```rs no_run
     /// let val = &rec.peek().in_ref()["some"]["path"]["to"]["value"];
     /// ```
     ///
@@ -75,7 +75,7 @@ pub trait PeekExtensions<'peek> {
     ///
     /// ⚠️ **Caveat**: This has stateful behavior. Given:
     ///
-    /// ```
+    /// ```rs no_run
     /// let some_path = &rec.peek().in_ref()["some"]["path"];
     /// let val1 = some_path["hello"];
     /// let val2 = some_path["world"];
@@ -86,7 +86,7 @@ pub trait PeekExtensions<'peek> {
     ///
     /// If you need to reuse a subpath, call `clone` before you use `[]`
     ///
-    /// ```
+    /// ```rs no_run
     /// let base = rec.peek().in_ref()["some"]["path"];
     /// let a = base.clone()["hello"];
     /// let b = base.["world"]; // Works as expected
