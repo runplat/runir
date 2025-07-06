@@ -256,6 +256,9 @@ impl<T> CursorTarget<T> {
     }
 }
 
+/// Arc<Mmap> is already frozen, except if the mmap is an anonymous mmap,
+/// we aren't able to re_map/re_size the underlying mmap, which means if
+/// we didn't use all of the capacity, we need to know where the cutoff should be.
 #[derive(Clone)]
 pub struct FrozenMmap {
     len: usize,
