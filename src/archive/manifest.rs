@@ -20,6 +20,8 @@ impl Manifest {
     /// Loads the journal entries from the backing record
     /// 
     /// Returns an error if the data stored in the record is not valid
+    /// 
+    /// TODO: This could be replaced w/ a peek_journal_entries function for zero allocations
     #[inline]
     pub fn journal_entries(&self) -> std::io::Result<Vec<JournalEntry>> {
         if let Some(journal_entries) = self.record.load::<Vec<JournalEntry>>() {

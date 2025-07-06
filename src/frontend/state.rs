@@ -2,7 +2,8 @@ use parking_lot::RwLock;
 use tracing::debug;
 
 use crate::{
-    store::{ArchiveMember, StoreArchive}, Record, Storage, Store, VecIndex
+    Record, Storage, Store, VecIndex,
+    store::{ArchiveMember, StoreArchive},
 };
 use std::{
     ops::Deref,
@@ -79,21 +80,36 @@ impl State {
             // This will create mem-mapped records from archive members
             let records = member.get_records()?;
 
+            if records.is_empty() {
+                debug!("skipping {path:?}, no records were found");
+                continue;
+            }
+
             let mut index = self.indexes.entry(path.clone()).or_default();
             for r in records {
                 index.index(r.clone());
             }
 
+            // Ensure empty indexes are never stored
             self.members.insert(path, member.clone());
         }
 
-        // Recompute snapshot
         let mut snapshot = VecIndex::default();
+
         for i in self.indexes.iter() {
             for r in i.storage().iter_records() {
                 snapshot.index(r.clone());
             }
         }
+
+        // TODO: Need to add this if we add a .gc() function to State
+        // // In the case members have been cleaned up, ensure we don't lose data
+        // for i in self.snapshots.iter() {
+        //     for r in i.storage().iter_records() {
+        //         snapshot.index(r.clone());
+        //     }
+        // }
+
         if !snapshot.storage().is_empty() {
             self.snapshots.insert(Snapshot::Default, Arc::new(snapshot));
         }
@@ -129,7 +145,7 @@ impl State {
         let archive = StoreArchive {
             archived,
             output_dir: output_dir.into(),
-            archive: self.frontend
+            archive: self.frontend,
         };
 
         archive.pack().await?;
