@@ -1,4 +1,7 @@
-use std::{cell::RefCell, ops::Deref};
+use std::{
+    cell::RefCell,
+    ops::Deref,
+};
 
 /// Wrapper over a flexbuffer reader, returned by IRecord::peek(..)
 #[derive(Clone)]
@@ -48,6 +51,8 @@ pub trait PeekRefExtensions<'peek> {
     /// Returns a u64 if the current peek context is a u64
     fn u64(&self) -> Option<u64>;
 
+    fn int(&self) -> Option<i64>;
+
     /// Returns a **filtered** iterator of u64 values
     ///
     /// If the current value is not a vector, returns None
@@ -57,6 +62,8 @@ pub trait PeekRefExtensions<'peek> {
     ///
     /// If the current value is not a vector, returns None
     fn iter(&self) -> Option<impl Iterator<Item = Peek<'peek>>>;
+
+    fn iter_kv(&self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>>;
 }
 
 /// Extension methods for working with a Peek container
@@ -79,7 +86,7 @@ pub trait PeekExtensions<'peek> {
     /// let some_path = &rec.peek().in_ref()["some"]["path"];
     /// let val1 = some_path["hello"];
     /// let val2 = some_path["world"];
-    /// ``` 
+    /// ```
     ///
     /// The second lookup (`["world"]`) is **not** relative to `"some.path"`, but to
     /// `"some.path.hello"` — because the internal reader advanced during the first call.
@@ -93,9 +100,11 @@ pub trait PeekExtensions<'peek> {
     /// ```
     ///
     /// This design favors ergonomics over strict immutability — and lookups always return `Option`, never panic.
-    /// 
+    ///
     /// If you want strict immutability, and a bit more of a safety net, use `at()` and `at_path()` instead.
-    fn in_ref(self) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek>;
+    fn in_ref(
+        self,
+    ) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek>;
 
     /// Peek at the reader under a specific key, if the current peek context is a map
     fn at(self, key: &str) -> Option<Peek<'peek>>;
@@ -114,6 +123,9 @@ pub trait PeekExtensions<'peek> {
     /// Returns a u64 if the current peek context is a u64
     fn u64(self) -> Option<u64>;
 
+    /// Returns an i64 if the current peek context is a i64 or u64
+    fn int(self) -> Option<i64>;
+
     /// Returns a **filtered** iterator of u64 values
     ///
     /// If the current value is not a vector, returns None
@@ -123,8 +135,12 @@ pub trait PeekExtensions<'peek> {
     ///
     /// If the current value is not a vector, returns None
     fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>>;
-}
 
+    /// Returns an iterator over kv pairs from the peek's current position
+    /// 
+    /// If the current value is not a map, returns None
+    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>>;
+}
 impl<'peek> PeekExtensions<'peek> for &'peek Peek<'peek> {
     #[inline]
     fn at(self, key: &str) -> Option<Peek<'peek>> {
@@ -164,8 +180,24 @@ impl<'peek> PeekExtensions<'peek> for &'peek Peek<'peek> {
     }
 
     #[inline]
-    fn in_ref(self) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
+    fn in_ref(
+        self,
+    ) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
         PeekRef(RefCell::new(Some(self.clone())))
+    }
+
+    #[inline]
+    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+        self.get_map().ok().map(|m| {
+            let _m2 = m.clone();
+            m.iter_keys()
+                .map(move |l| (l, Peek(_m2.idx(l))))
+        })
+    }
+    
+    #[inline]
+    fn int(self) -> Option<i64> {
+        self.clone().0.get_u64().ok().map(|u| u as i64).or(self.0.get_i64().ok())
     }
 }
 
@@ -196,6 +228,11 @@ impl<'peek> PeekExtensions<'peek> for Peek<'peek> {
     }
 
     #[inline]
+    fn int(self) -> Option<i64> {
+        self.clone().0.get_u64().ok().map(|u| u as i64).or(self.0.get_i64().ok())
+    }
+
+    #[inline]
     fn iter_u64(self) -> Option<impl Iterator<Item = u64>> {
         self.iter().map(|i| i.filter_map(|r| r.u64()))
     }
@@ -206,8 +243,20 @@ impl<'peek> PeekExtensions<'peek> for Peek<'peek> {
     }
 
     #[inline]
-    fn in_ref(self) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
+    fn in_ref(
+        self,
+    ) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
         PeekRef(RefCell::new(Some(self)))
+    }
+    
+    #[inline]
+    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+        self.get_map().ok().map(|m| {
+            let _m = m.clone();
+            let _m2 = m.clone();
+            m.iter_keys()
+                .map(move |l| (l, Peek(_m2.idx(l))))
+        })
     }
 }
 
@@ -248,8 +297,20 @@ impl<'peek> PeekExtensions<'peek> for Option<Peek<'peek>> {
     }
 
     #[inline]
-    fn in_ref(self) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
+    fn in_ref(
+        self,
+    ) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
         PeekRef(RefCell::new(self))
+    }
+    
+    #[inline]
+    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+        self.and_then(|r| r.iter_kv())
+    }
+    
+    #[inline]
+    fn int(self) -> Option<i64> {
+        self.and_then(|r| r.int())
     }
 }
 
@@ -290,20 +351,35 @@ impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
     }
 
     #[inline]
-    fn in_ref(self) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
+    fn in_ref(
+        self,
+    ) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
         PeekRef(RefCell::new(self.cloned()))
+    }
+    
+    #[inline]
+    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+        self.cloned().and_then(|r| r.iter_kv())
+    }
+    
+    #[inline]
+    fn int(self) -> Option<i64> {
+        self.and_then(|r| r.int())
     }
 }
 
 impl<'p> PeekRefExtensions<'p> for PeekRef<'p> {
+    #[inline]
     fn bool(&self) -> Option<bool> {
         self.0.borrow().deref().clone().bool()
     }
 
+    #[inline]
     fn str(&self) -> Option<&'p str> {
         self.0.borrow().deref().clone().str()
     }
 
+    #[inline]
     fn u64(&self) -> Option<u64> {
         self.0.borrow().deref().clone().u64()
     }
@@ -316,5 +392,15 @@ impl<'p> PeekRefExtensions<'p> for PeekRef<'p> {
     #[inline]
     fn iter(&self) -> Option<impl Iterator<Item = Peek<'p>>> {
         self.0.borrow().clone().iter()
+    }
+    
+    #[inline]
+    fn iter_kv(&self) -> Option<impl Iterator<Item = (&'p str, Peek<'p>)>> {
+        self.0.borrow().clone().iter_kv()
+    }
+    
+    #[inline]
+    fn int(&self) -> Option<i64> {
+        self.0.borrow().clone().int()
     }
 }

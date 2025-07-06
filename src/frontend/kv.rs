@@ -1,7 +1,7 @@
 //! # KV Frontend
 //!
 //! The `kv` frontend provides a familiar key-value store interface on top of `runir` primitives (Namespace, Record)
-//! 
+//!
 //! ## First-time Use
 //! To open or create a store, simply call `runir::kv::open()` or `runir::kv::new()`
 //!
@@ -531,6 +531,7 @@ mod test {
 
                 [other.values]
                 also_important = "hello"
+                int = 0
             },
         )
         .unwrap();
@@ -655,6 +656,16 @@ mod test {
         assert_eq!(
             Some("another hello"),
             kv.serde().peek("hello2").in_ref()["other"]["values"]["also_important"].str()
+        );
+
+        assert_eq!(
+            Some(0),
+            kv.serde()
+                .peek("hello")
+                .at("other")
+                .at("values")
+                .at("int")
+                .int()
         );
     }
 }
