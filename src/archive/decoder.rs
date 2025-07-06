@@ -16,6 +16,7 @@ pub struct TapeDecoder {
 
 impl TapeDecoder {
     /// Returns a tape recorder that only emits entry references
+    #[inline]
     pub fn references_only() -> Self {
         Self {
             entries: vec![],
@@ -115,6 +116,7 @@ enum Dest {
 }
 
 impl Dest {
+    #[inline]
     pub fn put_chunk(&mut self, chunk: &[u8]) {
         match self {
             Dest::Bytes(bytes_mut) => bytes_mut.put(chunk),
@@ -125,6 +127,7 @@ impl Dest {
         }
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         match self {
             Dest::Bytes(bytes_mut) => bytes_mut.len(),
@@ -132,6 +135,7 @@ impl Dest {
         }
     }
 
+    #[inline]
     pub fn to_entry(self, header: Header) -> Entry {
         match self {
             Dest::Bytes(mut buf) => {
