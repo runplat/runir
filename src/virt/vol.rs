@@ -6,10 +6,12 @@ use asynchronous_codec::{FramedWrite, FramedWriteParts};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{AsyncRead, AsyncSeek, AsyncWrite, SinkExt};
 use memmap2::{Mmap, MmapMut};
+use parking_lot::Mutex;
 use pin_project_lite::pin_project;
+use tracing::trace;
 use std::{
     io::{Read, Write},
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut}, sync::OnceLock,
 };
 use std::{
     path::{Path, PathBuf},
@@ -88,18 +90,35 @@ pub fn new_mmap_anon_target(
     Ok(CursorTarget::new(path, mmap))
 }
 
-/// Creates a new in memory target
-///
-/// Note: Typically BytesMut::with_capacity(..) would maintain it's own cursor, which means that the underlying length
-/// will always start at 0. Since this conflicts w/ AsMut<[u8]> semantics, this function will create a new BytesMut using BytesMut::zeroed(..).
-///
-/// This allows BytesMut to behave more like a memory-mapped file, keeping subsequent VolumeTarget APIs consistent.
-/// However, since this eagerly allocates heap memory, it is important be aware of the distinction.
+static BYTES_POOL: OnceLock<Mutex<BytesMut>> = OnceLock::new();
+
+fn get_bytes_slice(size: usize) -> BytesMut {
+    let pool = BYTES_POOL.get_or_init(|| Mutex::new(BytesMut::with_capacity(8 * MIB)));
+
+    let mut pool = pool.lock();
+    if pool.capacity() < size {
+        if pool.try_reclaim(size) {
+            trace!(size, reclaim = true, "pool_bytes_alloc");
+        } else {
+            trace!(size, reclaim = false, "pool_bytes_alloc");
+            pool.reserve(size);
+        }
+    }
+
+    if pool.len() < size {
+        let grow = size * 2;
+        trace!(grow, "pool_bytes_grow");
+        pool.put_bytes(0, grow);
+    }
+    pool.split_to(size)
+}
+
+/// Creates a new (zeroed) in memory volume target
 #[inline]
 pub fn new_memory_target(path: impl Into<PathBuf>, capacity: usize) -> InMemoryTarget {
     let path = path.into();
 
-    let bytes = BytesMut::zeroed(capacity);
+    let bytes = get_bytes_slice(capacity);
 
     CursorTarget::new(path, bytes)
 }
@@ -439,6 +458,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn test_volume_swap_and_snapshot_in_memory() {
         let volume = Volume::new(new_memory_target("<inline>", MIB));
 
@@ -521,6 +541,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn test_volume_swap_and_snapshot_mmap() {
         let volume = Volume::new(
             new_mmap_target("test_volume_swap_and_snapshot_mmap.0.bin", MIB as u64).unwrap(),
@@ -607,6 +628,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn test_volume_swap_and_snapshot_mmap_anon() {
         let volume = Volume::new(new_mmap_anon_target("<inline>", MIB).unwrap());
 

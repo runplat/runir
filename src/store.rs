@@ -7,7 +7,9 @@ use ahash::{HashSet, HashSetExt};
 use futures::{AsyncSeekExt, future::Either};
 use sha2::{Digest, Sha256};
 use std::{
-    io::Error, path::{Path, PathBuf}, sync::{Arc, OnceLock}
+    io::Error,
+    path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
 };
 use tracing::{debug, error, trace};
 
@@ -32,7 +34,12 @@ impl StoreSettings {
     /// Returns the path a member should use for their archive data
     #[inline]
     pub fn archive_path(&self) -> PathBuf {
-        let archive_out = format!("{}_{:x}_{:x}", self.archive, self.session_ns.chk(), Namespace::ephemeral().chk());
+        let archive_out = format!(
+            "{}_{:x}_{:x}",
+            self.archive,
+            self.session_ns.chk(),
+            Namespace::ephemeral().chk()
+        );
         self.work_dir.join(archive_out)
     }
 
@@ -207,22 +214,28 @@ impl ArchiveMember {
                 records, manifest, ..
             } => {
                 let entries = manifest.journal_entries()?;
-                let mut entries = entries.iter().fold(ahash::HashSet::new(), |mut s, r| {
-                    s.insert(r.content());
+                let mut entries = entries.iter().enumerate().fold(ahash::HashSet::new(), |mut s, (i, r)| {
+                    s.insert((i, r.uuid(), *r.content()));
                     s
                 });
                 let mut validated = vec![];
-                for r in records.iter() {
-                    if entries.remove(&r.content()) {
+                for (i, r) in records.iter().enumerate().filter(|r| r.1.is_valid()) {
+                    if entries.remove(&(i, r.uuid(), r.content())) {
                         validated.push(r.clone());
                     }
                 }
 
                 if !entries.is_empty() {
-                    return Err(Error::new(std::io::ErrorKind::InvalidData, "Records in archive member do not match received manifest"))
+                    return Err(Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Records in archive member do not match received manifest",
+                    ));
                 }
 
-                debug!(count = validated.len(), "Validated records from volume member");
+                debug!(
+                    count = validated.len(),
+                    "Validated records from volume member"
+                );
                 Ok(validated)
             }
         }

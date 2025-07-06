@@ -3,6 +3,7 @@ use crate::{Namespace, RecordableExtensions, virt::RecordExtent};
 use bytes::{BufMut, Bytes};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 /// Enumeration of encoded entry metadata collected by the tape encoder
 #[derive(Serialize, Deserialize, Clone)]
@@ -50,6 +51,15 @@ impl JournalEntry {
         match self {
             JournalEntry::Extent { offset, len, .. } => (*offset, *len),
             JournalEntry::Record(record_extent) => (record_extent.offset, record_extent.len),
+        }
+    }
+
+    /// Returns the crc value
+    #[inline]
+    pub fn uuid(&self) -> Uuid {
+        match self {
+            JournalEntry::Extent { .. } => uuid::Uuid::nil(),
+            JournalEntry::Record(record_extent) => uuid::Uuid::from_u64_pair(record_extent.key, record_extent.crc),
         }
     }
 }
