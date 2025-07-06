@@ -67,6 +67,18 @@ pub struct TapeEncoder {
 }
 
 impl TapeEncoder {
+    /// Returns the number of journaled entries that have been encoded
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.journal.len()
+    }
+
+    /// Returns true if the journal is empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.journal.is_empty()
+    }
+
     /// Ensures a fresh state for the next stamp
     #[inline]
     pub fn next_stamp(&mut self) {

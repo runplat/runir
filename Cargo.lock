@@ -897,6 +897,7 @@ dependencies = [
  "hex",
  "memmap2",
  "parking_lot",
+ "pin-project-lite",
  "scalable_cuckoo_filter",
  "serde",
  "sha2",

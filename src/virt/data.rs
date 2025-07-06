@@ -1,8 +1,11 @@
 use crate::{Data, Record, archive::JournalEntry};
+use bytes::Bytes;
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
-use std::{ops::Deref, sync::Arc};
+use std::{fmt::Debug, ops::Deref, sync::Arc};
 use tracing::trace;
+
+use super::vol::FrozenMmap;
 
 /// Virtual reference to journaled data
 ///
@@ -11,8 +14,8 @@ use tracing::trace;
 pub struct VirtualData {
     /// Journal entry for this virtual reference
     journaled: JournalEntry,
-    /// Memory-map handle to data
-    mmap: Arc<Mmap>,
+    /// Inner data pointer
+    inner: BackingData,
 }
 
 /// Slim virtual data only stores offset/len and the backing data
@@ -24,8 +27,8 @@ pub struct VirtualDataSlim {
     offset: usize,
     /// Len of data
     len: usize,
-    /// Memory-map handle to backing data
-    mmap: Arc<Mmap>,
+    /// Inner data pointer to backing data
+    inner: BackingData,
 }
 
 impl VirtualData {
@@ -33,8 +36,14 @@ impl VirtualData {
     ///
     /// Returns an error if the source/content digests could not be verified
     #[inline]
-    pub fn new(journaled: JournalEntry, mmap: Arc<Mmap>) -> std::io::Result<Self> {
-        let virt_ref = Self { journaled, mmap };
+    pub fn new(
+        journaled: JournalEntry,
+        data: impl Into<BackingData>,
+    ) -> std::io::Result<Self> {
+        let virt_ref = Self {
+            journaled,
+            inner: data.into(),
+        };
         if virt_ref.is_valid() {
             Ok(virt_ref)
         } else {
@@ -65,7 +74,7 @@ impl VirtualData {
     }
 
     fn compute_source_digest(&self) -> [u8; 32] {
-        Sha256::digest(&self.mmap[..]).into()
+        Sha256::digest(&self.inner[..]).into()
     }
 
     /// Returns the length in bytes
@@ -99,7 +108,7 @@ impl VirtualData {
         VirtualDataSlim {
             offset: offset as usize,
             len: len as usize,
-            mmap: self.mmap.clone(),
+            inner: self.inner.clone(),
         }
     }
 }
@@ -115,7 +124,7 @@ impl Deref for VirtualData {
 
     fn deref(&self) -> &Self::Target {
         let (offset, len) = self.journaled.extent();
-        &self.mmap[offset as usize..(offset + len as u64) as usize]
+        &self.inner[offset as usize..(offset + len as u64) as usize]
     }
 }
 
@@ -129,6 +138,42 @@ impl Deref for VirtualDataSlim {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        &self.mmap[self.offset as usize..(self.offset + self.len)]
+        &self.inner[self.offset as usize..(self.offset + self.len)]
+    }
+}
+
+/// Backing-data is a normalized binary type
+#[derive(Clone)]
+pub struct BackingData(Arc<dyn Deref<Target = [u8]> + Sync + Send + 'static>);
+
+impl Debug for BackingData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("InnerData").finish()
+    }
+}
+
+impl Deref for BackingData {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+
+impl From<Arc<Mmap>> for BackingData {
+    fn from(value: Arc<Mmap>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<Bytes> for BackingData {
+    fn from(value: Bytes) -> Self {
+        Self(Arc::new(value))
+    }
+}
+
+impl From<FrozenMmap> for BackingData {
+    fn from(value: FrozenMmap) -> Self {
+        Self(Arc::new(value))
     }
 }

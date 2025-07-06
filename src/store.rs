@@ -1,11 +1,13 @@
 use crate::{
-    archive::{scan_for_references, Entry, FileEntryReference, Manifest}, queue::Pusher, IRecord, Namespace, Queue, Record, VirtualData, Worker
+    IRecord, Namespace, Queue, Record, VirtualData, Worker,
+    archive::{Entry, FileEntryReference, Manifest, scan_for_references},
+    queue::Pusher,
 };
-use ahash::HashSet;
+use ahash::{HashSet, HashSetExt};
 use futures::{AsyncSeekExt, future::Either};
 use sha2::{Digest, Sha256};
 use std::{
-    path::{Path, PathBuf}, sync::{Arc, OnceLock}
+    io::Error, path::{Path, PathBuf}, sync::{Arc, OnceLock}
 };
 use tracing::{debug, error, trace};
 
@@ -130,6 +132,14 @@ pub enum ArchiveMember {
         /// Manifest listing packed records
         manifest: Manifest,
     },
+    Volume {
+        /// "Symbolic" volume path
+        path: PathBuf,
+        /// Manifest
+        manifest: Manifest,
+        /// Records stored in this volume
+        records: Vec<Record>,
+    },
 }
 
 impl ArchiveMember {
@@ -139,6 +149,7 @@ impl ArchiveMember {
         match self {
             ArchiveMember::Unpacked { path, .. } => path,
             ArchiveMember::Packed { path, .. } => path,
+            ArchiveMember::Volume { path, .. } => path,
         }
     }
 
@@ -192,6 +203,27 @@ impl ArchiveMember {
                 }
                 Ok(records)
             }
+            ArchiveMember::Volume {
+                records, manifest, ..
+            } => {
+                let entries = manifest.journal_entries()?;
+                let mut entries = entries.iter().fold(ahash::HashSet::new(), |mut s, r| {
+                    s.insert(r.content());
+                    s
+                });
+                let mut validated = vec![];
+                for r in records.iter() {
+                    if entries.remove(&r.content()) {
+                        validated.push(r.clone());
+                    }
+                }
+
+                if !entries.is_empty() {
+                    return Err(Error::new(std::io::ErrorKind::InvalidData, "Records in archive member do not match received manifest"))
+                }
+
+                Ok(validated)
+            }
         }
     }
 
@@ -201,6 +233,7 @@ impl ArchiveMember {
         match self {
             ArchiveMember::Unpacked { manifest, .. } => manifest,
             ArchiveMember::Packed { manifest, .. } => manifest,
+            ArchiveMember::Volume { manifest, .. } => manifest,
         }
     }
 }
@@ -331,7 +364,7 @@ impl StoreArchive {
         Ok(Self {
             archived: members,
             output_dir,
-            archive: intern_str(&archive)
+            archive: intern_str(&archive),
         })
     }
 
@@ -390,7 +423,8 @@ impl StoreArchive {
             let including = records
                 .iter()
                 .filter(|r| {
-                    let new_rec = existing.insert((r.uuid().as_u64_pair().0, r.data.digest().finalize()));
+                    let new_rec =
+                        existing.insert((r.uuid().as_u64_pair().0, r.data.digest().finalize()));
                     debug!(inserting = new_rec, "dedupe");
                     new_rec
                 })
@@ -434,8 +468,6 @@ impl StoreArchive {
     pub fn members(&self) -> impl Iterator<Item = &ArchiveMember> {
         self.archived.iter()
     }
-
-    
 }
 
 impl Default for Store {
