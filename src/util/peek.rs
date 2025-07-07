@@ -48,9 +48,10 @@ pub trait PeekRefExtensions<'peek> {
     /// Returns a str if the current peek context is a str
     fn str(&self) -> Option<&'peek str>;
 
-    /// Returns a u64 if the current peek context is a u64
+    /// Returns a u64 if the current peek context is an unsigned integer
     fn u64(&self) -> Option<u64>;
 
+    /// Returns an i64 if the current item is a signed or unsigned integer
     fn int(&self) -> Option<i64>;
 
     /// Returns a **filtered** iterator of u64 values
@@ -63,6 +64,9 @@ pub trait PeekRefExtensions<'peek> {
     /// If the current value is not a vector, returns None
     fn iter(&self) -> Option<impl Iterator<Item = Peek<'peek>>>;
 
+    /// Returns an iterator of the current item of key/value pairs
+    /// 
+    /// If the current item is not a map, returns None
     fn iter_kv(&self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>>;
 }
 
