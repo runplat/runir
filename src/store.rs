@@ -91,7 +91,7 @@ impl Store {
             archive: self.archive,
             session_ns: Namespace::ephemeral(),
             work_dir: self.work_dir.clone(),
-            packer: self.packer.pusher(),
+            packer: self.packer.pusher().unwrap(),
         })
     }
 
