@@ -408,3 +408,171 @@ impl<'p> PeekRefExtensions<'p> for PeekRef<'p> {
         self.0.borrow().clone().int()
     }
 }
+
+#[derive(Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PathNode {
+    current: &'static str,
+    link: usize
+}
+
+#[derive(Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct XorPath {
+    head: Option<std::ptr::NonNull<PathNode>>
+}
+
+impl XorPath {
+    fn append(&self, seg: &str) -> XorPath {
+        let seg = intern_str(seg);
+        let prev = self.head;
+        let new: &'static PathNode = intern_path_node(PathNode {
+            current: seg,
+            link: prev.map_or(0, |p| p.as_ptr() as usize),
+        });
+    
+        if let Some(prev_ptr) = prev {
+            let prev_node = unsafe { prev_ptr.as_ref() };
+            let back_link = prev_node.link ^ (new as *const _ as usize);
+            let prev_mut = unsafe { (prev_ptr.as_ptr() as *mut PathNode).as_mut().unwrap() };
+            prev_mut.link = back_link;
+        }
+
+        let new: *mut PathNode = new as *const _ as *mut _;
+    
+        XorPath {
+            head: std::ptr::NonNull::new(new),
+        }
+    }
+
+    fn resolve(&self) -> Vec<&'static str> {
+        let mut path = Vec::new();
+        let mut curr = self.head;
+        let mut prev = None;
+    
+        while let Some(node_ptr) = curr {
+            let node = unsafe { node_ptr.as_ref() };
+            path.push(node.current);
+    
+            let next_addr = node.link ^ prev.map_or(0, |p: std::ptr::NonNull<PathNode>| p.as_ptr() as usize);
+            prev = curr;
+            curr = std::ptr::NonNull::new(next_addr as *mut _);
+        }
+    
+        path.reverse(); // because we walked backward
+        path
+    }
+}
+
+static PATH_NODE_INTERNER: std::sync::OnceLock<NodeInterner> = std::sync::OnceLock::new();
+
+fn intern_path_node(str: PathNode) -> &'static PathNode {
+    let interner = PATH_NODE_INTERNER.get_or_init(NodeInterner::default);
+    interner.intern(str)
+}
+
+#[derive(Default)]
+struct XorPathInterner {
+    strings: dashmap::DashSet<&'static XorPath>,
+    check_list: dashmap::DashMap<u64, &'static XorPath>,
+}
+
+impl XorPathInterner {
+    pub fn intern(&self, str: XorPath) -> &'static XorPath {
+        use std::hash::Hash;
+        use std::hash::Hasher;
+        if let Some(v) = self.strings.get(&str) {
+            &(*v)
+        } else {
+            let mut hasher = ahash::AHasher::default();
+            str.hash(&mut hasher);
+
+            let s = self.check_list.entry(hasher.finish()).or_insert_with(|| {
+                let interned: &'static XorPath = Box::leak(Box::new(str));
+                interned
+            });
+
+            self.strings.insert(&s);
+
+            &s
+        }
+    }
+}
+
+
+#[derive(Default)]
+struct NodeInterner {
+    strings: dashmap::DashSet<&'static PathNode>,
+    check_list: dashmap::DashMap<u64, &'static PathNode>,
+}
+
+impl NodeInterner {
+    pub fn intern(&self, str: PathNode) -> &'static PathNode {
+        use std::hash::Hash;
+        use std::hash::Hasher;
+        if let Some(v) = self.strings.get(&str) {
+            &(*v)
+        } else {
+            let mut hasher = ahash::AHasher::default();
+            str.hash(&mut hasher);
+
+            let s = self.check_list.entry(hasher.finish()).or_insert_with(|| {
+                let interned: &'static PathNode = Box::leak(Box::new(str));
+                interned
+            });
+
+            self.strings.insert(&s);
+
+            &s
+        }
+    }
+}
+
+#[test]
+fn test_xor_path() {
+    let xor_path = XorPath::default();
+
+    let path = xor_path.append("other").append("values");
+    eprintln!("{:?}", path.resolve());
+}
+
+
+static INTERNER: std::sync::OnceLock<Interner> = std::sync::OnceLock::new();
+
+pub(crate) fn intern_str(str: &str) -> &'static str {
+    let interner = INTERNER.get_or_init(Interner::default);
+    interner.intern(str)
+}
+
+#[derive(Default)]
+struct Interner {
+    strings: dashmap::DashSet<&'static str>,
+    check_list: dashmap::DashMap<u64, &'static str>,
+}
+
+impl Interner {
+    pub fn intern(&self, str: &str) -> &'static str {
+        use std::hash::Hash;
+        use std::hash::Hasher;
+        if let Some(v) = self.strings.get(str) {
+            &(*v)
+        } else {
+            let mut hasher = ahash::AHasher::default();
+            str.hash(&mut hasher);
+
+            let s = self.check_list.entry(hasher.finish()).or_insert_with(|| {
+                let interned: &'static str = Box::leak(str.to_string().into_boxed_str());
+                &interned
+            });
+
+            let s = &(*s);
+            self.strings.insert(s);
+            s
+        }
+    }
+}
+
+#[test]
+fn test_interner() {
+    let interner = Interner::default();
+    let hello_world = interner.intern("hello world");
+    assert_eq!("hello world", hello_world);
+}

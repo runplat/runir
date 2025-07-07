@@ -7,9 +7,7 @@ use ahash::{HashSet, HashSetExt};
 use futures::{AsyncSeekExt, future::Either};
 use sha2::{Digest, Sha256};
 use std::{
-    io::Error,
-    path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    io::Error, path::{Path, PathBuf}, sync::{Arc, OnceLock}
 };
 use tracing::{debug, error, trace};
 
