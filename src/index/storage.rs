@@ -22,12 +22,14 @@ pub trait Storage: Default {
     /// Record being stored
     type Record: crate::IRecord;
 
-    type Borrow<'b> : crate::IRecord  + Deref<Target = Self::Record>
+    /// Type returned from a borrow
+    type Borrow<'b>: crate::IRecord + Deref<Target = Self::Record>
     where
         Self: 'b,
         Self::Record: 'b;
 
-    type IterBorrow<'b> : crate::IRecord + Deref<Target = Self::Record>
+    /// Type returned from an iterator borrow
+    type IterBorrow<'b>: crate::IRecord + Deref<Target = Self::Record>
     where
         Self: 'b,
         Self::Record: 'b;
@@ -43,18 +45,20 @@ pub trait Storage: Default {
     fn record<'a: 'b, 'b>(&'a self, key: u64) -> Option<Self::Borrow<'b>>;
 
     /// Returns an iterator over all records in storage
-    fn iter_records<'a: 'b, 'b>(&'a self) -> impl Iterator<Item = Self::IterBorrow<'b>> + Send + 'b;
+    fn iter_records<'a: 'b, 'b>(&'a self)
+    -> impl Iterator<Item = Self::IterBorrow<'b>> + Send + 'b;
 
     /// Returns a stream over all records in storage
-    fn stream_records<'a: 'b, 'b>(&'a self) -> impl Stream<Item = Self::IterBorrow<'b>> + Send + 'b;
+    fn stream_records<'a: 'b, 'b>(&'a self)
+    -> impl Stream<Item = Self::IterBorrow<'b>> + Send + 'b;
 
     /// Returns true if a record was replaced at key
     fn replace(&mut self, key: u64, record: Self::Record) -> bool;
 }
 
-impl<R: crate::IRecord + Sync> Storage for ahash::HashMap<u64, R> 
-    where
-        for<'b> &'b R: IRecord
+impl<R: crate::IRecord + Sync> Storage for ahash::HashMap<u64, R>
+where
+    for<'b> &'b R: IRecord,
 {
     type Record = R;
 
@@ -79,11 +83,15 @@ impl<R: crate::IRecord + Sync> Storage for ahash::HashMap<u64, R>
         self.get(&key)
     }
 
-    fn iter_records<'a: 'b, 'b>(&'a self) -> impl Iterator<Item = Self::IterBorrow<'b>> + Send + 'b {
+    fn iter_records<'a: 'b, 'b>(
+        &'a self,
+    ) -> impl Iterator<Item = Self::IterBorrow<'b>> + Send + 'b {
         self.iter().map(|(_, v)| v)
     }
 
-    fn stream_records<'a: 'b, 'b>(&'a self) -> impl Stream<Item = Self::IterBorrow<'b>> + Send + 'b {
+    fn stream_records<'a: 'b, 'b>(
+        &'a self,
+    ) -> impl Stream<Item = Self::IterBorrow<'b>> + Send + 'b {
         futures::stream::iter(self.iter_records())
     }
 
@@ -92,9 +100,9 @@ impl<R: crate::IRecord + Sync> Storage for ahash::HashMap<u64, R>
     }
 }
 
-impl<R: crate::IRecord + Sync> Storage for Vec<R> 
+impl<R: crate::IRecord + Sync> Storage for Vec<R>
 where
-    for<'b> &'b R: IRecord
+    for<'b> &'b R: IRecord,
 {
     type Record = R;
 
@@ -123,7 +131,9 @@ where
         self.get(key as usize)
     }
 
-    fn iter_records<'a: 'b, 'b>(&'a self) -> impl Iterator<Item = Self::IterBorrow<'b>> + Send + 'b {
+    fn iter_records<'a: 'b, 'b>(
+        &'a self,
+    ) -> impl Iterator<Item = Self::IterBorrow<'b>> + Send + 'b {
         self.iter()
     }
 
@@ -164,11 +174,15 @@ impl<R: crate::IRecord + Send + Sync> Storage for dashmap::DashMap<u64, R> {
         self.get(&key)
     }
 
-    fn iter_records<'a: 'b, 'b>(&'a self) -> impl Iterator<Item = Self::IterBorrow<'b>> + Send + 'b {
+    fn iter_records<'a: 'b, 'b>(
+        &'a self,
+    ) -> impl Iterator<Item = Self::IterBorrow<'b>> + Send + 'b {
         self.iter()
     }
 
-    fn stream_records<'a: 'b, 'b>(&'a self) -> impl Stream<Item = Self::IterBorrow<'b>> + Send + 'b {
+    fn stream_records<'a: 'b, 'b>(
+        &'a self,
+    ) -> impl Stream<Item = Self::IterBorrow<'b>> + Send + 'b {
         futures::stream::iter(self.iter_records())
     }
 
