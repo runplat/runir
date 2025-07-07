@@ -9,8 +9,8 @@ pub mod iter {
         #[inline]
         fn search<'query>(
             &'query self,
-            query: impl Into<Query<'query, S::Record>>,
-        ) -> impl Iterator<Item = &'query S::Record> 
+            query: impl Into<Query<'query, S::IterBorrow<'query>>>,
+        ) -> impl Iterator<Item = S::IterBorrow<'query>> 
         where
             S: 'query,
             S::Record: 'query
@@ -40,8 +40,8 @@ pub mod stream {
         #[inline]
         fn search<'query>(
             &'query self,
-            query: impl Into<Query<'query, S::Record>>,
-        ) -> impl Stream<Item = &'query S::Record>
+            query: impl Into<Query<'query, S::IterBorrow<'query>>>,
+        ) -> impl Stream<Item = S::IterBorrow<'query>>
         where
             S: 'query,
             S::Record: 'query,
@@ -50,7 +50,7 @@ pub mod stream {
                 let query = query.into();
                 let mut stream = std::pin::pin!(self.as_ref().stream_records());
                 while let Some(next) = stream.next().await {
-                    if query.matches(next) {
+                    if query.matches(&next) {
                         yield next;
                     }
                 }

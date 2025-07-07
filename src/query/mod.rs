@@ -1,4 +1,6 @@
 mod indexer;
+use std::fmt::Debug;
+
 pub use indexer::Indexer;
 
 mod text;
@@ -178,7 +180,7 @@ impl<'q, R> std::fmt::Debug for Filter<'q, R> {
     }
 }
 
-impl<'query, R: crate::IRecord> Matches for Option<Query<'query, R>> {
+impl<'query, R: crate::IRecord + Debug> Matches for Option<Query<'query, R>> {
     type Record = R;
 
     #[inline]

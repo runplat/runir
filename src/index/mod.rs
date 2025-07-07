@@ -2,6 +2,8 @@ mod storage;
 pub use storage::Storage;
 use tracing::{debug, trace};
 
+use crate::IRecord;
+
 pub mod search;
 
 /// Index backed by HashMap Storage
@@ -54,7 +56,7 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
     ///
     /// Returns None if a record w/ this key could not be found
     #[inline]
-    pub fn get(&self, key: u64) -> Option<&R> {
+    pub fn get(&self, key: u64) -> Option<S::Borrow<'_>> {
         self.storage.record(key)
     }
 
@@ -80,7 +82,7 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
     /// // makes it a different namespace
     /// ```
     #[inline]
-    pub fn lookup(&self, ns: impl Into<crate::Namespace>, label: &str) -> Option<&R> {
+    pub fn lookup(&self, ns: impl Into<crate::Namespace>, label: &str) -> Option<S::Borrow<'_>> {
         let ns = ns.into();
         let index_key = ns.key(label) ^ ns.chk();
         self.reverse.get(&index_key).and_then(|k| self.get(*k))
@@ -233,7 +235,7 @@ mod test {
         assert_eq!(0, results);
 
         let results = index
-            .search(filter::<Record>(|r| r.opts().is_indexable()))
+            .search(filter::<&Record>(|r| r.opts().is_indexable()))
             .count();
         assert_eq!(2, results);
     }

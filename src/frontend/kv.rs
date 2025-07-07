@@ -294,7 +294,7 @@ impl KeyValue {
     #[inline]
     pub fn search<'q>(
         &'q self,
-        query: impl Into<Query<'q, Record>>,
+        query: impl Into<Query<'q, &'q Record>>,
     ) -> impl Iterator<Item = &'q Record> {
         let q = query.into();
 
@@ -514,7 +514,7 @@ mod test {
 
         assert_eq!(
             1,
-            kv.search(filter::<Record>(|r| { r.matches_label("hello", "") }))
+            kv.search(filter::<&Record>(|r| { r.matches_label("hello", "") }))
                 .count()
         );
     }
@@ -565,7 +565,7 @@ mod test {
 
         assert_eq!(
             1,
-            kv.search(filter::<Record>(|r| { r.matches_label("hello", "") }))
+            kv.search(filter::<&Record>(|r| { r.matches_label("hello", "") }))
                 .count()
         );
 

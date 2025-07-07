@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use super::{Matches, Query, QueryBuilder, filter};
 use crate::{IRecord, Namespace};
 
@@ -28,7 +30,7 @@ impl<'q, R: IRecord + 'q> Namespaced<'q, R> {
     }
 }
 
-impl<'query, R: IRecord> Matches for Namespaced<'query, R> {
+impl<'query, R: IRecord + Debug> Matches for Namespaced<'query, R> {
     type Record = R;
 
     #[inline]

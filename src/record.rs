@@ -30,7 +30,7 @@ fn crc_digest() -> Digest<'static, u64> {
 /// 2) An IRecord can be reversed into it's source Record
 ///
 /// WIP
-pub trait IRecord: Debug {
+pub trait IRecord {
     /// Key that should be used when indexing a type that implements IRecord
     fn index_key(&self) -> u64 {
         self.uuid().as_u64_pair().0 ^ self.ns_chk()
@@ -92,6 +92,28 @@ impl IRecord for Record {
     #[inline]
     fn to_record(&self) -> Record {
         self.clone()
+    }
+}
+
+impl<'b> IRecord for &'b Record {
+    fn ns_chk(&self) -> u64 {
+        self.ns_chk
+    }
+
+    fn uuid(&self) -> uuid::Uuid {
+        self.key
+    }
+
+    fn opts(&self) -> &Opts {
+        &self.opts
+    }
+
+    fn bytes(&self) -> &[u8] {
+        self.data.bytes()
+    }
+
+    fn to_record(&self) -> Record {
+        (*self).clone()
     }
 }
 
