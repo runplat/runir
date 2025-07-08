@@ -3,6 +3,7 @@ pub use name::Name;
 
 mod peek;
 pub use peek::Peek;
+pub use peek::PeekPath;
 pub use peek::PeekExtensions;
 pub use peek::PeekRefExtensions;
 

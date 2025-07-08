@@ -1,7 +1,5 @@
 use crate::{
-    Data, Namespace, Opts,
-    archive::{self, Entry, HeaderBuilder, Sha256Digest},
-    util::Peek,
+    archive::{self, Entry, HeaderBuilder, Sha256Digest}, util::{Peek, PeekExtensions}, Data, Namespace, Opts
 };
 use ascii::AsAsciiStr;
 use bytes::Bytes;
@@ -61,6 +59,21 @@ pub trait IRecord {
             .map(Peek::from)
     }
 
+    /// Traverse the record using a statically defined path.
+    /// 
+    /// # Example
+    /// ```rs no_run
+    /// let name = record.field("user.profile.name").str();
+    /// ```
+    ///
+    /// # See also
+    /// - [`PeekExtensions`] for methods like `.str()`, `.int()`, etc.
+    /// - [`IRecord::peek()`] for the base entry point
+    #[inline]
+    fn field<'peek>(&'peek self, path: &'peek str) -> impl PeekExtensions<'peek> {
+        self.peek().at_dot(path)
+    }
+
     /// Returns the content digest buffer for the data stored
     #[inline]
     fn content(&self) -> Sha256Digest {
@@ -114,6 +127,28 @@ impl<'b> IRecord for &'b Record {
 
     fn to_record(&self) -> Record {
         (*self).clone()
+    }
+}
+
+impl<'b> IRecord for Option<&'b Record> {
+    fn ns_chk(&self) -> u64 {
+        self.map(|r| r.ns_chk()).unwrap_or_default()
+    }
+
+    fn uuid(&self) -> uuid::Uuid {
+        self.map(|r| r.uuid()).unwrap_or_else(uuid::Uuid::nil)
+    }
+
+    fn opts(&self) -> &Opts {
+        self.map(|r| r.opts()).unwrap_or_else(|| crate::EMPTY_OPTS)
+    }
+
+    fn bytes(&self) -> &[u8] {
+        self.map(|s| s.bytes()).unwrap_or_default()
+    }
+
+    fn to_record(&self) -> Record {
+        self.cloned().unwrap_or_else(|| Namespace::ephemeral().record(""))
     }
 }
 

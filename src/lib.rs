@@ -19,6 +19,7 @@ pub use worker::SharedWorker;
 
 mod opts;
 pub use opts::Opts;
+pub use opts::EMPTY_OPTS;
 
 pub mod policy {
     pub mod merge {

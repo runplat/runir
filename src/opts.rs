@@ -1,5 +1,7 @@
 use std::ops::BitOr;
 
+pub const EMPTY_OPTS: &Opts = &Opts::empty();
+
 /// Record opts stored as a u64
 #[derive(Hash, Debug, Default, PartialEq, PartialOrd, Eq, Ord, Clone, Copy)]
 pub struct Opts {
@@ -11,6 +13,18 @@ pub struct Opts {
 }
 
 impl Opts {
+    /// Returns empty opts
+    #[inline]
+    pub const fn empty() -> Self {
+        Self {
+            runtime: Runtime::empty(),
+            store: Store::empty(),
+            spec: Spec::empty(),
+            merge_policy: MergePolicy::empty(),
+            reserved: [0; 4],
+        }
+    }
+
     /// Returns default Opts for an ephemeral namespace
     #[inline]
     pub fn ephemeral() -> Self {
@@ -47,7 +61,7 @@ impl Opts {
     }
 
     /// Returns true if stored data is idempotent
-    /// 
+    ///
     /// By default, all data is treated as idempotent under a namespace/label,
     /// unless a merge policy option has been configured
     #[inline]
@@ -224,7 +238,7 @@ bitflags::bitflags! {
     #[derive(Hash, Default, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
     pub struct MergePolicy: u8 {
         /// Merge policy is to include all versions of the record
-        /// 
+        ///
         /// When the record is fetched and multiple versions are found, an error will be returned
         /// that will include all versions of the record
         const AllVersions = 1;
@@ -242,7 +256,7 @@ bitflags::bitflags! {
         /// bubble up an error
         const FailSilent = 1 << 6;
         /// Execute a user-registered merge function
-        /// 
+        ///
         /// If this flag is set, and a function is not provided, this will
         /// result in a fatal runtime error
         const UserMergeFunction = 1 << 7;

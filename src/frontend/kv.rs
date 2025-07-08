@@ -466,8 +466,7 @@ impl AsRef<SharedState> for KeyValue {
 mod test {
     use super::{Get, KeyValue, Put};
     use crate::{
-        IRecord, QueryBuilder, Record, field, filter, frontend::Frontend, namespace,
-        util::PeekExtensions, util::PeekRefExtensions,
+        field, filter, frontend::Frontend, namespace, util::{PeekExtensions, PeekRefExtensions}, IRecord, QueryBuilder, Record
     };
     use std::path::PathBuf;
 
@@ -666,6 +665,48 @@ mod test {
                 .at("values")
                 .at("int")
                 .int()
+        );
+
+        let path = crate::util::PeekPath::default();
+        let other_values = &path["other"]["values"];
+
+        assert_eq!(
+            Some("another hello"),
+            other_values["also_important"]
+                .lookup(kv.serde().peek("hello2"))
+                .str()
+        );
+        assert_eq!(
+            None,
+            other_values["doesn't exist"]
+                .lookup(kv.serde().peek("hello2"))
+                .str()
+        );
+        assert_eq!(
+            Some("another hello"),
+            other_values["also_important"]
+                .lookup(kv.serde().peek("hello2"))
+                .str()
+        );
+
+        assert_eq!(
+            Some("another hello"),
+            kv.serde().peek("hello2").at_dot("other.values.also_important").str()
+        );
+
+        assert_eq!(
+            Some("another hello"),
+            kv.get_raw("hello2").field("other.values.also_important").str()
+        );
+        
+        assert_eq!(
+            None,
+            kv.get_raw("hello2").field("other.values.doesn't exist").str()
+        );
+
+        assert_eq!(
+            None,
+            kv.get_raw("doesn't exist").field("other.values.also_important").str()
         );
     }
 }
