@@ -2,6 +2,7 @@ mod cmd;
 use cmd::LookupRecord;
 use cmd::CreateRecord;
 use cmd::ObjectFormat;
+use runir::util::PeekExtensions;
 
 use std::process::exit;
 use clap::{Args, Parser, Subcommand};
@@ -95,19 +96,25 @@ async fn main() -> std::io::Result<()> {
                     return Ok(());
                 }
                 KvCommands::Get(lookup_record) => {
-                    let LookupRecord { label, format } = lookup_record;
+                    let LookupRecord {label,format, peek } = lookup_record;
                     if let Some(value) = kv.ns(ns).get_raw(&label) {
                         if value.opts().is_object() {
-                            match format.and_then(|f| f.resolve()) {
-                                Some(format) => match format {
-                                    ObjectFormat::Yaml => todo!(),
-                                    ObjectFormat::Json => todo!(),
-                                    ObjectFormat::Toml => {
-                                        let toml = value.load::<toml::Value>().unwrap();
-                                        println!("{}", toml::to_string_pretty(&toml).unwrap());
-                                    }
-                                },
-                                None => todo!(),
+                            if let Some(peek) = peek {
+                                if let Some(s) = value.field(&peek).str() {
+                                    println!("{s}");
+                                }
+                            } else {
+                                match format.resolve() {
+                                    Some(format) => match format {
+                                        ObjectFormat::Yaml => todo!(),
+                                        ObjectFormat::Json => todo!(),
+                                        ObjectFormat::Toml => {
+                                            let toml = value.load::<toml::Value>().unwrap();
+                                            println!("{}", toml::to_string_pretty(&toml).unwrap());
+                                        }
+                                    },
+                                    None => todo!(),
+                                }
                             }
                         } else {
                             tokio::io::stdout().write_all(value.bytes()).await?;

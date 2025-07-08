@@ -7,10 +7,10 @@ use super::ObjectFormat;
 use super::Format;
 
 /// Provides interface and functions for creating records
-#[derive(Args)]
+#[derive(Args, Debug)]
 pub struct CreateRecord {
     #[clap(flatten)]
-    format: Option<Format>,
+    format: Format,
     /// Path to the file to create the record from
     ///
     /// If a path is not set, then the default input will be read from stdin
@@ -22,8 +22,9 @@ pub struct CreateRecord {
 
 impl CreateRecord {
     pub async fn build(&self, ns: Namespace) -> std::io::Result<Record> {
+        debug!("{self:?}");
         let CreateRecord { format, file, label } = self;
-        if let Some(format) = format.as_ref().and_then(|f| f.resolve()) {
+        if let Some(format) = format.resolve() {
             debug!("Object format enabled {format:?}");
             match format {
                 ObjectFormat::Yaml => {

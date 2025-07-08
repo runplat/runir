@@ -17,6 +17,9 @@ use super::Frontend;
 type RecordSnapshot = Arc<VecIndex<Record>>;
 
 /// Type-alias over a snapshot cell
+/// 
+/// The Pin<Box<..>> allows dereferencing the underlying snapshot, to allow for regular borrow-semantics,
+/// and also to allow for atomically-replacing the snapshot when needed.
 type SnapshotCell = Arc<RwLock<Pin<Box<RecordSnapshot>>>>;
 
 /// Wrapper over State to allow cloning
