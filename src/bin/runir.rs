@@ -4,6 +4,7 @@ use cmd::CreateRecord;
 use cmd::ObjectFormat;
 use runir::util::PeekExtensions;
 
+use std::ops::Deref;
 use std::process::exit;
 use clap::{Args, Parser, Subcommand};
 use runir::{IRecord, ToNamespace, frontend::Frontend};
@@ -100,8 +101,23 @@ async fn main() -> std::io::Result<()> {
                     if let Some(value) = kv.ns(ns).get_raw(&label) {
                         if value.opts().is_object() {
                             if let Some(peek) = peek {
-                                if let Some(s) = value.field(&peek).str() {
-                                    println!("{s}");
+                                if peek == "." {
+                                    if let Some(map) = value.peek().iter_kv() {
+                                        for kvp in map {
+                                            eprintln!("{}: {:?} = {}", kvp.0, kvp.1.flexbuffer_type(), kvp.1.deref());
+                                        }
+                                    } else if let Some(vec) = value.peek().iter() {
+                                        for (i, v) in vec.enumerate() {
+                                            eprintln!("[{i}]: {:?} = {}", v.flexbuffer_type(), v.deref());
+                                        }
+                                    } else {
+                                        eprintln!("Record is neither a map or vec at the root, this record has been mis-configured");
+                                        exit(1);
+                                    }
+                                } else {
+                                    if let Some(s) = value.field(&peek).val() {
+                                        println!("{}", s.deref());
+                                    }
                                 }
                             } else {
                                 match format.resolve() {

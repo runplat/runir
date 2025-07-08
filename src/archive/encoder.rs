@@ -59,7 +59,9 @@ impl JournalEntry {
     pub fn uuid(&self) -> Uuid {
         match self {
             JournalEntry::Extent { .. } => uuid::Uuid::nil(),
-            JournalEntry::Record(record_extent) => uuid::Uuid::from_u64_pair(record_extent.key, record_extent.crc),
+            JournalEntry::Record(record_extent) => {
+                uuid::Uuid::from_u64_pair(record_extent.key, record_extent.crc)
+            }
         }
     }
 }
@@ -172,7 +174,11 @@ impl asynchronous_codec::Encoder for TapeEncoder {
 
     type Error = std::io::Error;
 
-    fn encode(&mut self, item: Self::Item<'_>, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+    fn encode(
+        &mut self,
+        item: Self::Item<'_>,
+        dst: &mut bytes::BytesMut,
+    ) -> Result<(), Self::Error> {
         self.encode_to(item, dst)
     }
 }
@@ -194,5 +200,47 @@ impl std::fmt::Debug for JournalEntry {
                 .finish(),
             Self::Record(arg0) => f.debug_tuple("Record").field(arg0).finish(),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{IRecord, Namespace, util::PeekExtensions};
+
+    use super::JournalEntry;
+
+    #[test]
+    fn test_peek_journal_entry() {
+        let ns = Namespace::ephemeral();
+
+        let entry = ns.store(
+            "test",
+            &vec![
+                JournalEntry::Extent {
+                    source: [0; 32],
+                    content: [0; 32],
+                    offset: 0,
+                    len: 0,
+                },
+                JournalEntry::Extent {
+                    source: [0; 32],
+                    content: [0; 32],
+                    offset: 0,
+                    len: 0,
+                },
+            ],
+        );
+
+        assert_eq!(
+            Some(0),
+            entry
+                .peek()
+                .iter()
+                .and_then(|mut i| i.next())
+                .unwrap()
+                .at("Extent")
+                .at("offset")
+                .int()
+        );
     }
 }
