@@ -6,7 +6,7 @@ use std::process::exit;
 pub struct Format {
     /// Formats the output to a specific object format
     ///
-    /// If the stored record is not an object, this argument will be ignored.
+    /// If the stored record is not an object, this argument will be ignored
     #[clap(short)]
     pub object_format: Option<ObjectFormat>,
     #[clap(flatten)]

@@ -1,13 +1,13 @@
 mod cmd;
-use cmd::LookupRecord;
 use cmd::CreateRecord;
+use cmd::LookupRecord;
 use cmd::ObjectFormat;
 use runir::util::PeekExtensions;
 
-use std::ops::Deref;
-use std::process::exit;
 use clap::{Args, Parser, Subcommand};
 use runir::{IRecord, ToNamespace, frontend::Frontend};
+use std::ops::Deref;
+use std::process::exit;
 use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
@@ -44,8 +44,21 @@ struct KvConfig {
 #[derive(Subcommand)]
 enum KvCommands {
     /// Puts a record into the kv store
+    /// 
+    /// NOTE: When storing a structured object (via `-o` or `--json`/`--toml`/`--yaml`),
+    /// the original input content is **not preserved verbatim**.
+    /// 
+    /// Instead, it is parsed, restructured internally, and re-serialized for storage.
+    /// This means the resulting digest or output format on round-trip may differ from the original input.
+    /// 
+    /// Use raw blob mode (no `-o`) if you want exact byte-for-byte content preservation.
     Put(CreateRecord),
     /// Gets a record from the kv store
+    /// 
+    /// NOTE: If the record was stored as a structured object, it will be deserialized and re-encoded in the selected format.
+    /// 
+    /// This round-trip will not preserve the original byte layout of the input — even if the logical content is the same.
+    /// For lossless raw content retrieval, avoid `-o` and use blob mode.
     Get(LookupRecord),
     /// Shows information for a stored record
     Info(LookupRecord),
@@ -55,10 +68,10 @@ enum KvCommands {
 async fn main() -> std::io::Result<()> {
     let program = Runir::parse();
 
-    let mut filter = tracing_subscriber::EnvFilter::from_default_env(); 
-    
+    let mut filter = tracing_subscriber::EnvFilter::from_default_env();
+
     if program.debug {
-        filter = filter.add_directive("runir=debug".parse().unwrap());   
+        filter = filter.add_directive("runir=debug".parse().unwrap());
     }
 
     tracing_subscriber::fmt()
@@ -89,29 +102,44 @@ async fn main() -> std::io::Result<()> {
 
             match kv_config.command {
                 KvCommands::Put(create_record) => {
-                    let record = create_record.build(ns).await?;
-                    kv.put_raw(record)?;
+                    let record = create_record.execute(ns).await?;
+                    kv.put_raw(record.clone())?;
                     kv.refresh().await?;
                     kv.save().await?;
-                    eprintln!("Stored");
+                    println!("{}", hex::encode(record.content()));
                     return Ok(());
                 }
                 KvCommands::Get(lookup_record) => {
-                    let LookupRecord {label,format, peek } = lookup_record;
+                    let LookupRecord {
+                        label,
+                        format,
+                        peek,
+                    } = lookup_record;
                     if let Some(value) = kv.ns(ns).get_raw(&label) {
                         if value.opts().is_object() {
                             if let Some(peek) = peek {
                                 if peek == "." {
                                     if let Some(map) = value.peek().iter_kv() {
                                         for kvp in map {
-                                            eprintln!("{}: {:?} = {}", kvp.0, kvp.1.flexbuffer_type(), kvp.1.deref());
+                                            eprintln!(
+                                                "{}: {:?} = {}",
+                                                kvp.0,
+                                                kvp.1.flexbuffer_type(),
+                                                kvp.1.deref()
+                                            );
                                         }
                                     } else if let Some(vec) = value.peek().iter() {
                                         for (i, v) in vec.enumerate() {
-                                            eprintln!("[{i}]: {:?} = {}", v.flexbuffer_type(), v.deref());
+                                            eprintln!(
+                                                "[{i}]: {:?} = {}",
+                                                v.flexbuffer_type(),
+                                                v.deref()
+                                            );
                                         }
                                     } else {
-                                        eprintln!("Record is neither a map or vec at the root, this record has been mis-configured");
+                                        eprintln!(
+                                            "Record is neither a map or vec at the root, this record has been mis-configured"
+                                        );
                                         exit(1);
                                     }
                                 } else {
@@ -122,11 +150,40 @@ async fn main() -> std::io::Result<()> {
                             } else {
                                 match format.resolve() {
                                     Some(format) => match format {
-                                        ObjectFormat::Yaml => todo!(),
-                                        ObjectFormat::Json => todo!(),
+                                        ObjectFormat::Yaml => {
+                                            let yaml = value.load::<serde_yaml::Value>().unwrap();
+                                            println!("{}", serde_yaml::to_string(&yaml).unwrap());
+                                        }
+                                        ObjectFormat::Json => {
+                                            match value.load::<serde_json::Value>() {
+                                                Some(json) => {
+                                                    println!("{json}");
+                                                }
+                                                None => {
+                                                    eprintln!(
+                                                        "Failed to load JSON representation from the object. The stored data is likely not an actual valid object. (Tip: try --peek . for introspection)"
+                                                    );
+                                                    exit(1);
+                                                }
+                                            }
+                                        }
                                         ObjectFormat::Toml => {
-                                            let toml = value.load::<toml::Value>().unwrap();
-                                            println!("{}", toml::to_string_pretty(&toml).unwrap());
+                                            if let Some(toml) = value.load::<toml::Value>() {
+                                                match toml::to_string_pretty(&toml) {
+                                                    Ok(formatted) => println!("{formatted}"),
+                                                    Err(err) => {
+                                                        eprintln!(
+                                                            "Failed to serialize TOML: {err}"
+                                                        );
+                                                        exit(1);
+                                                    }
+                                                }
+                                            } else {
+                                                eprintln!(
+                                                    "Failed to load TOML representation from object. (Tip: null values are not valid in TOML, try --json)"
+                                                );
+                                                exit(1);
+                                            }
                                         }
                                     },
                                     None => todo!(),
@@ -139,7 +196,7 @@ async fn main() -> std::io::Result<()> {
                         eprintln!("Object not found");
                         exit(1)
                     }
-                },
+                }
                 KvCommands::Info(lookup_record) => {
                     let LookupRecord { label, .. } = lookup_record;
 
@@ -149,35 +206,40 @@ async fn main() -> std::io::Result<()> {
                         let is_valid = value.is_valid();
                         let uuid = value.uuid().as_simple().to_string();
                         let opts = value.opts();
-                        let is_archivable =  opts.is_archivable();
+                        let is_archivable = opts.is_archivable();
                         let is_idempotent = opts.is_idempotent();
                         let is_indexable = opts.is_indexable();
                         let is_object = opts.is_object();
                         let is_manifest = opts.is_manifest();
                         let size = value.bytes().len();
-                        let ts = time::UtcDateTime::from_unix_timestamp(value.ts() as i64).expect("should be valid timestamp").to_string();
+                        let ts = time::UtcDateTime::from_unix_timestamp(value.ts() as i64)
+                            .expect("should be valid timestamp")
+                            .to_string();
                         let age = format!("{:#?}", value.age());
-                        
-                        println!("{}", toml::toml! {
-                            uuid = uuid
-                            ts = ts
 
-                            [data]
-                            content = content
-                            size = size
+                        println!(
+                            "{}",
+                            toml::toml! {
+                                uuid = uuid
+                                ts = ts
 
-                            [archive_state]
-                            is_virtual = is_virtual
-                            is_valid = is_valid
-                            age = age
+                                [data]
+                                content = content
+                                size = size
 
-                            [opts]
-                            is_archivable = is_archivable
-                            is_idempotent = is_idempotent
-                            is_indexable = is_indexable
-                            is_object = is_object
-                            is_manifest = is_manifest
-                        });
+                                [archive_state]
+                                is_virtual = is_virtual
+                                is_valid = is_valid
+                                age = age
+
+                                [opts]
+                                is_archivable = is_archivable
+                                is_idempotent = is_idempotent
+                                is_indexable = is_indexable
+                                is_object = is_object
+                                is_manifest = is_manifest
+                            }
+                        );
                     } else {
                         eprintln!("Object not found");
                         exit(1)

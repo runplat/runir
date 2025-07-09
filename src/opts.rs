@@ -9,7 +9,8 @@ pub struct Opts {
     store: Store,
     spec: Spec,
     merge_policy: MergePolicy,
-    reserved: [u8; 4],
+    branch: Branch,
+    reserved: [u8; 3],
 }
 
 impl Opts {
@@ -21,7 +22,8 @@ impl Opts {
             store: Store::empty(),
             spec: Spec::empty(),
             merge_policy: MergePolicy::empty(),
-            reserved: [0; 4],
+            branch: Branch::Head,
+            reserved: [0; 3],
         }
     }
 
@@ -33,9 +35,11 @@ impl Opts {
             store: Store::empty(),
             spec: Spec::empty(),
             merge_policy: MergePolicy::empty(),
-            reserved: [0; 4],
+            branch: Branch::Head,
+            reserved: [0; 3],
         }
     }
+
     /// Returns true if runtime indexing is enabled
     #[inline]
     pub fn is_indexable(&self) -> bool {
@@ -151,7 +155,7 @@ impl Opts {
             self.store.bits(),
             self.spec.bits(),
             self.merge_policy.bits(),
-            0,
+            self.branch.bits(),
             0,
             0,
             0,
@@ -161,14 +165,15 @@ impl Opts {
     /// Decodes opts value into an Opts struct
     #[inline]
     pub fn decode(opts: u64) -> Self {
-        let [runtime, store, spec, merge_policy, ..] = opts.to_le_bytes();
+        let [runtime, store, spec, merge_policy, branch, ..] = opts.to_le_bytes();
 
         Self {
             runtime: Runtime::from_bits_retain(runtime),
             store: Store::from_bits_retain(store),
             spec: Spec::from_bits_retain(spec),
             merge_policy: MergePolicy::from_bits_retain(merge_policy),
-            reserved: [0; 4],
+            branch: Branch::from_bits_retain(branch),
+            reserved: [0; 3],
         }
     }
 }
@@ -182,7 +187,8 @@ impl BitOr for Opts {
             store: self.store | rhs.store,
             spec: self.spec | rhs.spec,
             merge_policy: self.merge_policy | rhs.merge_policy,
-            reserved: [0; 4],
+            branch: self.branch | rhs.branch,
+            reserved: [0; 3],
         }
     }
 }
@@ -260,6 +266,35 @@ bitflags::bitflags! {
         /// If this flag is set, and a function is not provided, this will
         /// result in a fatal runtime error
         const UserMergeFunction = 1 << 7;
+    }
+}
+
+
+bitflags::bitflags! {
+    /// Branches enable ergonomic updates without violating idempotency semantics
+    /// at upper-level user-facing APIs. 
+    #[derive(Hash, Default, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct Branch: u8 {
+        // Lower 2 bits: public branches
+        
+        /// Head branch semantically requires more-strict rules concerning mutation
+        /// Records represented as the "HEAD" must follow strict data-handling
+        /// procedures
+        const Head     = 0b000000_00;
+
+        /// Staging branch requiers less-strict rules, and allows for more flexible
+        /// mutation within isolation
+        const Staging  = 0b000000_01;
+
+        /// Deleted branch marks a record as being "deleted" or no longer in use or mapped
+        /// Multiple records may exist under the same namespace/label inside of the deleted branch,
+        /// however only 1 of each content digest will be preserved.
+        const Deleted  = 0b000000_10;
+
+        /// "Ephemeral" branch signals a scratch branch whose record should not be persisted
+        const Ephemeral = u8::MAX;
+
+        // Everything else is reserved
     }
 }
 

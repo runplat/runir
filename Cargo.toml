@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = ["tokio"]
 tokio = ["dep:tokio", "dep:async-compat"]
+cli = ["dep:serde_json", "dep:serde_yaml", "dep:clap"]
 
 [dependencies]
 ahash = "0.8.12"
@@ -30,12 +31,17 @@ unicode-segmentation = "1.12.0"
 uuid = "1.17.0"
 dashmap = "6.1.0"
 asynchronous-codec = "0.7.0"
-
-# Full async support
-tokio = { version = "1.45.1", features = ["full"], optional = true }
-async-compat = { version = "0.2.4", optional = true }
 parking_lot = "0.12.4"
 stackfuture = "0.3.0"
-clap =  { version = "4.5.40", features = ["derive", "env"] }
 tracing-subscriber = "0.3.19"
 pin-project-lite = "0.2.16"
+
+tokio = { version = "1.45.1", features = ["full"], optional = true }
+async-compat = { version = "0.2.4", optional = true }
+clap =  { version = "4.5.40", features = ["derive", "env"], optional = true }
+serde_json = { version = "1.0.140", optional = true }
+serde_yaml = { version = "0.9.34", optional = true }
+
+[[bin]]
+name = "runir"
+required-features = ["cli"]
