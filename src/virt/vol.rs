@@ -26,6 +26,7 @@ pub const MIB16: usize = MIB * 16;
 
 /// Super trait for types that [`Volume<T>`] can use as it's binary store
 pub trait VolumeTarget: AsyncWrite + Unpin + Sync + 'static {
+    /// Portable "Bytes" type that is safe and cheap to clone and share
     type Bytes: Into<BackingData> + Clone;
 
     /// Provides the flush semantics for the volume target
@@ -123,7 +124,7 @@ pub fn new_memory_target(path: impl Into<PathBuf>, capacity: usize) -> InMemoryT
     CursorTarget::new(path, bytes)
 }
 
-/// Volume enables writing batches of records to a single storage target
+/// Volume enables archiving batches of records to a single storage target
 pub struct Volume<T> {
     /// Inner target
     target: T,
@@ -142,7 +143,7 @@ impl<T: VolumeTarget> Volume<T> {
     }
 
     /// Encodes a series of Records using [TapeEncoder] and writes them sequentially into the underlying target
-    pub async fn write_batch(self, batch: Vec<Entry>) -> std::io::Result<Self> {
+    pub async fn archive_batch(self, batch: Vec<Entry>) -> std::io::Result<Self> {
         let mut writer = FramedWrite::new(self.target, self.encoder);
 
         for r in batch {
@@ -504,7 +505,7 @@ mod test {
             },
         ));
 
-        let mut volume = volume.write_batch(records.drain(..).map(|r| Entry::Record(r)).collect()).await.unwrap();
+        let mut volume = volume.archive_batch(records.drain(..).map(|r| Entry::Record(r)).collect()).await.unwrap();
 
         let member = volume
             .swap_and_archive(new_memory_target("<inline>", MIB))
@@ -589,7 +590,7 @@ mod test {
             },
         ));
 
-        let mut volume = volume.write_batch(records.drain(..).map(|r| Entry::Record(r)).collect()).await.unwrap();
+        let mut volume = volume.archive_batch(records.drain(..).map(|r| Entry::Record(r)).collect()).await.unwrap();
 
         let member = volume
             .swap_and_archive(
@@ -674,7 +675,7 @@ mod test {
             },
         ));
 
-        let mut volume = volume.write_batch(records.drain(..).map(|r| Entry::Record(r)).collect()).await.unwrap();
+        let mut volume = volume.archive_batch(records.drain(..).map(|r| Entry::Record(r)).collect()).await.unwrap();
 
         let member = volume
             .swap_and_archive(new_mmap_anon_target("<inline>", MIB).unwrap())

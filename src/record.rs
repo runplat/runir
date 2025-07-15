@@ -1,8 +1,10 @@
 use crate::{
-    archive::{self, Entry, HeaderBuilder, Sha256Digest}, util::{Peek, PeekExtensions}, Data, Namespace, Opts
+    Data, Namespace, Opts,
+    archive::{self, Entry, HeaderBuilder, Sha256Digest},
+    opts::Branch,
+    util::{Peek, PeekExtensions},
 };
 use ascii::AsAsciiStr;
-use bytes::Bytes;
 use crc::{CRC_64_MS, Crc, Digest};
 use serde::Deserialize;
 use sha2::Sha256;
@@ -60,7 +62,7 @@ pub trait IRecord {
     }
 
     /// Traverse the record using a statically defined path.
-    /// 
+    ///
     /// # Example
     /// ```rs no_run
     /// let name = record.field("user.profile.name").str();
@@ -148,7 +150,8 @@ impl<'b> IRecord for Option<&'b Record> {
     }
 
     fn to_record(&self) -> Record {
-        self.cloned().unwrap_or_else(|| Namespace::ephemeral().record(""))
+        self.cloned()
+            .unwrap_or_else(|| Namespace::ephemeral().record(""))
     }
 }
 
@@ -248,13 +251,21 @@ impl Record {
     }
 
     /// Sets the record opts
+    ///
+    /// Note: If the record is empty (has no data), changes to storage options (e.g. `Object`)
+    /// are not enforced until the record is committed. Validation and interpretation of
+    /// storage options apply only after data is present.
     #[inline]
     pub fn with_opts(mut self, opts: Opts) -> Self {
         self.opts = opts;
         self
     }
 
-    /// Returns a mutable reference to current record opts
+    /// Returns a mutable reference to the current record opts.
+    ///
+    /// Note: If the record is empty (has no data), changes to storage options (e.g. `Object`)
+    /// are not enforced until the record is committed. Validation and interpretation of
+    /// storage options apply only after data is present.
     #[inline]
     pub fn opts_mut(&mut self) -> &mut Opts {
         &mut self.opts
@@ -268,12 +279,12 @@ impl Record {
     ///
     /// The CRC algorithm used is CRC_64_MS
     #[inline]
-    pub fn commit(mut self, data: Bytes) -> Record {
-        let mut crc = crc_digest();
-        crc.update(&data);
-        crc.update(&self.ts.to_le_bytes());
+    pub fn commit(mut self, data: impl Into<Data>) -> Record {
+        self.data = data.into();
 
-        self.data = Data::Bytes(data);
+        let mut crc = crc_digest();
+        crc.update(self.bytes());
+        crc.update(&self.ts.to_le_bytes());
 
         let (hi, _) = self.key.as_u64_pair();
         self.key = Uuid::from_u64_pair(hi, crc.finalize());
@@ -434,12 +445,69 @@ impl Record {
     pub fn is_virtual(&self) -> bool {
         matches!(self.data, Data::Virtual(..))
     }
+
+    /// Creates a staged version of the record with new data.
+    ///
+    /// This function behaves differently based on the current branch state:
+    ///
+    /// - If the record has no data, the new data is committed as `HEAD`.
+    /// - If the record is in `HEAD` or `STAGING`, a new `STAGING` version is created with the given data.
+    /// - If the record is marked `DELETED`, staging is not allowed and an error is returned.
+    ///
+    /// This operation does not mutate the original record — it returns a new version that must be
+    /// committed or processed by a compatible store to take effect.
+    #[inline]
+    #[must_use = "Calling `.stage()` prepares a staged record, but it must be committed or passed to a store to take effect"]
+    pub fn stage(&self, data: impl Into<Data>) -> std::io::Result<Self> {
+        if self.bytes().is_empty() {
+            Ok(self.clone().commit(data))
+        } else if self.opts().is_deleted() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Cannot stage data for a record marked for deletion",
+            ))
+        } else if self.opts().is_idempotent() || self.opts().is_staging() {
+            let data: Data = data.into();
+
+            if self.opts().is_object() && flexbuffers::Reader::get_root(data.bytes()).is_err() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Current record stores an Object, staged data must also be an object"
+                ))
+            }
+
+            let mut staging = self.clone();
+            staging.opts_mut().enable_branch(Branch::Staging);
+            
+            // Since we are about to commit new data, we need to create a new timestamp
+            staging.ts = time::UtcDateTime::now().unix_timestamp() as u64;
+
+            Ok(staging.commit(data))
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Record is in an unknown branch configuration",
+            ))
+        }
+    }
+
+    /// Returns a version of the current record marked for deletion.
+    ///
+    /// This sets the `DELETED` branch flag but does not remove the underlying data.
+    /// Persistence and deletion behavior depend on the store or archival system.
+    #[inline]
+    #[must_use = "Calling `.delete()` marks the record, but it must be committed or passed to a store to take effect"]
+    pub fn delete(&self) -> Self {
+        let mut deleting = self.clone();
+        deleting.opts_mut().enable_branch(Branch::Deleted);
+        deleting
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::Record;
-    use crate::{Data, Opts, RecordableExtensions, record::Namespace};
+    use crate::{record::Namespace, Data, IRecord, Opts, RecordableExtensions};
     use bytes::Bytes;
     use serde::{Deserialize, Serialize};
     use std::{collections::BTreeMap, time::Duration};
@@ -613,5 +681,25 @@ mod test {
 
         let value = record.load::<toml::Value>().unwrap();
         assert_eq!("hello world", value["value"].as_str().unwrap());
+    }
+
+    #[test]
+    fn test_stage() {
+        let namespace = Namespace::ephemeral();
+
+        let record = namespace.commit("example", &Bytes::from_static(b"hello"));
+        let staged = record.stage(Bytes::from_static(b"world")).unwrap();
+        assert!(staged.opts().is_staging());
+
+        let record = namespace.record("example");
+        let staged = record.stage(Bytes::from_static(b"hello")).unwrap();
+        assert!(!staged.opts().is_staging(), "Since the record was empty to begin-with, this should bypass the STAGING branch");
+
+        let deleted = staged.delete();
+        assert!(deleted.stage(Bytes::from_static(b"world")).is_err(), "A deleted record cannot stage data");
+
+        let staged = staged.stage(Bytes::from_static(b"hello world")).unwrap();
+        assert!(staged.is_valid());
+        assert!(staged.opts().is_staging());
     }
 }

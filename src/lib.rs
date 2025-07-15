@@ -21,67 +21,6 @@ mod opts;
 pub use opts::Opts;
 pub use opts::EMPTY_OPTS;
 
-pub mod policy {
-    pub mod merge {
-        use crate::opts::MergePolicy;
-
-        /// Merge policy is to include all versions of the record
-        /// 
-        /// When the record is fetched and multiple versions are found, an error will be returned
-        /// that will include all versions of the record
-        #[inline]
-        pub fn all_versions() -> MergePolicy {
-            MergePolicy::AllVersions
-        }
-
-        /// Prefer the earliest version of the record
-        #[inline]
-        pub fn earliest() -> MergePolicy {
-            MergePolicy::Earliest
-        }
-
-        /// Prefer the latest version of the record
-        #[inline]
-        pub fn latest() -> MergePolicy {
-            MergePolicy::Latest
-        }
-
-        /// Prefer the record with the lower checksum
-        #[inline]
-        pub fn lowest_checksum() -> MergePolicy {
-            MergePolicy::LowestChecksum
-        }
-
-        /// Prefer the record with the highest checksum
-        #[inline]
-        pub fn highest_checksum() -> MergePolicy {
-            MergePolicy::HighestChecksum
-        }
-
-        /// Do-not allow merges once a record is set and return an error
-        #[inline]
-        pub fn fail() -> MergePolicy {
-            MergePolicy::Fail
-        }
-
-        /// Do-not allow merges once a record is set and do not
-        /// bubble up an error
-        #[inline]
-        pub fn fail_silent() -> MergePolicy {
-            MergePolicy::FailSilent
-        }
-
-        /// Execute a user-registered merge function
-        /// 
-        /// If this flag is set, and a function is not provided, this will
-        /// result in a fatal runtime error
-        #[inline]
-        pub fn user_merge_function() -> MergePolicy {
-            MergePolicy::UserMergeFunction
-        }
-    }
-}
-
 mod index;
 pub use index::Index;
 pub use index::Storage;

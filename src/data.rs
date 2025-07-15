@@ -45,3 +45,9 @@ impl Data {
         digest
     }
 }
+
+impl From<Bytes> for Data {
+    fn from(value: Bytes) -> Self {
+        Self::Bytes(value)
+    }
+}

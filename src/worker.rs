@@ -12,6 +12,7 @@ use tracing::debug;
 /// Type-alias for the type returned by Worker::sync(..)
 pub type BackgroundSync = RemoteHandle<std::io::Result<()>>;
 
+/// Shared thread-safe worker that can handle ingesting records from multiple sources
 #[derive(Clone)]
 pub struct SharedWorker {
     worker: Arc<parking_lot::RwLock<Worker>>,
@@ -111,7 +112,7 @@ impl Worker {
                     */
                     debug!(total_size, "Creating new archive_member for {archive_path:?}");
                     let output = Volume::new(new_memory_target(archive_path, total_size));
-                    let mut member = output.write_batch(entries).await?.to_archive()?;
+                    let mut member = output.archive_batch(entries).await?.to_archive()?;
                     let backoff = Backoff::new();
                     while let Some(retry) = packer.push(member) {
                         member = retry;
@@ -213,7 +214,7 @@ mod test {
 
         let archive_file = Volume::new(new_memory_target("<inline>", MIB));
         let archive = archive_file
-            .write_batch(worker.flush().collect())
+            .archive_batch(worker.flush().collect())
             .await
             .unwrap()
             .to_archive()

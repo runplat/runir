@@ -197,7 +197,7 @@ impl Namespace {
                 .with_opts(self.opts | recordable.opts)
                 .commit(Bytes::from(ser.take_buffer()));
 
-            record.opts_mut().set_serialized_object(true);
+            record.opts_mut().set_object_storage(true);
             record
         } else {
             record
@@ -215,7 +215,7 @@ impl Namespace {
             author(flexbuffers::Builder::default()).take_buffer(),
         ));
 
-        record.opts_mut().set_serialized_object(true);
+        record.opts_mut().set_object_storage(true);
         record
     }
 
