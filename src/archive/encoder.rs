@@ -20,7 +20,7 @@ pub enum JournalEntry {
 impl JournalEntry {
     /// If this journal entry is a record extent, returns the archive name of this journal entry
     #[inline]
-    pub fn archve_name(&self) -> Option<String> {
+    pub fn archive_name(&self) -> Option<String> {
         match self {
             JournalEntry::Record(record_extent) => Some(record_extent.format_archve_name()),
             _ => None,
