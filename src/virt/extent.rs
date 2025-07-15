@@ -32,7 +32,7 @@ pub struct RecordExtent {
 impl RecordExtent {
     /// Formats the archive name used for this record
     #[inline]
-    pub fn format_archve_name(&self) -> String {
+    pub fn format_archive_name(&self) -> String {
         format!(
             "{:x}_{}_{:x}",
             self.ns_chk,

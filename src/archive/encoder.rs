@@ -22,7 +22,7 @@ impl JournalEntry {
     #[inline]
     pub fn archive_name(&self) -> Option<String> {
         match self {
-            JournalEntry::Record(record_extent) => Some(record_extent.format_archve_name()),
+            JournalEntry::Record(record_extent) => Some(record_extent.format_archive_name()),
             _ => None,
         }
     }
