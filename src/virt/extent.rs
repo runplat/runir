@@ -9,7 +9,7 @@ use crate::{Data, Opts, Record, archive::Sha256Digest};
 /// to source and storage metadata
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RecordExtent {
-    /// Digest of recourd source
+    /// Digest of record source
     pub(crate) source: Sha256Digest,
     /// Digest of record content
     pub(crate) content: Sha256Digest,
