@@ -292,4 +292,15 @@ mod test {
         assert_eq!(ns2.chk(), ns2.clone().chk());
         assert_eq!(ns.clone().chk(), ns2.clone().chk());
     }
+
+    #[test]
+    fn test_namespace_ephemeral_encode() {
+        let ns = Namespace::ephemeral();
+
+        let ns_encoded = ns.encode();
+        assert!(ns_encoded[0].is_nil());
+        assert!(ns_encoded[1].is_nil());
+
+        assert!(Namespace::decode(ns_encoded).is_none())
+    }
 }
