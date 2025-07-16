@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use crate::{record::PeekMap, IRecord};
+use crate::{IRecord, util::PeekExtensions};
 
 use super::{Matches, Query, QueryBuilder, filter};
 
@@ -19,9 +19,9 @@ impl<'query, R: IRecord + 'query> Field<'query, R> {
     pub fn contains(self, contains: &'query str) -> Query<'query, R> {
         filter::<R>(move |record: &R| {
             record
-                .peek_map(|r| {
-                    r.as_map().idx(self.field).as_str().contains(contains)
-                })
+                .field(self.field)
+                .str()
+                .map(|f| f.contains(contains))
                 .unwrap_or_default()
         })
         .into()
@@ -34,9 +34,9 @@ impl<'query, R: IRecord + 'query> Field<'query, R> {
     pub fn starts_with(self, starts_with: &'query str) -> Query<'query, R> {
         filter::<R>(move |record| {
             record
-                .peek_map(|r| {
-                    r.as_map().idx(self.field).as_str().starts_with(starts_with)
-                })
+                .field(self.field)
+                .str()
+                .map(|s| s.starts_with(starts_with))
                 .unwrap_or_default()
         })
         .into()
@@ -49,9 +49,9 @@ impl<'query, R: IRecord + 'query> Field<'query, R> {
     pub fn ends_with(self, ends_with: &'query str) -> Query<'query, R> {
         filter::<R>(move |record| {
             record
-                .peek_map(|r| {
-                    r.as_map().idx(self.field).as_str().ends_with(ends_with)
-                })
+                .field(self.field)
+                .str()
+                .map(|s| s.ends_with(ends_with))
                 .unwrap_or_default()
         })
         .into()
@@ -80,23 +80,29 @@ impl<'q, R: IRecord + 'q> QueryBuilder<'q, R> for Field<'q, R> {
 mod test {
     use toml::toml;
 
-    use crate::{string, Namespace};
- 
+    use crate::{Namespace, string};
+
     #[test]
     fn test_starts_with() {
         let ns = Namespace::ephemeral();
-        let rec = ns.store("record_1", &toml! {
-            value = "super_hello_world"
-        });
+        let rec = ns.store(
+            "record_1",
+            &toml! {
+                value = "super_hello_world"
+            },
+        );
         assert!(string("value").starts_with("super").matches(&rec))
     }
 
     #[test]
     fn test_ends_with() {
         let ns = Namespace::ephemeral();
-        let rec = ns.store("record_1", &toml! {
-            value = "super_hello_world"
-        });
+        let rec = ns.store(
+            "record_1",
+            &toml! {
+                value = "super_hello_world"
+            },
+        );
         assert!(!string("value").ends_with("super").matches(&rec));
         assert!(string("value").ends_with("world").matches(&rec));
     }

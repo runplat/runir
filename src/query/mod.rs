@@ -12,6 +12,8 @@ pub use namespaced::Namespaced;
 mod field;
 pub use field::Field;
 
+use crate::util::PeekExtensions;
+
 /// Trait to apply match conditions on a Record
 pub trait Matches: std::fmt::Debug {
     /// Record frontend
@@ -113,13 +115,11 @@ pub fn field<'query, R: crate::IRecord + 'query>(field: &'query str) -> Field<'q
     Field {
         field,
         query: Some(
-            filter::<R>(move |record| {
-                use crate::PeekMap;
+            filter::<R>(|record| {
                 record
-                    .peek_map(|r| {
-                        let is_field_set = !r.as_map().idx(field).flexbuffer_type().is_null();
-                        is_field_set
-                    })
+                    .field(field)
+                    .val()
+                    .map(|r| !r.flexbuffer_type().is_null())
                     .unwrap_or_default()
             })
             .into(),
@@ -134,18 +134,7 @@ pub fn field<'query, R: crate::IRecord + 'query>(field: &'query str) -> Field<'q
 pub fn string<'query, R: crate::IRecord + 'query>(field: &'query str) -> Field<'query, R> {
     Field {
         field,
-        query: Some(
-            filter::<R>(move |record| {
-                use crate::PeekMap;
-                record
-                    .peek_map(|r| {
-                        let is_field_set = r.as_map().idx(field).flexbuffer_type().is_string();
-                        is_field_set
-                    })
-                    .unwrap_or_default()
-            })
-            .into(),
-        ),
+        query: Some(filter::<R>(|record| record.field(field).str().is_some()).into()),
     }
 }
 
@@ -306,7 +295,12 @@ mod test {
                 value = "foo"
             },
         );
-        assert!(ns_filter.matches(&rec), "original: {} clone: {}", ns.chk(), ns_clone.chk());
+        assert!(
+            ns_filter.matches(&rec),
+            "original: {} clone: {}",
+            ns.chk(),
+            ns_clone.chk()
+        );
 
         let other_ns = Namespace::ephemeral();
         let rec = other_ns.store(

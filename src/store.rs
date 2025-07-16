@@ -7,7 +7,9 @@ use ahash::{HashSet, HashSetExt};
 use futures::{AsyncSeekExt, future::Either};
 use sha2::{Digest, Sha256};
 use std::{
-    io::Error, path::{Path, PathBuf}, sync::{Arc, OnceLock}
+    io::Error,
+    path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
 };
 use tracing::{debug, error, trace};
 
@@ -212,10 +214,14 @@ impl ArchiveMember {
                 records, manifest, ..
             } => {
                 let entries = manifest.journal_entries()?;
-                let mut entries = entries.iter().enumerate().fold(ahash::HashSet::new(), |mut s, (i, r)| {
-                    s.insert((i, r.uuid(), *r.content()));
-                    s
-                });
+                let mut entries =
+                    entries
+                        .iter()
+                        .enumerate()
+                        .fold(ahash::HashSet::new(), |mut s, (i, r)| {
+                            s.insert((i, r.uuid(), *r.content()));
+                            s
+                        });
                 let mut validated = vec![];
                 for (i, r) in records.iter().enumerate().filter(|r| r.1.is_valid()) {
                     if entries.remove(&(i, r.uuid(), r.content())) {
@@ -326,7 +332,8 @@ impl StoreArchive {
                                 let manifest = Manifest { record };
 
                                 for entry in manifest.journal_entries()?.iter() {
-                                    if !records.remove(entry.content()) {
+                                    if !records.remove(&entry.uuid()) {
+                                        error!("Did not remove {}", hex::encode(entry.content()));
                                         return Err(std::io::Error::new(
                                             std::io::ErrorKind::InvalidData,
                                             "Pack is incomplete",
@@ -365,7 +372,10 @@ impl StoreArchive {
                             let padding = cursor % 512;
                             cursor += 512 - padding;
                         } else {
-                            records.insert(digest);
+                            if let Some((_, uuid, _)) = header.split_name_for_record() {
+                                debug!("inserting {}:{} to hashset", uuid, hex::encode(digest));
+                                records.insert(uuid);
+                            }
                         }
                     }
                 }
@@ -391,7 +401,7 @@ impl StoreArchive {
         let mut existing = HashSet::default();
 
         let file = if completed_dest.exists() {
-            debug!("Previous store found, attempting to append to store");
+            debug!("Previous store found, attempting to append to store {completed_dest:?}");
             for r in scan_for_references(crate::util::fs::open(&completed_dest).await?).await? {
                 if let Entry::Reference(FileEntryReference {
                     header,
@@ -435,9 +445,13 @@ impl StoreArchive {
             let including = records
                 .iter()
                 .filter(|r| {
-                    let new_rec =
-                        existing.insert((r.uuid().as_u64_pair().0, r.data.digest().finalize()));
-                    debug!(inserting = new_rec, "dedupe");
+                    let dedupe_check = (r.uuid().as_u64_pair().0, r.data.digest().finalize());
+                    let new_rec = existing.insert(dedupe_check);
+                    debug!(
+                        inserting = new_rec,
+                        check = format!("{:x}:{}", dedupe_check.0, hex::encode(dedupe_check.1)),
+                        "dedupe"
+                    );
                     new_rec
                 })
                 .map(|r| Entry::Record(r.clone()));

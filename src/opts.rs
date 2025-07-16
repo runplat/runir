@@ -319,6 +319,8 @@ bitflags::bitflags! {
 
 #[cfg(test)]
 mod test {
+    use crate::opts::Branch;
+
     use super::Opts;
 
     #[test]
@@ -329,7 +331,8 @@ mod test {
         opts.enable_archiving()
             .enable_indexing()
             .set_object_storage(true)
-            .set_manifest_spec(true);
+            .set_manifest_spec(true)
+            .enable_branch(Branch::Staging);
 
         assert!(!opts.is_idempotent());
         let encoded = opts.encode();

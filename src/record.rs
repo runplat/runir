@@ -55,7 +55,7 @@ pub trait IRecord {
     ///
     /// Returns None if the current record data does not have a flexbuffer root
     #[inline]
-    fn peek<'peek>(&'peek self) -> Option<crate::util::Peek<'peek>> {
+    fn peek<'peek>(&'peek self) -> impl PeekExtensions<'peek> {
         flexbuffers::Reader::get_root(self.bytes())
             .ok()
             .map(Peek::from)
@@ -154,18 +154,6 @@ impl<'b> IRecord for Option<&'b Record> {
             .unwrap_or_else(|| Namespace::ephemeral().record(""))
     }
 }
-
-pub trait PeekMap: IRecord {
-    /// Peeks at the flexbuffer root and return a value
-    ///
-    /// Returns None if data is not a flexbuffer root
-    #[inline]
-    fn peek_map<O>(&self, peek: impl Fn(flexbuffers::Reader<&[u8]>) -> O) -> Option<O> {
-        self.peek().map(|d| peek((*d).clone()))
-    }
-}
-
-impl<T: IRecord> PeekMap for T {}
 
 /// State for storing data into the database
 ///
