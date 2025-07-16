@@ -1,5 +1,3 @@
-mod name;
-pub use name::Name;
 
 mod peek;
 pub use peek::Peek;
