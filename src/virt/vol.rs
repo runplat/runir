@@ -125,17 +125,17 @@ pub fn new_memory_target(path: impl Into<PathBuf>, capacity: usize) -> InMemoryT
 }
 
 /// Volume enables archiving batches of records to a single storage target
-pub struct Volume<T> {
+pub struct Volume<T, Enc> {
     /// Inner target
     target: T,
     /// Encoder
-    encoder: TapeEncoder,
+    encoder: Enc,
 }
 
-impl<T: VolumeTarget> Volume<T> {
-    /// Creates a new volume w/ target
+impl<T: VolumeTarget> Volume<T, TapeEncoder> {
+    /// Creates a new volume w/ target for archiving
     #[inline]
-    pub fn new(target: T) -> Self {
+    pub fn archiver(target: T) -> Self {
         Self {
             target,
             encoder: TapeEncoder::default(),
@@ -464,7 +464,7 @@ mod test {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_volume_swap_and_snapshot_in_memory() {
-        let volume = Volume::new(new_memory_target("<inline>", MIB));
+        let volume = Volume::archiver(new_memory_target("<inline>", MIB));
 
         let ns = ().to_namespace();
 
@@ -547,7 +547,7 @@ mod test {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_volume_swap_and_snapshot_mmap() {
-        let volume = Volume::new(
+        let volume = Volume::archiver(
             new_mmap_target("test_volume_swap_and_snapshot_mmap.0.bin", MIB as u64).unwrap(),
         );
 
@@ -634,7 +634,7 @@ mod test {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_volume_swap_and_snapshot_mmap_anon() {
-        let volume = Volume::new(new_mmap_anon_target("<inline>", MIB).unwrap());
+        let volume = Volume::archiver(new_mmap_anon_target("<inline>", MIB).unwrap());
 
         let ns = ().to_namespace();
 

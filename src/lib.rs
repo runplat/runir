@@ -11,7 +11,6 @@ pub use namespace::ToNamespace;
 mod record;
 pub use record::Record;
 pub use record::IRecord;
-pub use record::PeekMap;
 
 mod worker;
 pub use worker::Worker;
