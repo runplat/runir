@@ -145,7 +145,7 @@ pub struct Volume<T, Enc> {
 }
 
 impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
-    /// Returns a volume for storing objects
+    /// Returns a volume for storing object bytes
     #[inline]
     pub fn objects(target: T) -> Self {
         Self {
@@ -205,12 +205,6 @@ impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
                 Err(anyhow!("Object {idx} not found").into())
             },
         }
-    }
-
-    /// Returns a reference to the object encoder
-    #[inline]
-    pub fn get_object_encoder(&self) -> &ObjectEncoder {
-        &self.encoder
     }
 }
 

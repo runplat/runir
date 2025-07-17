@@ -120,12 +120,16 @@ impl<P: Packer> MultiRoot<P> {
     ///
     /// Returns an error if the container is read-only
     #[inline]
-    pub fn push_content_with(&mut self, content: &[u8], labels: impl Serialize) -> crate::Result<()> {
+    pub fn push_content_with(
+        &mut self,
+        content: &[u8],
+        labels: impl Serialize,
+    ) -> crate::Result<()> {
         self._push_content(content, Some(labels))
     }
 
     #[inline]
-   fn _push_content(
+    fn _push_content(
         &mut self,
         content: &[u8],
         labels: Option<impl Serialize>,
@@ -143,24 +147,21 @@ impl<P: Packer> MultiRoot<P> {
     }
 
     /// Pushes an object based layer
-    /// 
+    ///
     /// Returns an error if the container is read-only
     #[inline]
-    pub fn push_object<T: Serialize>(
-        &mut self,
-        obj: &T,
-    ) -> crate::Result<()> {
+    pub fn push_object<T: Serialize>(&mut self, obj: &T) -> crate::Result<()> {
         self._push_object(obj, empty_labels())
     }
 
-        /// Pushes an object based layer
-    /// 
+    /// Pushes an object based layer
+    ///
     /// Returns an error if the container is read-only
     #[inline]
     pub fn push_object_with<T: Serialize>(
         &mut self,
         obj: &T,
-        labels: impl Serialize
+        labels: impl Serialize,
     ) -> crate::Result<()> {
         self._push_object(obj, Some(labels))
     }
@@ -243,21 +244,7 @@ impl<P: Packer> MultiRoot<P> {
 
                     if desc.is_packed() {
                         if !vol.borrow().is_obj_unpacked(layer) {
-                            if let Some(packed) = record.layer(layer) {
-                                let packed_digest = Sha256::digest(packed);
-                                if packed_digest.as_slice() != desc.distribution().as_slice() {
-                                    return Err(anyhow!(
-                                        "Packed data does not match recorded distribution digest"
-                                    )
-                                    .into());
-                                }
-
-                                vol.borrow_mut().encode_packed_obj::<P>(layer, packed)?;
-                            } else {
-                                return Err(
-                                    anyhow!("Record does not have packed layer data").into()
-                                );
-                            }
+                            self.unpack(layer, desc)?;
                         }
 
                         // SAFETY:
@@ -450,6 +437,55 @@ impl<P: Packer> MultiRoot<P> {
             State::Build { .. } => {
                 unreachable!("Must convert to this state, or return an error before this arm")
             }
+        }
+    }
+
+    /// Unpacks all packed object layers
+    /// 
+    /// If any layer was already unpacked, it will be skipped (however it's packed digest will still be checked)
+    /// 
+    /// Returns an error if to_run was not called first before calling this function
+    /// 
+    /// Note: Since unpacking is intended to be lazily done, this function maintains the use of interior-mutability
+    #[inline]
+    pub fn unpack_all(&self) -> crate::Result<()> {
+        match &self.state {
+            State::Run { record, .. } => {
+                for (idx, desc) in record.iter_layer_desc()?.enumerate() {
+                    if idx == 0 || idx == 1 {
+                        continue;
+                    }
+
+                    if desc.is_packed() && desc.is_object() {
+                        self.unpack(idx, desc)?;
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(anyhow!("Can only unpack all layers in a run state").into()),
+        }
+    }
+
+    #[inline]
+    fn unpack(&self, layer: usize, desc: impl ILayerDescriptor) -> crate::Result<()> {
+        match &self.state {
+            State::Run { record, vol } => {
+                if let Some(packed) = record.layer(layer) {
+                    let packed_digest = Sha256::digest(packed);
+                    if packed_digest.as_slice() != desc.distribution().as_slice() {
+                        return Err(anyhow!(
+                            "Packed data does not match recorded distribution digest"
+                        )
+                        .into());
+                    }
+
+                    vol.borrow_mut().encode_packed_obj::<P>(layer, packed)?;
+                    Ok(())
+                } else {
+                    return Err(anyhow!("Record does not have packed layer data").into());
+                }
+            }
+            _ => Err(anyhow!("Can only unpack layers in Run mode").into()),
         }
     }
 
@@ -853,9 +889,11 @@ type RuntimeVolume = Volume<MemoryMappedTarget, ObjectEncoder>;
 mod test {
     use super::{Container, GenericPacker};
     use crate::{
+        Namespace,
         util::{
-            container::{ILayerDescriptor, MultiRoot}, PeekExtensions
-        }, Namespace
+            PeekExtensions,
+            container::{ILayerDescriptor, MultiRoot},
+        },
     };
     use toml::toml;
 
@@ -963,14 +1001,48 @@ mod test {
             MultiRoot::<TestPacker>::build(ns.commit("test", b"hello world".as_slice()));
 
         container
-            .push_object(
-                &toml! {
-                    name = "hello"
-                },
-            )
+            .push_object(&toml! {
+                name = "hello"
+            })
             .unwrap();
 
         let run = container.to_run().unwrap();
         assert_eq!("hello", run.object(2).at("name").str().unwrap());
+    }
+
+    #[test]
+    fn test_container_run_state_unpack_all() {
+        type TestPacker = GenericPacker<0, 0>;
+
+        let ns = Namespace::ephemeral();
+        let mut container =
+            MultiRoot::<TestPacker>::build(ns.commit("test", b"hello world".as_slice()));
+
+        container
+            .push_object(&toml! {
+                name = "hello"
+            })
+            .unwrap();
+
+        container
+            .push_object(&toml! {
+                name = "hello2"
+            })
+            .unwrap();
+
+        container
+            .push_object(&toml! {
+                name = "hello3"
+            })
+            .unwrap();
+
+        assert!(container.unpack_all().is_err(), "to_run must be called first");
+
+        let run = container.to_run().unwrap();
+        run.unpack_all().unwrap();
+
+        assert_eq!("hello", run.object(2).at("name").str().unwrap());
+        assert_eq!("hello2", run.object(3).at("name").str().unwrap());
+        assert_eq!("hello3", run.object(4).at("name").str().unwrap());
     }
 }
