@@ -170,6 +170,9 @@ pub trait PeekExtensions<'peek> {
     /// Returns an i64 if the current peek context is a i64 or u64
     fn int(self) -> Option<i64>;
 
+    /// Returns a blob slice if the current peek context is a blob slice
+    fn blob(self) -> Option<&'peek [u8]>;
+
     /// Returns an iterator of peek's from the current item
     ///
     /// If the current value is not a vector, returns None
@@ -198,6 +201,16 @@ pub trait PeekExtensions<'peek> {
     /// ```
     /// Returns `None` if the current position does not point to a value (e.g., an invalid path).
     fn val(self) -> Option<Peek<'peek>>;
+
+    /// Deserializes the current buffer as some object
+    #[inline]
+    fn to_obj<T: Deserialize<'peek>>(self) -> Option<T>
+    where
+        Self: Sized,
+    {
+        self.val()
+            .and_then(|v| flexbuffers::from_slice(v.buffer()).ok())
+    }
 }
 
 impl<'peek> PeekExtensions<'peek> for &'peek Peek<'peek> {
@@ -262,10 +275,15 @@ impl<'peek> PeekExtensions<'peek> for &'peek Peek<'peek> {
     fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
         self.clone().at_dot(path)
     }
-    
+
     #[inline]
     fn val(self) -> Option<Peek<'peek>> {
         Some(self.clone())
+    }
+    
+    #[inline]
+    fn blob(self) -> Option<&'peek [u8]> {
+        self.clone().0.get_blob().ok().map(|b| b.0)
     }
 }
 
@@ -328,13 +346,19 @@ impl<'peek> PeekExtensions<'peek> for Peek<'peek> {
 
     #[inline]
     fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
-        path.trim_matches(['.']).split_terminator(".")
+        path.trim_matches(['.'])
+            .split_terminator(".")
             .fold(Some(self), |acc, p| acc.at(p))
     }
-    
+
     #[inline]
     fn val(self) -> Option<Peek<'peek>> {
         Some(self)
+    }
+    
+    #[inline]
+    fn blob(self) -> Option<&'peek [u8]> {
+        self.0.get_blob().ok().map(|b| b.0)
     }
 }
 
@@ -390,10 +414,15 @@ impl<'peek> PeekExtensions<'peek> for Option<Peek<'peek>> {
     fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
         self.and_then(|r| r.at_dot(path))
     }
-    
+
     #[inline]
     fn val(self) -> Option<Peek<'peek>> {
         self
+    }
+
+    #[inline]
+    fn blob(self) -> Option<&'peek [u8]> {
+        self.and_then(|r| r.blob())
     }
 }
 
@@ -449,10 +478,15 @@ impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
     fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
         self.cloned().and_then(|r| r.at_dot(path))
     }
-    
+
     #[inline]
     fn val(self) -> Option<Peek<'peek>> {
         self.cloned()
+    }
+    
+    #[inline]
+    fn blob(self) -> Option<&'peek [u8]> {
+       self.cloned().and_then(|r| r.blob())
     }
 }
 
@@ -489,6 +523,7 @@ impl<'p> PeekRefExtensions<'p> for PeekRef<'p> {
 }
 
 pub use peek_path::PeekPath;
+use serde::Deserialize;
 
 impl From<&str> for PeekPath {
     fn from(value: &str) -> Self {
@@ -700,7 +735,8 @@ mod peek_path {
                             .find(|n| {
                                 (n.current as *const _ as *const () as usize) == next_ptr
                                     && n.link != node.link
-                                    && if last_n_link ^ node.link == 0 { // we're inside the chain
+                                    && if last_n_link ^ node.link == 0 {
+                                        // we're inside the chain
                                         path.len() < self.depth && n.link != 0 // while we're inside the chain, and still not at the root, lhs can't be 0
                                     } else {
                                         n.link != 0 && last_n_link == 0 // we're not yet inside the chain, so lhs_link must be 0 and n.link can't be the root

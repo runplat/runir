@@ -1,6 +1,12 @@
 pub mod archive;
 pub mod util;
 
+mod error;
+pub use error::Error;
+
+/// Type-alias for a result returned by this crate
+pub type Result<T> = std::result::Result<T, Error>;
+
 mod data;
 pub use data::Data;
 
@@ -190,7 +196,7 @@ impl<'a, T> From<&'a RecordableConfig<'a, T>> for RawRecordable<'a, T> {
 impl<'a, const REF_GUARD: bool, T: serde::Serialize> serde::Serialize
     for Recordable<'a, T, REF_GUARD>
 {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {

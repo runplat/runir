@@ -98,6 +98,12 @@ impl Opts {
         self.storage.contains(Storage::Object)
     }
 
+    /// Returns true if stored data has multiple roots
+    #[inline]
+    pub const fn is_multi(&self) -> bool {
+        self.storage.contains(Storage::Multi)
+    }
+
     /// Returns true if stored data is a manifest
     #[inline]
     pub const fn is_manifest(&self) -> bool {
@@ -178,6 +184,13 @@ impl Opts {
     #[inline]
     pub fn set_object_storage(&mut self, enabled: bool) -> &mut Self {
         self.storage.set(Storage::Object, enabled);
+        self
+    }
+
+    /// Sets the "Multi" flag in storage options
+    #[inline]
+    pub fn set_multi_root_storage(&mut self, enabled: bool) -> &mut Self {
+        self.storage.set(Storage::Multi, enabled);
         self
     }
 
@@ -275,6 +288,8 @@ bitflags::bitflags! {
         const Content = 0;
         /// Indicates that data stored for the record is a serialized object
         const Object = 1;
+        /// Indicates that data stored for the record is a multi-root record
+        const Multi = 2;
     }
 }
 
