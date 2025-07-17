@@ -27,8 +27,6 @@ const fn empty_labels() -> Option<impl Serialize> {
     EMPTY_LABELS
 }
 
-/// Container provides functions for building a "multi" root record
-///
 /// A multi-root record evolves a record w/ a single root, and provides
 /// layers of extensions under the record to enable additional features.
 ///
