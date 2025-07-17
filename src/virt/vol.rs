@@ -1,24 +1,27 @@
 use crate::{
     archive::{Entry, TapeEncoder},
-    store::ArchiveMember,
+    store::ArchiveMember, util::Packer,
 };
+use anyhow::anyhow;
 use asynchronous_codec::{FramedWrite, FramedWriteParts};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{AsyncRead, AsyncSeek, AsyncWrite, SinkExt};
+use generic_array::{typenum::U32, GenericArray};
 use memmap2::{Mmap, MmapMut};
 use parking_lot::Mutex;
 use pin_project_lite::pin_project;
-use tracing::trace;
 use std::{
     io::{Read, Write},
-    ops::{Deref, DerefMut}, sync::OnceLock,
+    ops::{Deref, DerefMut},
+    sync::OnceLock,
 };
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tracing::trace;
 
-use super::{VirtualData, data::BackingData};
+use super::{data::BackingData, ObjectEncoder, VirtualData};
 
 pub const KIB: usize = 2usize.pow(10);
 pub const MIB: usize = 2usize.pow(20);
@@ -40,6 +43,15 @@ pub trait VolumeTarget: AsyncWrite + Unpin + Sync + 'static {
 
     /// Freezes the volume target to ensure it becomes cloneable and read-only
     fn freeze(self) -> std::io::Result<Self::Bytes>;
+
+    /// Returns a readonly view of the volume target
+    fn view<'view>(&'view self) -> &'view [u8];
+
+    /// Returns the remaining number of available bytes
+    fn remaining(&self) -> u64;
+
+    /// Advances the cursor by count
+    fn advance(&mut self, count: usize) -> std::io::Result<()>;
 }
 
 /// Type-alias for a memory-mapped volume target
@@ -132,6 +144,76 @@ pub struct Volume<T, Enc> {
     encoder: Enc,
 }
 
+impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
+    /// Returns a volume for storing objects
+    #[inline]
+    pub fn objects(target: T) -> Self {
+        Self {
+            target,
+            encoder: ObjectEncoder::default(),
+        }
+    }
+
+    /// "Pre-" encode an inline-object
+    /// 
+    /// Returns the index for the inline-object
+    /// 
+    /// Note: This ensures that both sides are in sync and can return useful errors
+    #[inline]
+    pub fn pre_encode_object_inline(&mut self) -> usize {
+        self.encoder.pre_encode_next_inline()
+    }
+
+    /// "Pre-" encodes an object
+    /// 
+    /// Returns an error if the target does not have enough capacity for this object;
+    /// 
+    /// Otherwise, returns the index of the object
+    #[inline]
+    pub fn pre_encode_object(&mut self, expected: GenericArray<u8, U32>, expected_len: u32) -> crate::Result<usize> {
+        let _size_check = self.encoder.total_runtime_size() as u64 + expected_len as u64;
+        if _size_check > self.target.remaining() {
+            Err(anyhow!("Not enough space to pre-encode object").into())
+        } else {
+            self.target.advance(expected_len as usize)?;
+            Ok(self.encoder.pre_encode_object(expected, expected_len))
+        }
+    }
+
+    /// Encodes a packed object
+    /// 
+    /// Returns an error if the unpacked object did not match the expected pre-encoded digest, or if the idx returned an inline object
+    #[inline]
+    pub fn encode_packed_obj<P: Packer>(&mut self, idx: usize, packed: &[u8]) -> crate::Result<()> {
+        self.encoder.encode_packed_object::<P>(idx, packed, self.target.as_mut())
+    }
+
+    /// Returns true if the obj at idx has been marked as unpacked
+    #[inline]
+    pub fn is_obj_unpacked(&self, idx: usize) -> bool {
+        self.encoder.is_unpacked(idx)
+    }
+
+    /// View bytes for an object
+    #[inline]
+    pub fn view_obj(&self, idx: usize) -> crate::Result<&[u8]> {
+        match self.encoder.object(idx) {
+            Some((offset, len)) => {
+                Ok(&self.target.view()[offset as usize..offset as usize + len as usize])
+            },
+            None => {
+                Err(anyhow!("Object {idx} not found").into())
+            },
+        }
+    }
+
+    /// Returns a reference to the object encoder
+    #[inline]
+    pub fn get_object_encoder(&self) -> &ObjectEncoder {
+        &self.encoder
+    }
+}
+
 impl<T: VolumeTarget> Volume<T, TapeEncoder> {
     /// Creates a new volume w/ target for archiving
     #[inline]
@@ -189,7 +271,7 @@ impl<T: VolumeTarget> Volume<T, TapeEncoder> {
     pub fn to_archive(mut self) -> std::io::Result<ArchiveMember> {
         let target = self.target;
         let path = target.path().as_ref().to_path_buf();
-        
+
         let target = target.freeze()?;
         let manifest = self.encoder.stamp_manifest();
 
@@ -240,7 +322,6 @@ impl<T> CursorTarget<T> {
             inner,
         }
     }
-
     /// Returns the inner parts of the cursor_target
     #[inline]
     pub fn into_parts(self) -> (PathBuf, T, usize) {
@@ -282,15 +363,33 @@ impl VolumeTarget for MemoryMappedTarget {
         self.inner.flush()
     }
 
+    #[inline]
     fn path(&self) -> impl AsRef<Path> {
         self.path.as_path()
     }
 
+    #[inline]
     fn freeze(self) -> std::io::Result<Self::Bytes> {
         Ok(FrozenMmap {
             len: self.pos,
             inner: Arc::new(self.inner.make_read_only()?),
         })
+    }
+
+    #[inline]
+    fn view<'view>(&'view self) -> &'view [u8] {
+        &self.inner[..self.pos]
+    }
+    
+    #[inline]
+    fn remaining(&self) -> u64 {
+        self.remaining_capacity() as u64
+    }
+    
+    #[inline]
+    fn advance(&mut self, count: usize) -> std::io::Result<()> {
+        self.pos += count;
+        Ok(())
     }
 }
 
@@ -302,12 +401,30 @@ impl VolumeTarget for InMemoryTarget {
         Ok(())
     }
 
+    #[inline]
     fn path(&self) -> impl AsRef<Path> {
         self.path.as_path()
     }
 
+    #[inline]
     fn freeze(self) -> std::io::Result<Self::Bytes> {
         Ok(self.inner.freeze().slice(..self.pos))
+    }
+
+    #[inline]
+    fn view<'view>(&'view self) -> &'view [u8] {
+        &self.inner[..self.pos]
+    }
+    
+    #[inline]
+    fn remaining(&self) -> u64 {
+        self.remaining_capacity() as u64
+    }
+    
+    #[inline]
+    fn advance(&mut self, count: usize) -> std::io::Result<()> {
+        self.pos += count;
+        Ok(())
     }
 }
 
@@ -505,7 +622,10 @@ mod test {
             },
         ));
 
-        let mut volume = volume.archive_batch(records.drain(..).map(|r| Entry::Record(r)).collect()).await.unwrap();
+        let mut volume = volume
+            .archive_batch(records.drain(..).map(|r| Entry::Record(r)).collect())
+            .await
+            .unwrap();
 
         let member = volume
             .swap_and_archive(new_memory_target("<inline>", MIB))
@@ -590,7 +710,10 @@ mod test {
             },
         ));
 
-        let mut volume = volume.archive_batch(records.drain(..).map(|r| Entry::Record(r)).collect()).await.unwrap();
+        let mut volume = volume
+            .archive_batch(records.drain(..).map(|r| Entry::Record(r)).collect())
+            .await
+            .unwrap();
 
         let member = volume
             .swap_and_archive(
@@ -675,7 +798,10 @@ mod test {
             },
         ));
 
-        let mut volume = volume.archive_batch(records.drain(..).map(|r| Entry::Record(r)).collect()).await.unwrap();
+        let mut volume = volume
+            .archive_batch(records.drain(..).map(|r| Entry::Record(r)).collect())
+            .await
+            .unwrap();
 
         let member = volume
             .swap_and_archive(new_mmap_anon_target("<inline>", MIB).unwrap())

@@ -1,11 +1,16 @@
-use std::marker::PhantomData;
+use std::{cell::RefCell, marker::PhantomData};
 
 use anyhow::anyhow;
 use bytes::{BufMut, Bytes, BytesMut};
+use generic_array::{GenericArray, typenum::U32};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{IRecord, Record};
+use crate::{
+    IRecord, Record,
+    virt::ObjectEncoder,
+    vol::{MemoryMappedTarget, Volume, new_mmap_anon_target},
+};
 
 use super::{Peek, PeekExtensions};
 
@@ -14,6 +19,13 @@ use super::{Peek, PeekExtensions};
 /// - Any content over 128 bytes will be compressed
 /// - The default compression level will be used
 pub type Container = MultiRoot<GenericPacker<128, 0>>;
+
+const EMPTY_LABELS: Option<()> = None::<()>;
+
+#[inline]
+const fn empty_labels() -> Option<impl Serialize> {
+    EMPTY_LABELS
+}
 
 /// Container provides functions for building a "multi" root record
 ///
@@ -38,6 +50,7 @@ pub struct MultiRoot<P> {
 }
 
 enum State {
+    /// Build state allows new layers to be pushed
     Build {
         /// Root record of the container
         root: Record,
@@ -48,9 +61,17 @@ enum State {
         /// Layers being built into this container
         layers: Vec<(BuildDescriptor, BytesMut)>,
     },
+    /// Read-only state collapses all layers into a single record for read-only
     Read {
         /// Record that contains all layers
         record: Record,
+    },
+    /// Run state mounts a read-only record w/ a runtime volume to handle unpacking of any packed layers
+    Run {
+        /// Record that contains all layers
+        record: Record,
+        /// Runtime volume that is able to store any layers that require additional space for unpacking
+        vol: RefCell<RuntimeVolume>,
     },
 }
 
@@ -91,7 +112,20 @@ impl<P: Packer> MultiRoot<P> {
     ///
     /// Returns an error if the container is read-only
     #[inline]
-    pub fn push_content(
+    pub fn push_content(&mut self, content: &[u8]) -> crate::Result<()> {
+        self._push_content(content, empty_labels())
+    }
+
+    /// Pushes a content based layer w/ labels
+    ///
+    /// Returns an error if the container is read-only
+    #[inline]
+    pub fn push_content_with(&mut self, content: &[u8], labels: impl Serialize) -> crate::Result<()> {
+        self._push_content(content, Some(labels))
+    }
+
+    #[inline]
+   fn _push_content(
         &mut self,
         content: &[u8],
         labels: Option<impl Serialize>,
@@ -109,10 +143,33 @@ impl<P: Packer> MultiRoot<P> {
     }
 
     /// Pushes an object based layer
-    ///
+    /// 
     /// Returns an error if the container is read-only
     #[inline]
     pub fn push_object<T: Serialize>(
+        &mut self,
+        obj: &T,
+    ) -> crate::Result<()> {
+        self._push_object(obj, empty_labels())
+    }
+
+        /// Pushes an object based layer
+    /// 
+    /// Returns an error if the container is read-only
+    #[inline]
+    pub fn push_object_with<T: Serialize>(
+        &mut self,
+        obj: &T,
+        labels: impl Serialize
+    ) -> crate::Result<()> {
+        self._push_object(obj, Some(labels))
+    }
+
+    /// Pushes an object based layer optionally w/ labels
+    ///
+    /// Returns an error if the container is read-only
+    #[inline]
+    fn _push_object<T: Serialize>(
         &mut self,
         obj: &T,
         labels: Option<impl Serialize>,
@@ -129,7 +186,7 @@ impl<P: Packer> MultiRoot<P> {
 
                 content_len = ser.view().len();
             }
-            State::Read { .. } => {
+            State::Read { .. } | State::Run { .. } => {
                 return Err(anyhow!("Cannot push content to a read-only container").into());
             }
         }
@@ -178,57 +235,53 @@ impl<P: Packer> MultiRoot<P> {
             State::Read { record } => Ok(flexbuffers::Reader::get_root(record.bytes())
                 .and_then(|root| root.as_vector().idx(layer).get_blob())
                 .and_then(|obj| Ok(Peek::from(flexbuffers::Reader::get_root(obj.0)?)))?),
-        }
-    }
+            State::Run { record, vol } => {
+                if let Some(desc) = self.layer_desc(layer) {
+                    if !desc.is_object() {
+                        return Err(anyhow!("Layer is not an object").into());
+                    }
 
-    /// Returns the labels for a layer
-    ///
-    /// Note: Root and System layers will never have labels
-    ///
-    /// Note: This only supports inline, non-packed objects
-    #[inline]
-    pub fn labels(&self, layer: usize) -> impl PeekExtensions {
-        self.try_labels(layer).ok()
-    }
+                    if desc.is_packed() {
+                        if !vol.borrow().is_obj_unpacked(layer) {
+                            if let Some(packed) = record.layer(layer) {
+                                let packed_digest = Sha256::digest(packed);
+                                if packed_digest.as_slice() != desc.distribution().as_slice() {
+                                    return Err(anyhow!(
+                                        "Packed data does not match recorded distribution digest"
+                                    )
+                                    .into());
+                                }
 
-    /// Returns labels stored for a layer
-    ///
-    /// Returns an error if unable to access labels for layer
-    ///
-    /// Note: This only supports inline, non-packed objects
-    #[inline]
-    pub fn try_labels(&self, layer: usize) -> crate::Result<Peek> {
-        match &self.state {
-            State::Build { layers, .. } => {
-                if layer == 0 {
-                    return Err(anyhow!("Root does not have labels").into());
+                                vol.borrow_mut().encode_packed_obj::<P>(layer, packed)?;
+                            } else {
+                                return Err(
+                                    anyhow!("Record does not have packed layer data").into()
+                                );
+                            }
+                        }
+
+                        // SAFETY:
+                        // - `vol` is backed by a stable memory region (mmap), and `.as_ptr()`
+                        //   returns a valid pointer to the underlying RuntimeVolume.
+                        // - We ensure that any mutable borrow (e.g., `encode_packed_obj`) occurs
+                        //   strictly *before* this call, and is fully dropped prior to dereferencing.
+                        // - This block is only reached if the layer is already unpacked (or has just
+                        //   been unpacked), so the pointer is valid and point
+                        let obj =
+                            unsafe { vol.as_ptr().as_ref().expect("should be a runtime volume") }
+                                .view_obj(layer)?;
+
+                        Ok(Peek::from(flexbuffers::Reader::get_root(obj)?))
+                    } else {
+                        if let Some(inline) = record.layer(layer) {
+                            Ok(Peek::from(flexbuffers::Reader::get_root(inline)?))
+                        } else {
+                            Err(anyhow!("Record does not have packed layer data").into())
+                        }
+                    }
+                } else {
+                    return Err(anyhow!("Layer is unknown to record").into());
                 }
-
-                if layer == 1 {
-                    return Err(anyhow!("System layer does not have labels").into());
-                }
-
-                layers
-                    .get(layer - 2)
-                    .map(|l| {
-                        Ok(Peek::from(flexbuffers::Reader::get_root(
-                            l.0.labels.as_slice(),
-                        )?))
-                    })
-                    .unwrap_or(Err(anyhow!("Layer not found").into()))
-            }
-            State::Read { record } => {
-                let system = flexbuffers::Reader::get_root(record.bytes())
-                    .and_then(|root| root.as_vector().idx(1).get_blob())
-                    .and_then(|obj| Ok(Peek::from(flexbuffers::Reader::get_root(obj.0)?)))?;
-
-                let labels = system
-                    .as_vector()
-                    .idx(layer)
-                    .as_map()
-                    .idx("labels")
-                    .as_blob();
-                Ok(Peek::from(flexbuffers::Reader::get_root(labels.0)?))
             }
         }
     }
@@ -237,7 +290,7 @@ impl<P: Packer> MultiRoot<P> {
     ///
     /// Returns an error if the current state is already in read-only mode
     #[inline]
-    pub fn finish(self) -> crate::Result<Self> {
+    pub fn to_read_only(self) -> crate::Result<Self> {
         match self.state {
             State::Build { root, layers, .. } => {
                 // 1) Build system layer
@@ -252,8 +305,11 @@ impl<P: Packer> MultiRoot<P> {
                     layer.push("is_object", desc.is_object());
                     layer.push("is_packed", desc.is_packed());
                     layer.push("labels", flexbuffers::Blob(desc.labels.as_slice()));
-                    layer.push("content", desc.content().as_slice());
-                    layer.push("distribution", desc.distribution().as_slice());
+                    layer.push("content", flexbuffers::Blob(desc.content().as_slice()));
+                    layer.push(
+                        "distribution",
+                        flexbuffers::Blob(desc.distribution().as_slice()),
+                    );
                     layer.push("runtime_size", desc.runtime_size());
                 }
                 sys.end_vector();
@@ -263,7 +319,6 @@ impl<P: Packer> MultiRoot<P> {
                 let mut multi_root = builder.start_vector();
                 multi_root.push(flexbuffers::Blob(root.bytes()));
                 multi_root.push(flexbuffers::Blob(system_layer.as_slice()));
-
                 for (.., bytes) in layers.iter() {
                     multi_root.push(flexbuffers::Blob(bytes.as_ref()));
                 }
@@ -278,6 +333,123 @@ impl<P: Packer> MultiRoot<P> {
                 })
             }
             State::Read { .. } => Ok(self),
+            State::Run { record, .. } => Ok(Self {
+                state: State::Read { record },
+                _p: PhantomData,
+            }),
+        }
+    }
+
+    /// Returns a descriptor for a layer
+    #[inline]
+    pub fn layer_desc(&self, layer: usize) -> Option<impl ILayerDescriptor> {
+        match &self.state {
+            State::Build { layers, .. } => {
+                if layer == 0 {
+                    return None;
+                }
+
+                if layer == 1 {
+                    return None;
+                }
+
+                layers.get(layer - 2).map(|v| LayerDesc::Build(&v.0))
+            }
+            State::Read { record } | State::Run { record, .. } => {
+                let system = flexbuffers::Reader::get_root(record.bytes())
+                    .and_then(|root| root.as_vector().idx(1).get_blob())
+                    .and_then(|obj| Ok(Peek::from(flexbuffers::Reader::get_root(obj.0)?)))
+                    .ok()?;
+
+                system
+                    .get_vector()
+                    .ok()
+                    .map(|v| v.idx(layer))
+                    .map(Peek::from)
+                    .map(LayerDesc::Read)
+            }
+        }
+    }
+
+    /// Prepares the multi-root for runtime
+    ///
+    /// Note: This state-transition is only required when a multi-root record has packed layers
+    #[inline]
+    pub fn to_run(mut self) -> crate::Result<Self> {
+        if matches!(self.state, State::Build { .. }) {
+            self = self.to_read_only()?;
+        }
+
+        if matches!(self.state, State::Run { .. }) {
+            return Ok(self);
+        }
+
+        match self.state {
+            State::Read { record } => {
+                // 1) Figure out how much runtime space we'll need for any packed layers
+                let required_size: u64 = record
+                    .iter_layer_desc()?
+                    .filter(|l| l.is_packed())
+                    .map(|l| l.runtime_size())
+                    .sum();
+
+                if required_size == 0 {
+                    return Err(anyhow!("Multi-root record is completely inline").into());
+                }
+
+                // Not specifically required, but good hygiene
+                let alignment = required_size % 512;
+                let required_size = required_size + (512 - alignment);
+
+                let target = new_mmap_anon_target(
+                    format!("objects/{}", record.uuid().simple()),
+                    required_size as usize,
+                )?;
+
+                let mut objects = RuntimeVolume::objects(target);
+
+                for (idx, desc) in record.iter_layer_desc()?.enumerate() {
+                    if idx == 0 || idx == 1 {
+                        objects.pre_encode_object_inline();
+                        continue;
+                    }
+
+                    if let Some(layer) = record.layer(idx) {
+                        let actual = Sha256::digest(layer);
+                        if actual.as_slice() != desc.distribution().as_slice() {
+                            return Err(anyhow!(
+                                "Layer {idx} digest did not match, expected: {}, actual: {}",
+                                hex::encode(desc.distribution()),
+                                hex::encode(actual)
+                            )
+                            .into());
+                        }
+                    } else {
+                        return Err(anyhow!("Record data is incomplete, cannot").into());
+                    }
+
+                    if desc.is_packed() && desc.is_object() {
+                        let _idx = objects
+                            .pre_encode_object(*desc.content(), desc.runtime_size() as u32)?;
+                        debug_assert_eq!(idx, _idx);
+                    } else {
+                        let _idx = objects.pre_encode_object_inline();
+                        debug_assert_eq!(idx, _idx);
+                    }
+                }
+
+                Ok(Self {
+                    state: State::Run {
+                        record,
+                        vol: RefCell::new(objects),
+                    },
+                    _p: PhantomData,
+                })
+            }
+            State::Run { .. } => unreachable!("Must have returned early"),
+            State::Build { .. } => {
+                unreachable!("Must convert to this state, or return an error before this arm")
+            }
         }
     }
 
@@ -332,7 +504,7 @@ impl<P: Packer> MultiRoot<P> {
                     ));
                 }
             }
-            State::Read { .. } => {
+            State::Read { .. } | State::Run { .. } => {
                 return Err(anyhow!("Cannot push content to a read-only container").into());
             }
         }
@@ -408,6 +580,116 @@ mod private {
     }
 }
 
+trait IContainer<'p>
+where
+    Self: 'p,
+{
+    fn layer(&'p self, idx: usize) -> Option<&'p [u8]>;
+
+    fn iter_layer_desc(&self) -> crate::Result<impl Iterator<Item = impl ILayerDescriptor>>;
+}
+
+impl<'p> IContainer<'p> for Record {
+    fn layer(&'p self, idx: usize) -> Option<&'p [u8]> {
+        if !self.opts().is_multi() {
+            return None;
+        }
+
+        let root = flexbuffers::Reader::get_root(self.bytes()).ok()?;
+
+        let blob = root.as_vector().idx(idx).get_blob().ok()?;
+
+        Some(blob.0)
+    }
+
+    fn iter_layer_desc(&self) -> crate::Result<impl Iterator<Item = impl ILayerDescriptor>> {
+        if !self.opts().is_multi() {
+            return Err(anyhow!("Record is not a multi-root record").into());
+        }
+
+        let system = flexbuffers::Reader::get_root(self.bytes())
+            .and_then(|root| root.as_vector().idx(1).get_blob())
+            .and_then(|obj| Ok(Peek::from(flexbuffers::Reader::get_root(obj.0)?)))?;
+
+        if let Some(iter) = system.iter() {
+            Ok(iter.map(|p| LayerDesc::Read(p)))
+        } else {
+            Err(anyhow!("System layer was in an unexpected format").into())
+        }
+    }
+}
+
+/// Trait for types that are able to describe a layer
+pub trait ILayerDescriptor {
+    /// Total required-size at runtime for this layer
+    fn runtime_size(&self) -> u64;
+
+    /// Returns the "distribution" digest of this layer
+    fn distribution(&self) -> &GenericArray<u8, U32>;
+
+    /// Returns the "content" digest of this layer
+    fn content(&self) -> &GenericArray<u8, U32>;
+
+    /// Returns true if the layer has been packed
+    fn is_packed(&self) -> bool;
+
+    /// Returns true if the layer is an object
+    fn is_object(&self) -> bool;
+
+    /// Returns labels stored w/ this layer
+    fn labels<'a: 'b, 'b>(&'a self) -> Option<Peek<'b>>;
+}
+
+enum LayerDesc<'p> {
+    Build(&'p BuildDescriptor),
+    Read(Peek<'p>),
+}
+
+impl<'p> ILayerDescriptor for LayerDesc<'p> {
+    fn runtime_size(&self) -> u64 {
+        match self {
+            LayerDesc::Build(build_descriptor) => build_descriptor.runtime_size(),
+            LayerDesc::Read(peek) => peek.runtime_size(),
+        }
+    }
+
+    fn distribution(&self) -> &GenericArray<u8, U32> {
+        match self {
+            LayerDesc::Build(build_descriptor) => build_descriptor.distribution(),
+            LayerDesc::Read(peek) => peek.distribution(),
+        }
+    }
+
+    fn content(&self) -> &GenericArray<u8, U32> {
+        match self {
+            LayerDesc::Build(build_descriptor) => build_descriptor.content(),
+            LayerDesc::Read(peek) => peek.content(),
+        }
+    }
+
+    fn is_packed(&self) -> bool {
+        match self {
+            LayerDesc::Build(build_descriptor) => build_descriptor.is_packed(),
+            LayerDesc::Read(peek) => peek.is_packed(),
+        }
+    }
+
+    fn is_object(&self) -> bool {
+        match self {
+            LayerDesc::Build(build_descriptor) => build_descriptor.is_object(),
+            LayerDesc::Read(peek) => peek.is_object(),
+        }
+    }
+
+    fn labels<'a: 'b, 'b>(&'a self) -> Option<Peek<'b>> {
+        match self {
+            LayerDesc::Build(build_descriptor) => build_descriptor.labels(),
+            LayerDesc::Read(peek) => peek.labels(),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct BuildDescriptor {
     /// Content digest of the layer
     ///
@@ -427,41 +709,86 @@ struct BuildDescriptor {
     is_object: bool,
 }
 
-impl BuildDescriptor {
+const EMPTY_DIGEST: GenericArray<u8, U32> = GenericArray::from_array([0; 32]);
+
+impl<'p> ILayerDescriptor for Peek<'p> {
+    fn runtime_size(&self) -> u64 {
+        self.at("runtime_size").u64().unwrap_or_default()
+    }
+
+    fn distribution(&self) -> &GenericArray<u8, U32> {
+        self.at("distribution")
+            .blob()
+            .map(|b| GenericArray::<u8, U32>::from_slice(b))
+            .unwrap_or(&EMPTY_DIGEST)
+    }
+
+    fn content(&self) -> &GenericArray<u8, U32> {
+        self.at("content")
+            .blob()
+            .map(|b| GenericArray::<u8, U32>::from_slice(b))
+            .unwrap_or(&EMPTY_DIGEST)
+    }
+
+    fn is_packed(&self) -> bool {
+        self.at("is_packed").bool().unwrap_or_default()
+    }
+
+    fn is_object(&self) -> bool {
+        self.at("is_object").bool().unwrap_or_default()
+    }
+
+    fn labels<'a: 'b, 'b>(&'a self) -> Option<Peek<'b>> {
+        let labels = self.at("labels").blob()?;
+        Some(Peek::from(flexbuffers::Reader::get_root(labels).ok()?))
+    }
+}
+
+impl ILayerDescriptor for BuildDescriptor {
     /// Total required-size at runtime for this layer
     #[inline]
-    pub fn runtime_size(&self) -> u64 {
+    fn runtime_size(&self) -> u64 {
         self.packed.as_ref().map(|p| p.unpacked).unwrap_or(self.len)
     }
 
     /// Returns the "distribution" digest of this layer
     #[inline]
-    pub fn distribution(&self) -> &[u8; 32] {
+    fn distribution(&self) -> &GenericArray<u8, U32> {
         self.packed
             .as_ref()
             .map(|p| &p.digest)
             .unwrap_or(&self.content)
+            .into()
     }
 
     /// Returns the "content" digest of this layer
     #[inline]
-    pub fn content(&self) -> &[u8; 32] {
-        &self.content
+    fn content(&self) -> &GenericArray<u8, U32> {
+        (&self.content).into()
     }
 
     /// Returns true if the layer has been packed
     #[inline]
-    pub fn is_packed(&self) -> bool {
+    fn is_packed(&self) -> bool {
         self.packed.is_some()
     }
 
     /// Returns true if the layer is an object
     #[inline]
-    pub fn is_object(&self) -> bool {
+    fn is_object(&self) -> bool {
         self.is_object
+    }
+
+    /// Returns labels for the this layer
+    #[inline]
+    fn labels<'a: 'b, 'b>(&'a self) -> Option<Peek<'b>> {
+        flexbuffers::Reader::get_root(self.labels.as_slice())
+            .ok()
+            .map(Peek::from)
     }
 }
 
+#[derive(Clone)]
 struct Packed {
     /// Digest of the packed content
     digest: [u8; 32],
@@ -473,28 +800,28 @@ impl<P> IRecord for MultiRoot<P> {
     fn ns_chk(&self) -> u64 {
         match &self.state {
             State::Build { root, .. } => root.ns_chk(),
-            State::Read { record } => record.ns_chk(),
+            State::Read { record } | State::Run { record, .. } => record.ns_chk(),
         }
     }
 
     fn uuid(&self) -> uuid::Uuid {
         match &self.state {
             State::Build { root, .. } => root.uuid(),
-            State::Read { record } => record.uuid(),
+            State::Read { record } | State::Run { record, .. } => record.uuid(),
         }
     }
 
     fn opts(&self) -> &crate::Opts {
         match &self.state {
             State::Build { root, .. } => root.opts(),
-            State::Read { record } => record.opts(),
+            State::Read { record } | State::Run { record, .. } => record.opts(),
         }
     }
 
     fn bytes(&self) -> &[u8] {
         match &self.state {
             State::Build { root, .. } => root.bytes(),
-            State::Read { record } => record.bytes(),
+            State::Read { record } | State::Run { record, .. } => record.bytes(),
         }
     }
 
@@ -503,7 +830,7 @@ impl<P> IRecord for MultiRoot<P> {
             // While in the build state, layers are not active to maintain idempotency
             State::Build { root, .. } => root.peek().val(),
             // The canonical record when reading a container is always the root
-            State::Read { record } => record
+            State::Read { record } | State::Run { record, .. } => record
                 .peek()
                 .val()
                 .map(|p| p.as_vector().idx(0))
@@ -514,15 +841,22 @@ impl<P> IRecord for MultiRoot<P> {
     fn to_record(&self) -> Record {
         match &self.state {
             State::Build { root, .. } => root.to_record(),
-            State::Read { record } => record.to_record(),
+            State::Read { record } | State::Run { record, .. } => record.to_record(),
         }
     }
 }
 
+/// Type-alias for a "Runtime" volume
+type RuntimeVolume = Volume<MemoryMappedTarget, ObjectEncoder>;
+
 #[cfg(test)]
 mod test {
-    use super::Container;
-    use crate::{Namespace, util::PeekExtensions};
+    use super::{Container, GenericPacker};
+    use crate::{
+        util::{
+            container::{ILayerDescriptor, MultiRoot}, PeekExtensions
+        }, Namespace
+    };
     use toml::toml;
 
     #[test]
@@ -532,22 +866,22 @@ mod test {
         let mut container = Container::build(ns.commit("test", b"hello world".as_slice()));
 
         container
-            .push_content(
+            .push_content_with(
                 b"good bye world".as_slice(),
-                Some(toml! {
+                toml! {
                     name = "test"
-                }),
+                },
             )
             .unwrap();
 
         container
-            .push_object(
+            .push_object_with(
                 &toml! {
                     message = "hello world"
                 },
-                Some(toml! {
+                toml! {
                     name = "test2"
-                }),
+                },
             )
             .unwrap();
 
@@ -562,15 +896,27 @@ mod test {
 
         assert_eq!(
             "test2",
-            container.try_labels(3).unwrap().at("name").str().unwrap()
+            container
+                .layer_desc(3)
+                .unwrap()
+                .labels()
+                .at("name")
+                .str()
+                .unwrap()
         );
 
         assert_eq!(
             "test",
-            container.try_labels(2).unwrap().at("name").str().unwrap()
+            container
+                .layer_desc(2)
+                .unwrap()
+                .labels()
+                .at("name")
+                .str()
+                .unwrap()
         );
 
-        let container = container.finish().unwrap();
+        let container = container.to_read_only().unwrap();
         let obj = container.try_object(3).unwrap();
 
         assert_eq!(
@@ -582,12 +928,49 @@ mod test {
 
         assert_eq!(
             "test2",
-            container.try_labels(3).unwrap().at("name").str().unwrap()
+            container
+                .layer_desc(3)
+                .unwrap()
+                .labels()
+                .at("name")
+                .str()
+                .unwrap()
         );
 
         assert_eq!(
             "test",
-            container.try_labels(2).unwrap().at("name").str().unwrap()
+            container
+                .layer_desc(2)
+                .unwrap()
+                .labels()
+                .at("name")
+                .str()
+                .unwrap()
         );
+
+        assert!(
+            container.to_run().is_err(),
+            "container should not have any packed layers"
+        );
+    }
+
+    #[test]
+    fn test_container_run_state() {
+        type TestPacker = GenericPacker<0, 0>;
+
+        let ns = Namespace::ephemeral();
+        let mut container =
+            MultiRoot::<TestPacker>::build(ns.commit("test", b"hello world".as_slice()));
+
+        container
+            .push_object(
+                &toml! {
+                    name = "hello"
+                },
+            )
+            .unwrap();
+
+        let run = container.to_run().unwrap();
+        assert_eq!("hello", run.object(2).at("name").str().unwrap());
     }
 }

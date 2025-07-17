@@ -2,8 +2,7 @@ use parking_lot::RwLock;
 use tracing::debug;
 
 use crate::{
-    Record, Storage, Store, VecIndex,
-    store::{ArchiveMember, StoreArchive},
+    store::{ArchiveMember, StoreArchive}, Record, Storage, Store, VecIndex
 };
 use std::{
     ops::Deref,
@@ -59,6 +58,8 @@ pub struct State {
 pub enum Snapshot {
     /// Default from work_dir
     Default,
+    /// Staged records
+    Staging,
     /// Imported from a pack
     Imported(PathBuf),
 }
@@ -112,6 +113,7 @@ impl State {
         //     }
         // }
 
+        // Only store the new snapshot if it isn't empty
         if !snapshot.storage().is_empty() {
             self.snapshots.insert(Snapshot::Default, Arc::new(snapshot));
         }

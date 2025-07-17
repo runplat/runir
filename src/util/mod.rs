@@ -1,5 +1,6 @@
 mod container;
 pub use container::Container;
+pub(crate) use container::Packer;
 
 mod peek;
 pub use peek::Peek;
