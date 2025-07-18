@@ -986,6 +986,8 @@ type RuntimeVolume = Volume<MemoryMappedTarget, ObjectEncoder>;
 
 #[cfg(test)]
 mod test {
+    use std::io::Read;
+
     use super::{Container, GenericPacker};
     use crate::{
         Namespace,
@@ -1167,5 +1169,40 @@ mod test {
         read.fetch_content(2, &mut dest).unwrap();
 
         assert_eq!(b"existing datahello world", dest.as_ref());
+    }
+
+    #[test]
+    fn test_container_reader() {
+        type TestPacker = GenericPacker<0, 0>;
+
+        let ns = Namespace::ephemeral();
+        let mut container =
+            MultiRoot::<TestPacker>::build(ns.commit("test", b"hello world".as_slice()));
+
+        container.push_content(b"hello world").unwrap();
+
+        let read = container.to_read_only().unwrap();
+
+        let mut reader = read.reader(2).unwrap();
+        let mut string = String::new();
+        reader.read_to_string(&mut string).unwrap();
+
+        assert_eq!("hello world", string);
+    }
+
+    #[test]
+    fn test_container_bytes() {
+        type TestPacker = GenericPacker<0, 0>;
+
+        let ns = Namespace::ephemeral();
+        let mut container =
+            MultiRoot::<TestPacker>::build(ns.commit("test", b"hello world".as_slice()));
+
+        container.push_content(b"hello world").unwrap();
+
+        let read = container.to_read_only().unwrap();
+
+        let bytes = read.bytes(2).unwrap();
+        assert_ne!(b"hello world", bytes, "should still be packed");
     }
 }
