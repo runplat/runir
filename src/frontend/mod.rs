@@ -42,7 +42,7 @@ pub trait Frontend {
         Self: Sized,
     {
         let mut state = state::State::default();
-        state.set_frontend::<Self>(Self::next_instance_id());
+        state.set_identity::<Self>(Self::next_instance_id());
 
         let shared = state::SharedState::from(state);
         Self::from_shared(shared)

@@ -21,7 +21,7 @@ type RecordSnapshot = Arc<VecIndex<Record>>;
 /// and also to allow for atomically-replacing the snapshot when needed.
 type SnapshotCell = Arc<RwLock<Pin<Box<RecordSnapshot>>>>;
 
-/// Wrapper over State to allow cloning
+/// Wrapper over State to allow cloning/sharing
 pub struct SharedState {
     pub(crate) state: Arc<State>,
     snapshot: SnapshotCell,
@@ -36,22 +36,30 @@ impl Default for SharedState {
     }
 }
 
-/// Common state used w/ all frontends
+/// Common frontend state, can be used by one or more frontend implementations.
+/// 
+/// On it's own State is mostly thread-safe, however sharing between threads should use the "SharedState" wrapper
+/// 
+/// - Manages record lifecycle (staging, promoting, deletion, indexing, saving, loading, etc)
+/// - Manages record archive members produced by store/worker system
+/// - Manages record "indexes" and "snapshots"
+///     - Each archive member produces an index
+///     - A snapshot is a merged view of all indexes
 pub struct State {
-    /// Name of the state frontend
-    frontend: &'static str,
-    /// Instance ID (WIP)
-    instance: usize,
     /// Store only holds a reference to a queue, and a work_dir
     ///
     /// Most of the "store" logic happens in Worker and Record respectively
     store: Store,
-    /// Map of indexes
-    indexes: dashmap::DashMap<PathBuf, VecIndex<Record>>,
     /// Active archive members
     members: dashmap::DashMap<PathBuf, ArchiveMember>,
+    /// Map of indexes
+    indexes: dashmap::DashMap<PathBuf, VecIndex<Record>>,
     /// Map of stored snapshots
     snapshots: dashmap::DashMap<Snapshot, RecordSnapshot>,
+    /// Name of the state frontend
+    frontend: &'static str,
+    /// Instance ID (WIP)
+    instance: usize,
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
@@ -65,19 +73,23 @@ pub enum Snapshot {
 }
 
 impl State {
-    /// Set the frontend name for this state
+    /// Sets the "identity" parameters for this state, which are the main frontend name and instance no
     #[inline]
-    pub fn set_frontend<F: Frontend>(&mut self, instance: usize) {
+    pub fn set_identity<F: Frontend>(&mut self, instance: usize) {
         self.frontend = F::NAME;
         self.instance = instance;
         self.store.set_archive(F::NAME);
     }
 
-    /// Asynchronously flushes all pending archive-members in state
+    /// Reduces all records from all archive members found in Store into a single snapshot
+    /// 
+    /// Archive Member -> Index => Snapshot
     #[inline]
-    pub fn flush(&self) -> std::io::Result<()> {
+    pub fn reduce(&self) -> std::io::Result<()> {
+        // Store::archive() will flush all pending archive members into a StoreArchive
         let store_archive = self.store.archive();
 
+        // Process each member to produce a new "index" for each record
         for member in store_archive.members() {
             let path = member.path().to_path_buf();
             debug!("packing member from {path:?}");
@@ -92,16 +104,14 @@ impl State {
             for r in records {
                 index.index(r.clone());
             }
-
-            // Ensure empty indexes are never stored
             self.members.insert(path, member.clone());
         }
 
-        let mut snapshot = VecIndex::default();
+        let mut next_snapshot = VecIndex::default();
 
         for i in self.indexes.iter() {
             for r in i.storage().iter_records() {
-                snapshot.index(r.clone());
+                next_snapshot.index(r.clone());
             }
         }
 
@@ -113,22 +123,11 @@ impl State {
         //     }
         // }
 
-        // Only store the new snapshot if it isn't empty
-        if !snapshot.storage().is_empty() {
-            self.snapshots.insert(Snapshot::Default, Arc::new(snapshot));
+        // Only store the next snapshot if it isn't empty
+        if !next_snapshot.storage().is_empty() {
+            self.snapshots.insert(Snapshot::Default, Arc::new(next_snapshot));
         }
         Ok(())
-    }
-
-    /// Refreshes the indes of a target index from the data stored by an archive_member
-    ///
-    /// Returns true if data was found from the archive_member
-    #[inline]
-    pub fn refresh_index(&self, target: &mut VecIndex<Record>) {
-        for member_index in self.indexes.iter() {
-            debug!("Updating index from member {:?}", member_index.key());
-            target.refresh(&member_index);
-        }
     }
 
     /// Returns a stored snapshot
@@ -147,7 +146,7 @@ impl State {
             .collect::<Vec<_>>();
 
         let archive = StoreArchive {
-            archived,
+            members: archived,
             output_dir: output_dir.into(),
             archive: self.frontend,
         };
@@ -196,7 +195,7 @@ impl State {
         let restored = StoreArchive::unpack(&frontend_tar).await?;
 
         let mut state = Self::default();
-        state.set_frontend::<F>(F::next_instance_id());
+        state.set_identity::<F>(F::next_instance_id());
         state.store = Store::work_dir(&work_dir);
 
         let mut snapshot = VecIndex::<Record>::default();

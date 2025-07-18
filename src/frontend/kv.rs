@@ -281,7 +281,7 @@ impl KeyValue {
         self.worker.sync()?.await?;
 
         // Flushes all work to disk-backed stores and updates indicies
-        self.shared.state.flush()?;
+        self.shared.state.reduce()?;
         Ok(())
     }
 

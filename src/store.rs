@@ -105,7 +105,7 @@ impl Store {
         }
 
         StoreArchive {
-            archived,
+            members: archived,
             output_dir: self.work_dir.clone(),
             archive: self.archive,
         }
@@ -116,7 +116,7 @@ impl Store {
 #[derive(Debug)]
 pub struct StoreArchive {
     /// List of worker archives in the output dir
-    pub(crate) archived: Vec<ArchiveMember>,
+    pub(crate) members: Vec<ArchiveMember>,
     /// Output directory of store files
     pub(crate) output_dir: PathBuf,
     /// Name of the archive
@@ -384,7 +384,7 @@ impl StoreArchive {
         }
 
         Ok(Self {
-            archived: members,
+            members,
             output_dir,
             archive: intern_str(&archive),
         })
@@ -439,20 +439,36 @@ impl StoreArchive {
 
         let mut total_appended = 0;
         let mut cleanup = vec![];
-        for member in self.archived.iter() {
+
+        /*
+            # Pack Procedure
+            - A store archive consists of "members", where each member is in charge of bringing a collection of records
+            - Packing involves merging the state of all members
+            - While processing a member, a new "stamp" is prepared, which is just a manifest of records to include with the packed archive
+            - Member's also have a stamp when they are created which is used to enumerate the records (which is why a new stamp must be created)
+
+            ## Append Mode
+            - When packing into an existing store, this function enters "append" mode
+            - "append" mode does not modify any existing records, and instead appends only "new" records into the store
+            - A "dedupe" check is done by first recording the existing records in the archive
+                - A duplicate record is considered to be an existing key/content pair (Note: key is the numeric form of a label)
+            - And while processing each member, excluding any duplicated records from being appended to the archive
+         */
+        for member in self.members.iter() {
+            // Prepares a clean slate for the next "stamp"
             writer.encoder_mut().next_stamp();
             let records = member.get_records()?;
             let including = records
                 .iter()
                 .filter(|r| {
                     let dedupe_check = (r.uuid().as_u64_pair().0, r.data.digest().finalize());
-                    let new_rec = existing.insert(dedupe_check);
+                    let new_record = existing.insert(dedupe_check);
                     debug!(
-                        inserting = new_rec,
+                        inserting = new_record,
                         check = format!("{:x}:{}", dedupe_check.0, hex::encode(dedupe_check.1)),
-                        "dedupe"
+                        "dedupe_filter"
                     );
-                    new_rec
+                    new_record
                 })
                 .map(|r| Entry::Record(r.clone()));
 
@@ -464,18 +480,22 @@ impl StoreArchive {
 
             writer.flush().await?;
 
+            // If no records were appended, do not include this stamp
             if count > 0 {
                 let manifest = writer.encoder_mut().stamp_manifest();
                 total_appended += count;
                 writer.send(Entry::Record(manifest.record)).await?;
             }
 
+            // Note the member's "path"
             cleanup.push(member.path());
         }
 
+        // Complete the archive
         writer.feed(Entry::Zeros).await?;
         writer.close().await?;
 
+        // If building a new archive, must rename the transient to the completed dest
         if !append_mode {
             std::fs::rename(dest, &completed_dest)?;
         }
@@ -492,7 +512,7 @@ impl StoreArchive {
     /// Returns members in the store archive
     #[inline]
     pub fn members(&self) -> impl Iterator<Item = &ArchiveMember> {
-        self.archived.iter()
+        self.members.iter()
     }
 }
 
