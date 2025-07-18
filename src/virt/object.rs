@@ -80,7 +80,7 @@ impl ObjectEncoder {
         }
 
         if let Some(Stored::Object { digest, offset, len }) = self.objects.get(idx) {
-            P::unpack_bytes(packed, &mut target[*offset as usize..*offset as usize + *len as usize])?;
+            P::unpack(packed, &mut target[*offset as usize..*offset as usize + *len as usize])?;
 
             let _item = Sha256::digest(&target[*offset as usize..*offset as usize + *len as usize]);
             if _item.as_slice() != digest.as_slice() {

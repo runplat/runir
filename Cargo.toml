@@ -45,6 +45,7 @@ serde_yaml = { version = "0.9.34", optional = true }
 anyhow = "1.0.98"
 zstd = "0.13.3"
 generic-array = "1.2.0"
+either = "1.15.0"
 
 [[bin]]
 name = "runir"

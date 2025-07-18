@@ -1,9 +1,13 @@
-use std::{cell::RefCell, marker::PhantomData};
+use std::{
+    cell::RefCell,
+    io::{Cursor, Read},
+    marker::PhantomData,
+};
 
 use anyhow::anyhow;
 use bytes::{BufMut, Bytes, BytesMut};
 use generic_array::{GenericArray, typenum::U32};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -193,6 +197,104 @@ impl<P: Packer> MultiRoot<P> {
         self.push(content_len, content.finalize().into(), labels, true)
     }
 
+    /// Fetches layer content and puts it into buf
+    ///
+    /// If the content was packed, will unpack the content before putting it into buf
+    #[inline]
+    pub fn fetch_content(&self, layer: usize, buf: &mut BytesMut) -> crate::Result<()> {
+        match &self.state {
+            State::Build { root, layers, .. } => {
+                if layer == 0 {
+                    buf.put(root.bytes());
+                    Ok(())
+                } else if layer == 1 {
+                    Err(anyhow!("Cannot return bytes for system layer in Build state").into())
+                } else {
+                    let (desc, packed) = layers
+                        .get(layer - 2)
+                        .map(Ok::<_, crate::Error>)
+                        .unwrap_or_else(|| Err(anyhow!("Layer does not exist").into()))?;
+
+                    if desc.is_packed() {
+                        buf.reserve(desc.runtime_size() as usize);
+
+                        let split_off = buf.len();
+                        buf.put_bytes(0, desc.runtime_size() as usize);
+                        let mut dest = buf.split_off(split_off);
+
+                        P::unpack(&packed, &mut dest)?;
+                        buf.unsplit(dest);
+                    } else {
+                        buf.put(packed.as_ref());
+                    }
+                    Ok(())
+                }
+            }
+            State::Read { record } | State::Run { record, .. } => {
+                let desc = record.layer_desc(layer)?;
+                if let Some(packed) = record.layer(layer) {
+                    if desc.is_packed() {
+                        buf.reserve(desc.runtime_size() as usize);
+
+                        let split_off = buf.len();
+                        buf.put_bytes(0, desc.runtime_size() as usize);
+                        let mut dest = buf.split_off(split_off);
+
+                        P::unpack(packed, &mut dest)?;
+                        buf.unsplit(dest);
+                    } else {
+                        buf.put(packed);
+                    }
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    /// Returns bytes for a layer
+    ///
+    /// Returns an error if the layer could not be found
+    ///
+    /// Note: If the layer is packed, this function does not unpack the layer
+    #[inline]
+    pub fn bytes(&self, layer: usize) -> crate::Result<&[u8]> {
+        match &self.state {
+            State::Build { root, layers, .. } => {
+                if layer == 0 {
+                    Ok(root.bytes())
+                } else if layer == 1 {
+                    Err(anyhow!("Cannot return bytes for system layer in Build state").into())
+                } else {
+                    layers
+                        .get(layer - 2)
+                        .map(|l| l.1.as_ref())
+                        .map(Ok)
+                        .unwrap_or_else(|| Err(anyhow!("Layer does not exist").into()))
+                }
+            }
+            State::Read { record } | State::Run { record, .. } => match record.layer(layer) {
+                Some(layer) => Ok(layer),
+                None => Err(anyhow!("Layer {layer} does not exist").into()),
+            },
+        }
+    }
+
+    /// Returns a reader for a stored layer
+    #[inline]
+    pub fn reader(&self, layer: usize) -> crate::Result<impl Read> {
+        let bytes = self.bytes(layer)?;
+        let desc = self
+            .layer_desc(layer)
+            .map(Ok)
+            .unwrap_or_else(|| Err(anyhow!("Could not find layer")))?;
+        if desc.is_packed() {
+            P::decoder(bytes).map(either::Either::Left)
+        } else {
+            Ok(either::Either::Right(Cursor::new(bytes)))
+        }
+    }
+
     /// Returns the object from a layer
     ///
     /// Note: layer idx is not transformed, so it must be the actual idx of the desired layer
@@ -340,19 +442,7 @@ impl<P: Packer> MultiRoot<P> {
 
                 layers.get(layer - 2).map(|v| LayerDesc::Build(&v.0))
             }
-            State::Read { record } | State::Run { record, .. } => {
-                let system = flexbuffers::Reader::get_root(record.bytes())
-                    .and_then(|root| root.as_vector().idx(1).get_blob())
-                    .and_then(|obj| Ok(Peek::from(flexbuffers::Reader::get_root(obj.0)?)))
-                    .ok()?;
-
-                system
-                    .get_vector()
-                    .ok()
-                    .map(|v| v.idx(layer))
-                    .map(Peek::from)
-                    .map(LayerDesc::Read)
-            }
+            State::Read { record } | State::Run { record, .. } => record.layer_desc(layer).ok(),
         }
     }
 
@@ -439,11 +529,11 @@ impl<P: Packer> MultiRoot<P> {
     }
 
     /// Unpacks all packed object layers
-    /// 
+    ///
     /// If any layer was already unpacked, it will be skipped (however it's packed digest will still be checked)
-    /// 
+    ///
     /// Returns an error if to_run was not called first before calling this function
-    /// 
+    ///
     /// Note: Since unpacking is intended to be lazily done, this function maintains the use of interior-mutability
     #[inline]
     pub fn unpack_all(&self) -> crate::Result<()> {
@@ -566,7 +656,7 @@ impl<const SIZE_THRESHOLD: usize, const COMPRESSION_LEVEL: i32> Packer
         }
     }
 
-    fn unpack_bytes<'u>(from: &[u8], to: &'u mut [u8]) -> crate::Result<()> {
+    fn unpack<'u>(from: &[u8], to: &'u mut [u8]) -> crate::Result<()> {
         if from.len() == to.len() {
             to.copy_from_slice(from);
             Ok(())
@@ -576,6 +666,10 @@ impl<const SIZE_THRESHOLD: usize, const COMPRESSION_LEVEL: i32> Packer
             Ok(())
         }
     }
+
+    fn decoder(from: &[u8]) -> crate::Result<impl Read> {
+        Ok(zstd::Decoder::new(std::io::Cursor::new(from))?)
+    }
 }
 
 /// Packer handles packing and unpacking bytes
@@ -584,7 +678,10 @@ pub trait Packer: private::Sealed {
     fn pack_bytes(bytes: &[u8], buffer: &mut BytesMut) -> crate::Result<()>;
 
     /// Unpack bytes from a layer
-    fn unpack_bytes<'u>(from: &[u8], to: &'u mut [u8]) -> crate::Result<()>;
+    fn unpack<'u>(from: &[u8], to: &'u mut [u8]) -> crate::Result<()>;
+
+    /// Returns a decoder for bytes
+    fn decoder(from: &[u8]) -> crate::Result<impl Read>;
 
     /// Pack an object into a layer
     fn pack_object<T: Serialize>(
@@ -594,12 +691,6 @@ pub trait Packer: private::Sealed {
     ) -> crate::Result<()> {
         obj.serialize(&mut *ser)?;
         Self::pack_bytes(ser.view(), buffer)
-    }
-
-    /// Unpack an object from a layer
-    fn unpack_object<'de, T: Deserialize<'de>>(from: &[u8], to: &'de mut [u8]) -> crate::Result<T> {
-        Self::unpack_bytes(from, to)?;
-        Ok(flexbuffers::from_slice(to)?)
     }
 }
 
@@ -620,7 +711,13 @@ where
 {
     fn layer(&'p self, idx: usize) -> Option<&'p [u8]>;
 
+    fn system(&'p self) -> crate::Result<Peek<'p>>;
+
     fn iter_layer_desc(&self) -> crate::Result<impl Iterator<Item = impl ILayerDescriptor>>;
+
+    fn layer_desc(&'p self, idx: usize) -> crate::Result<LayerDesc<'p>> {
+        Ok(LayerDesc::Read(self.system()?.as_vector().idx(idx).into()))
+    }
 }
 
 impl<'p> IContainer<'p> for Record {
@@ -641,15 +738,19 @@ impl<'p> IContainer<'p> for Record {
             return Err(anyhow!("Record is not a multi-root record").into());
         }
 
-        let system = flexbuffers::Reader::get_root(self.bytes())
-            .and_then(|root| root.as_vector().idx(1).get_blob())
-            .and_then(|obj| Ok(Peek::from(flexbuffers::Reader::get_root(obj.0)?)))?;
+        let system = self.system()?;
 
         if let Some(iter) = system.iter() {
             Ok(iter.map(|p| LayerDesc::Read(p)))
         } else {
             Err(anyhow!("System layer was in an unexpected format").into())
         }
+    }
+
+    fn system(&'p self) -> crate::Result<Peek<'p>> {
+        Ok(flexbuffers::Reader::get_root(self.bytes())
+            .and_then(|root| root.as_vector().idx(1).get_blob())
+            .and_then(|obj| Ok(Peek::from(flexbuffers::Reader::get_root(obj.0)?)))?)
     }
 }
 
@@ -893,6 +994,7 @@ mod test {
             container::{ILayerDescriptor, MultiRoot},
         },
     };
+    use bytes::{BufMut, BytesMut};
     use toml::toml;
 
     #[test]
@@ -1034,7 +1136,10 @@ mod test {
             })
             .unwrap();
 
-        assert!(container.unpack_all().is_err(), "to_run must be called first");
+        assert!(
+            container.unpack_all().is_err(),
+            "to_run must be called first"
+        );
 
         let run = container.to_run().unwrap();
         run.unpack_all().unwrap();
@@ -1042,5 +1147,25 @@ mod test {
         assert_eq!("hello", run.object(2).at("name").str().unwrap());
         assert_eq!("hello2", run.object(3).at("name").str().unwrap());
         assert_eq!("hello3", run.object(4).at("name").str().unwrap());
+    }
+
+    #[test]
+    fn test_container_fetch_content() {
+        type TestPacker = GenericPacker<0, 0>;
+
+        let ns = Namespace::ephemeral();
+        let mut container =
+            MultiRoot::<TestPacker>::build(ns.commit("test", b"hello world".as_slice()));
+
+        container.push_content(b"hello world").unwrap();
+
+        let read = container.to_read_only().unwrap();
+
+        let mut dest = BytesMut::new();
+        dest.put(b"existing data".as_slice());
+
+        read.fetch_content(2, &mut dest).unwrap();
+
+        assert_eq!(b"existing datahello world", dest.as_ref());
     }
 }
