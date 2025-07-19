@@ -1,8 +1,8 @@
 use parking_lot::RwLock;
 use tracing::debug;
-
 use crate::{
-    store::{ArchiveMember, StoreArchive}, Record, Storage, Store, VecIndex
+    IRecord, Record, Storage, Store, VecIndex,
+    store::{ArchiveMember, StoreArchive},
 };
 use std::{
     ops::Deref,
@@ -16,7 +16,7 @@ use super::Frontend;
 type RecordSnapshot = Arc<VecIndex<Record>>;
 
 /// Type-alias over a snapshot cell
-/// 
+///
 /// The Pin<Box<..>> allows dereferencing the underlying snapshot, to allow for regular borrow-semantics,
 /// and also to allow for atomically-replacing the snapshot when needed.
 type SnapshotCell = Arc<RwLock<Pin<Box<RecordSnapshot>>>>;
@@ -37,9 +37,9 @@ impl Default for SharedState {
 }
 
 /// Common frontend state, can be used by one or more frontend implementations.
-/// 
+///
 /// On it's own State is mostly thread-safe, however sharing between threads should use the "SharedState" wrapper
-/// 
+///
 /// - Manages record lifecycle (staging, promoting, deletion, indexing, saving, loading, etc)
 /// - Manages record archive members produced by store/worker system
 /// - Manages record "indexes" and "snapshots"
@@ -50,10 +50,6 @@ pub struct State {
     ///
     /// Most of the "store" logic happens in Worker and Record respectively
     store: Store,
-    /// Active archive members
-    members: dashmap::DashMap<PathBuf, ArchiveMember>,
-    /// Map of indexes
-    indexes: dashmap::DashMap<PathBuf, VecIndex<Record>>,
     /// Map of stored snapshots
     snapshots: dashmap::DashMap<Snapshot, RecordSnapshot>,
     /// Name of the state frontend
@@ -68,6 +64,8 @@ pub enum Snapshot {
     Default,
     /// Staged records
     Staging,
+    /// Soft deleted records
+    SoftDeleted,
     /// Imported from a pack
     Imported(PathBuf),
 }
@@ -82,17 +80,22 @@ impl State {
     }
 
     /// Reduces all records from all archive members found in Store into a single snapshot
-    /// 
+    ///
     /// Archive Member -> Index => Snapshot
-    #[inline]
     pub fn reduce(&self) -> std::io::Result<()> {
         // Store::archive() will flush all pending archive members into a StoreArchive
         let store_archive = self.store.archive();
 
+        if store_archive.members.is_empty() {
+            debug!("No new data to reduce");
+            return Ok(());
+        }
+
+        let mut indexes = vec![];
         // Process each member to produce a new "index" for each record
         for member in store_archive.members() {
             let path = member.path().to_path_buf();
-            debug!("packing member from {path:?}");
+            debug!("Packing member from {path:?}");
             let records = member.get_records()?;
 
             if records.is_empty() {
@@ -100,32 +103,79 @@ impl State {
                 continue;
             }
 
-            let mut index = self.indexes.entry(path.clone()).or_default();
+            let mut index = VecIndex::default();
             for r in records {
-                index.index(r.clone());
+                index.index_unchecked(r.clone());
             }
-            self.members.insert(path, member.clone());
+            indexes.push((path.clone(), index));
         }
 
-        let mut next_snapshot = VecIndex::default();
+        let mut next_snapshot = self.update_or_create_snapshot(Snapshot::Default);
+        let mut staging_index = self.update_or_create_snapshot(Snapshot::Staging);
+        let mut soft_deleted = self.update_or_create_snapshot(Snapshot::SoftDeleted);
 
-        for i in self.indexes.iter() {
+        for (idx, (_, i)) in indexes.iter().enumerate() {
+            debug!("====== Processing member {idx}, count: {} ======", i.storage().len());
             for r in i.storage().iter_records() {
-                next_snapshot.index(r.clone());
+                match next_snapshot.index(r.clone()) {
+                    crate::index::IndexResult::Inserted(k) => {
+                        debug!(
+                            "Inserted {}/{:x}/{:x} -> {k}",
+                            r.uuid(),
+                            r.ns_chk(),
+                            r.index_key(),
+                        );
+                    }
+                    crate::index::IndexResult::Promoted(k, previous) => {
+                        debug!("Promoted {} -> {k}", r.uuid());
+                        if let Some(previous) = previous {
+                            soft_deleted.index_unchecked(previous);
+                        }
+                    }
+                    crate::index::IndexResult::Exists(k, skipped) => {
+                        debug!("Exists {} @ {k} staging: {}", skipped.uuid(), skipped.opts().is_staging());
+                    }
+                    crate::index::IndexResult::CannotPromote(staging) => {
+                        let uuid = staging.uuid();
+                        match staging_index.index_unchecked(staging) {
+                            crate::index::IndexResult::Inserted(k) => {
+                                debug!("Staging {uuid} @ {k}")
+                            },
+                            crate::index::IndexResult::Exists(k, skipping) => {
+                                debug!("Staging already occupied @ {k}, skipping {}", skipping.uuid())
+                            },
+                            _ => {
+
+                            }
+                        }
+                    }
+                    crate::index::IndexResult::CannotInsertDeletedRecord(deleting) => {
+                        debug!(soft_delete = deleting.opts().is_soft_deleted(), "Skipping Deleted Record {} in {}", deleting.uuid(), idx);
+                        if deleting.opts().is_soft_deleted() {
+                            soft_deleted.index_unchecked(deleting);
+                        }
+                    }
+                    crate::index::IndexResult::Deleted(deleted) => {
+                        debug!("Deleted record @ {deleted} in {idx}");
+                    }
+                }
             }
         }
-
-        // TODO: Need to add this if we add a .gc() function to State
-        // // In the case members have been cleaned up, ensure we don't lose data
-        // for i in self.snapshots.iter() {
-        //     for r in i.storage().iter_records() {
-        //         snapshot.index(r.clone());
-        //     }
-        // }
 
         // Only store the next snapshot if it isn't empty
         if !next_snapshot.storage().is_empty() {
-            self.snapshots.insert(Snapshot::Default, Arc::new(next_snapshot));
+            self.snapshots
+                .insert(Snapshot::Default, Arc::new(next_snapshot));
+        }
+
+        if !staging_index.storage().is_empty() {
+            self.snapshots
+                .insert(Snapshot::Staging, Arc::new(staging_index));
+        }
+
+        if !soft_deleted.storage().is_empty() {
+            self.snapshots
+                .insert(Snapshot::SoftDeleted, Arc::new(soft_deleted));
         }
         Ok(())
     }
@@ -136,17 +186,34 @@ impl State {
         self.snapshots.entry(snapshot).or_default().clone()
     }
 
+    /// Returns a clone of an existing snapshot for updates or creates a new snapshot
+    #[inline]
+    fn update_or_create_snapshot(&self, snapshot: Snapshot) -> VecIndex<Record> {
+        self.snapshots
+            .get(&snapshot)
+            .map(|v| v.deref().deref().clone())
+            .unwrap_or_default()
+    }
+
     /// Saves state to output_directory
     #[inline]
     pub async fn save(&self, output_dir: impl Into<PathBuf>) -> std::io::Result<()> {
-        let archived = self
-            .members
-            .iter()
-            .map(|kv| kv.deref().clone())
-            .collect::<Vec<_>>();
-
         let archive = StoreArchive {
-            members: archived,
+            // members: archived,
+            members: vec![
+                ArchiveMember::Index {
+                    path: PathBuf::from("<softdelete>"),
+                    index: self.snapshot(Snapshot::SoftDeleted).deref().clone(),
+                },
+                ArchiveMember::Index {
+                    path: PathBuf::from("<default>"),
+                    index: self.snapshot(Snapshot::Default).deref().clone(),
+                },
+                ArchiveMember::Index {
+                    path: PathBuf::from("<staging>"),
+                    index: self.snapshot(Snapshot::Staging).deref().clone(),
+                },
+            ],
             output_dir: output_dir.into(),
             archive: self.frontend,
         };
@@ -197,16 +264,14 @@ impl State {
         let mut state = Self::default();
         state.set_identity::<F>(F::next_instance_id());
         state.store = Store::work_dir(&work_dir);
+        let pusher = state.store.packer.pusher().expect("should not be closed");
 
-        let mut snapshot = VecIndex::<Record>::default();
-        for mem in restored.members() {
-            for r in mem.get_records()? {
-                snapshot.index(r);
-            }
+        for mem in restored.members {
+            pusher.ensure_push(mem);
         }
-        state
-            .snapshots
-            .insert(Snapshot::Default, Arc::new(snapshot));
+
+        state.reduce()?;
+
         debug!(
             frontend = F::NAME,
             instance = state.instance,
@@ -223,8 +288,6 @@ impl Default for State {
             frontend: "store",
             instance: 0,
             store: Default::default(),
-            indexes: dashmap::DashMap::new(),
-            members: dashmap::DashMap::new(),
             snapshots: dashmap::DashMap::new(),
         }
     }

@@ -1,17 +1,13 @@
 use crate::{
-    IRecord, Namespace, Queue, Record, VirtualData, Worker,
-    archive::{Entry, FileEntryReference, Manifest, scan_for_references},
+    IRecord, Namespace, Queue, Record, VecIndex, VirtualData, Worker,
+    archive::{Entry, FileEntryReference, Manifest},
     queue::Pusher,
 };
 use ahash::{HashSet, HashSetExt};
-use futures::{AsyncSeekExt, future::Either};
 use sha2::{Digest, Sha256};
-use std::{
-    io::Error,
-    path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+use std::{io::Error, path::{Path, PathBuf}, sync::{Arc, OnceLock}
 };
-use tracing::{debug, error, trace};
+use tracing::{debug, error};
 
 /// Store settings contains options for workers to use during
 /// their operations
@@ -126,8 +122,6 @@ pub struct StoreArchive {
 /// Enumeration of archive member state
 #[derive(Debug, Clone)]
 pub enum ArchiveMember {
-    /// Archive member is in an intermediate state on disk
-    Unpacked { path: PathBuf, manifest: Manifest },
     /// Archive member is already packed
     Packed {
         /// Path to the source of this packed archive member
@@ -147,6 +141,12 @@ pub enum ArchiveMember {
         /// Records stored in this volume
         records: Vec<Record>,
     },
+    Index {
+        /// "Symbolic" index path
+        path: PathBuf,
+        /// Indexed Records
+        index: VecIndex<Record>,
+    },
 }
 
 impl ArchiveMember {
@@ -154,9 +154,9 @@ impl ArchiveMember {
     #[inline]
     pub fn path(&self) -> &PathBuf {
         match self {
-            ArchiveMember::Unpacked { path, .. } => path,
             ArchiveMember::Packed { path, .. } => path,
             ArchiveMember::Volume { path, .. } => path,
+            ArchiveMember::Index { path, .. } => path,
         }
     }
 
@@ -167,20 +167,6 @@ impl ArchiveMember {
     /// were returned
     pub fn get_records(&self) -> std::io::Result<Vec<Record>> {
         match self {
-            ArchiveMember::Unpacked { path, manifest } => {
-                let source = std::fs::File::open(path)?;
-                let mmap = unsafe { memmap2::Mmap::map(&source)? };
-                let mmap = Arc::new(mmap);
-
-                let mut records = vec![];
-                for entry in manifest.journal_entries()?.iter() {
-                    let data = VirtualData::new(entry.clone(), mmap.clone())?;
-                    if let Some(rec) = data.materialize() {
-                        records.push(rec);
-                    }
-                }
-                Ok(records)
-            }
             ArchiveMember::Packed {
                 offset,
                 len,
@@ -198,7 +184,7 @@ impl ArchiveMember {
 
                 let mut records = vec![];
                 let entries = manifest.journal_entries()?;
-                debug!("Mapping journal entries {entries:#?}");
+                // debug!("Mapping journal entries {entries:#?}");
                 for entry in entries.iter() {
                     // Since we're packed in a single file, the zero-byte paddings aren't going
                     // to be present, new_packed ensures the constructor is aware of this when validating
@@ -242,16 +228,11 @@ impl ArchiveMember {
                 );
                 Ok(validated)
             }
-        }
-    }
-
-    /// Returns the manifest of the archive member
-    #[inline]
-    pub fn manifest(&self) -> &Manifest {
-        match self {
-            ArchiveMember::Unpacked { manifest, .. } => manifest,
-            ArchiveMember::Packed { manifest, .. } => manifest,
-            ArchiveMember::Volume { manifest, .. } => manifest,
+            ArchiveMember::Index { index, .. } => Ok(index
+                .storage()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()),
         }
     }
 }
@@ -333,7 +314,7 @@ impl StoreArchive {
 
                                 for entry in manifest.journal_entries()?.iter() {
                                     if !records.remove(&entry.uuid()) {
-                                        error!("Did not remove {}", hex::encode(entry.content()));
+                                        error!("Did not remove {}: {}", entry.uuid(), hex::encode(entry.content()));
                                         return Err(std::io::Error::new(
                                             std::io::ErrorKind::InvalidData,
                                             "Pack is incomplete",
@@ -373,7 +354,6 @@ impl StoreArchive {
                             cursor += 512 - padding;
                         } else {
                             if let Some((_, uuid, _)) = header.split_name_for_record() {
-                                debug!("inserting {}:{} to hashset", uuid, hex::encode(digest));
                                 records.insert(uuid);
                             }
                         }
@@ -395,80 +375,30 @@ impl StoreArchive {
         use futures::sink::SinkExt;
         let completed_dest = self.store_tar_path();
 
-        let mut append_mode = false;
-        let dest = self.output_dir.join("PACKING");
+        let dest = self.output_dir.join(format!("{}.PACKING", self.archive));
 
-        let mut existing = HashSet::default();
-
-        let file = if completed_dest.exists() {
-            debug!("Previous store found, attempting to append to store {completed_dest:?}");
-            for r in scan_for_references(crate::util::fs::open(&completed_dest).await?).await? {
-                if let Entry::Reference(FileEntryReference {
-                    header,
-                    digest,
-                    offset,
-                }) = r
-                {
-                    if let Some((_, id, _)) = header.split_name_for_record() {
-                        let (key, _) = id.as_u64_pair();
-                        let digest = digest.finalize();
-                        debug!(
-                            "Existing entry found \n\n\t{}\n\tdigest: {}\n\toffset: {offset}\n",
-                            header.name(),
-                            hex::encode(&digest[..])
-                        );
-                        existing.insert((key, digest));
-                    }
-                }
-            }
-            let mut file = crate::util::fs::open_rw(&completed_dest).await?;
-            let cursor = file.seek(std::io::SeekFrom::End(-1024)).await?;
-            debug!("Setting cursor to {cursor} for appending new entries");
-            append_mode = true;
-            Either::Left(file)
-        } else {
-            let output = crate::util::fs::create_new(&dest).await.inspect_err(|_| {
-                error!("Previous packing attempt did not succeed");
-            })?;
-            Either::Right(output)
-        };
+        let file = crate::util::fs::create_new(&dest).await.inspect_err(|_| {
+            error!("Previous packing attempt did not succeed");
+        })?;
 
         let encoder = crate::archive::TapeEncoder::default();
 
         let mut writer = asynchronous_codec::FramedWrite::new(file, encoder);
 
-        let mut total_appended = 0;
         let mut cleanup = vec![];
 
-        /*
-            # Pack Procedure
-            - A store archive consists of "members", where each member is in charge of bringing a collection of records
-            - Packing involves merging the state of all members
-            - While processing a member, a new "stamp" is prepared, which is just a manifest of records to include with the packed archive
-            - Member's also have a stamp when they are created which is used to enumerate the records (which is why a new stamp must be created)
+        let mut dedupe = HashSet::new();
 
-            ## Append Mode
-            - When packing into an existing store, this function enters "append" mode
-            - "append" mode does not modify any existing records, and instead appends only "new" records into the store
-            - A "dedupe" check is done by first recording the existing records in the archive
-                - A duplicate record is considered to be an existing key/content pair (Note: key is the numeric form of a label)
-            - And while processing each member, excluding any duplicated records from being appended to the archive
-         */
         for member in self.members.iter() {
+            dedupe.clear(); // Dedupe at the member level
+
             // Prepares a clean slate for the next "stamp"
             writer.encoder_mut().next_stamp();
             let records = member.get_records()?;
             let including = records
                 .iter()
                 .filter(|r| {
-                    let dedupe_check = (r.uuid().as_u64_pair().0, r.data.digest().finalize());
-                    let new_record = existing.insert(dedupe_check);
-                    debug!(
-                        inserting = new_record,
-                        check = format!("{:x}:{}", dedupe_check.0, hex::encode(dedupe_check.1)),
-                        "dedupe_filter"
-                    );
-                    new_record
+                    dedupe.insert((r.uuid(), r.opts().encode()))
                 })
                 .map(|r| Entry::Record(r.clone()));
 
@@ -483,8 +413,9 @@ impl StoreArchive {
             // If no records were appended, do not include this stamp
             if count > 0 {
                 let manifest = writer.encoder_mut().stamp_manifest();
-                total_appended += count;
                 writer.send(Entry::Record(manifest.record)).await?;
+
+                debug!("Packed {count} records from {:?}", member.path());
             }
 
             // Note the member's "path"
@@ -495,11 +426,8 @@ impl StoreArchive {
         writer.feed(Entry::Zeros).await?;
         writer.close().await?;
 
-        // If building a new archive, must rename the transient to the completed dest
-        if !append_mode {
-            std::fs::rename(dest, &completed_dest)?;
-        }
-        trace!(append_mode, total_appended);
+        std::fs::rename(&dest, &completed_dest)?;
+        debug!("Packed {dest:?} -> {completed_dest:?}");
         Ok(())
     }
 
@@ -629,11 +557,6 @@ mod test {
         let store_archive = StoreArchive::unpack(&store).await.unwrap();
         eprintln!("{store_archive:#?}");
         for member in store_archive.members() {
-            eprintln!("{member:#?}");
-            for e in member.manifest().journal_entries().unwrap() {
-                eprintln!("{e:#?}");
-            }
-
             let records = member.get_records().unwrap();
             for r in records {
                 assert!(r.is_valid());

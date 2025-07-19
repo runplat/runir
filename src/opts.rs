@@ -220,6 +220,15 @@ impl Opts {
         self
     }
 
+    /// Removes Staging and Deleted from branch options which will
+    /// flag the record as being the canonical version
+    #[inline]
+    pub fn promote(&mut self) -> &mut Self {
+        self.branch.remove(Branch::Staging);
+        self.branch.remove(Branch::Deleted);
+        self
+    }
+
     /// Encodes opts into a u64
     #[inline]
     pub fn encode(&self) -> u64 {

@@ -2,6 +2,7 @@ use ahash::RandomState;
 use bytes::Bytes;
 use serde::Serialize;
 
+use crate::IRecord;
 use crate::Opts;
 use crate::RawRecordable;
 use crate::Record;
@@ -197,7 +198,7 @@ impl Namespace {
                 .with_opts(self.opts | recordable.opts)
                 .commit(Bytes::from(ser.take_buffer()));
 
-            record.opts_mut().set_object_storage(true);
+            record.opts_mut().expect("should always be able to mutate options from a full record").set_object_storage(true);
             record
         } else {
             record
@@ -215,7 +216,7 @@ impl Namespace {
             author(flexbuffers::Builder::default()).take_buffer(),
         ));
 
-        record.opts_mut().set_object_storage(true);
+        record.opts_mut().expect("should always be able to mutate options from a full record").set_object_storage(true);
         record
     }
 

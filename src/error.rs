@@ -47,12 +47,6 @@ enum Inner {
     Custom(anyhow::Error),
 }
 
-#[derive(thiserror::Error, Debug)]
-enum RecordManagement {
-    #[error("Record has been marked for deletion")]
-    Delete(u64)
-}
-
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.inner {

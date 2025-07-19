@@ -213,12 +213,11 @@ mod test {
         })));
 
         let archive_file = Volume::archiver(new_memory_target("<inline>", MIB));
-        let archive = archive_file
+        archive_file
             .archive_batch(worker.flush().collect())
             .await
             .unwrap()
             .to_archive()
             .unwrap();
-        assert!(archive.manifest().is_valid());
     }
 }

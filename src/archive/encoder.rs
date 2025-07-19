@@ -1,5 +1,5 @@
 use super::{Entry, Manifest, Sha256Digest};
-use crate::{Namespace, RecordableExtensions, virt::RecordExtent};
+use crate::{virt::RecordExtent, IRecord, Namespace, RecordableExtensions};
 use bytes::{BufMut, Bytes};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -116,7 +116,7 @@ impl TapeEncoder {
         let manifest_name = format!("MANIFEST_{:x}", self.digest.clone().finalize());
         let mut record =
             Namespace::new("__runir_store").store(manifest_name.as_str(), self.journal.indexable());
-        record.opts_mut().set_manifest_spec(true);
+        record.opts_mut().expect("should always be able to mutate options from a full record").set_manifest_spec(true);
 
         self.journal.clear();
         self.digest = Sha256::new();

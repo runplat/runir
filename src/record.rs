@@ -45,6 +45,15 @@ pub trait IRecord {
     /// Record opts
     fn opts(&self) -> &Opts;
 
+    /// Returns a mutable reference to the current record opts.
+    /// 
+    /// Returns None if the record does not support option mutation
+    ///
+    /// Note: If the record is empty (has no data), changes to storage options (e.g. `Object`)
+    /// are not enforced until the record is committed. Validation and interpretation of
+    /// storage options apply only after data is present.
+    fn opts_mut(&mut self) -> Option<&mut Opts>;
+
     /// Returns bytes that belong to this record
     fn bytes(&self) -> &[u8];
 
@@ -108,50 +117,75 @@ impl IRecord for Record {
     fn to_record(&self) -> Record {
         self.clone()
     }
+    
+    #[inline]
+    fn opts_mut(&mut self) -> Option<&mut Opts> {
+       Some(&mut self.opts)
+    }
 }
 
 impl<'b> IRecord for &'b Record {
+    #[inline]
     fn ns_chk(&self) -> u64 {
         self.ns_chk
     }
 
+    #[inline]
     fn uuid(&self) -> uuid::Uuid {
         self.key
     }
 
+    #[inline]
     fn opts(&self) -> &Opts {
         &self.opts
     }
 
+    #[inline]
     fn bytes(&self) -> &[u8] {
         self.data.bytes()
     }
 
+    #[inline]
     fn to_record(&self) -> Record {
         (*self).clone()
+    }
+    
+    #[inline]
+    fn opts_mut(&mut self) -> Option<&mut Opts> {
+        None
     }
 }
 
 impl<'b> IRecord for Option<&'b Record> {
+    #[inline]
     fn ns_chk(&self) -> u64 {
         self.map(|r| r.ns_chk()).unwrap_or_default()
     }
 
+    #[inline]
     fn uuid(&self) -> uuid::Uuid {
         self.map(|r| r.uuid()).unwrap_or_else(uuid::Uuid::nil)
     }
 
+    #[inline]
     fn opts(&self) -> &Opts {
         self.map(|r| r.opts()).unwrap_or_else(|| crate::EMPTY_OPTS)
     }
 
+    #[inline]
     fn bytes(&self) -> &[u8] {
         self.map(|s| s.bytes()).unwrap_or_default()
     }
 
+    #[inline]
     fn to_record(&self) -> Record {
         self.cloned()
             .unwrap_or_else(|| Namespace::ephemeral().record(""))
+    }
+    
+    #[inline]
+    fn opts_mut(&mut self) -> Option<&mut Opts> {
+        None
     }
 }
 
@@ -247,16 +281,6 @@ impl Record {
     pub fn with_opts(mut self, opts: Opts) -> Self {
         self.opts = opts;
         self
-    }
-
-    /// Returns a mutable reference to the current record opts.
-    ///
-    /// Note: If the record is empty (has no data), changes to storage options (e.g. `Object`)
-    /// are not enforced until the record is committed. Validation and interpretation of
-    /// storage options apply only after data is present.
-    #[inline]
-    pub fn opts_mut(&mut self) -> &mut Opts {
-        &mut self.opts
     }
 
     /// Commit data to the record and configures the Uuid,
@@ -465,7 +489,7 @@ impl Record {
             }
 
             let mut staging = self.clone();
-            staging.opts_mut().enable_branch(Branch::Staging);
+            staging.opts_mut().expect("should always be able to mutate options from a full record").enable_branch(Branch::Staging);
             
             // Since we are about to commit new data, we need to create a new timestamp
             staging.ts = time::UtcDateTime::now().unix_timestamp() as u64;
@@ -487,7 +511,7 @@ impl Record {
     #[must_use = "Calling `.delete()` marks the record, but it must be committed or passed to a store to take effect"]
     pub fn delete(&self) -> Self {
         let mut deleting = self.clone();
-        deleting.opts_mut().enable_branch(Branch::Deleted);
+        deleting.opts_mut().expect("should always be able to mutate options from a full record").enable_branch(Branch::Deleted);
         deleting
     }
 }
@@ -647,7 +671,7 @@ mod test {
         let mut record = ns.store("my-test-obj", test.indexable());
         assert!(record.archive().is_err());
 
-        record.opts_mut().enable_archiving();
+        record.opts_mut().expect("should always be able to mutate options from a full record").enable_archiving();
 
         let key = record.key.clone();
         let archive = record.archive().unwrap();

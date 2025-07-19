@@ -1,5 +1,6 @@
 mod cmd;
 use cmd::CreateRecord;
+use cmd::DeleteRecord;
 use cmd::LookupRecord;
 use cmd::ObjectFormat;
 use runir::util::PeekExtensions;
@@ -60,6 +61,8 @@ enum KvCommands {
     /// This round-trip will not preserve the original byte layout of the input — even if the logical content is the same.
     /// For lossless raw content retrieval, avoid `-o` and use blob mode.
     Get(LookupRecord),
+    /// Attempts to delete a record from the kv store
+    Delete(DeleteRecord),
     /// Shows information for a stored record
     Info(LookupRecord),
 }
@@ -103,6 +106,7 @@ async fn main() -> std::io::Result<()> {
             match kv_config.command {
                 KvCommands::Put(create_record) => {
                     let record = create_record.execute(ns).await?;
+                    let record = record.stage(record.clone().into_parts().1)?;
                     kv.put_raw(record.clone())?;
                     kv.refresh().await?;
                     kv.save().await?;
@@ -196,6 +200,21 @@ async fn main() -> std::io::Result<()> {
                         eprintln!("Object not found");
                         exit(1)
                     }
+                }
+                KvCommands::Delete(delete_record) => {
+                    let DeleteRecord { label } = delete_record;
+                    match kv.ns(ns).delete(&label) {
+                        Ok(_) => {
+                            kv.refresh().await?;
+                            kv.save().await?;
+                            eprintln!("Deleted `{label}`");
+                        },
+                        Err(err) => {
+                            eprintln!("{err}");
+                            exit(1)
+                        },
+                    }
+
                 }
                 KvCommands::Info(lookup_record) => {
                     let LookupRecord { label, .. } = lookup_record;

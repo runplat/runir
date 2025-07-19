@@ -412,7 +412,7 @@ impl<P: Packer> MultiRoot<P> {
                 multi_root.end_vector();
 
                 let mut record = root.stage(Bytes::copy_from_slice(builder.view()))?;
-                record.opts_mut().set_multi_root_storage(true);
+                record.opts_mut().expect("should always be able to mutate options from a full record").set_multi_root_storage(true);
 
                 Ok(Self {
                     state: State::Read { record },
@@ -977,6 +977,13 @@ impl<P> IRecord for MultiRoot<P> {
         match &self.state {
             State::Build { root, .. } => root.to_record(),
             State::Read { record } | State::Run { record, .. } => record.to_record(),
+        }
+    }
+    
+    fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
+        match &mut self.state {
+            State::Build { root, .. } => root.opts_mut(),
+            State::Read { record } | State::Run { record, .. } => record.opts_mut(),
         }
     }
 }

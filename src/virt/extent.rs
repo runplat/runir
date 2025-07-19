@@ -84,7 +84,8 @@ impl std::fmt::Debug for RecordExtent {
                     .unwrap_or_else(|_| String::default()),
             )
             .field("crc", &self.crc)
-            .field("opts", &self.opts)
+            .field("opts", &Opts::decode(self.opts))
+            .field("uuid", &uuid::Uuid::from_u64_pair(self.key, self.crc))
             .finish()
     }
 }

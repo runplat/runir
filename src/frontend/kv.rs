@@ -306,7 +306,7 @@ impl KeyValue {
     /// Puts a record into the kv store
     #[inline]
     pub fn put_raw(&self, record: Record) -> std::io::Result<()> {
-        if self.worker.push(record.clone()) {
+        if self.worker.push(record) {
             Ok(())
         } else {
             Err(Error::new(
@@ -330,6 +330,18 @@ impl KeyValue {
                 self.force_sync();
                 self.shared.snapshot().lookup(self.ns.clone(), key)
             })
+    }
+
+    /// Deletes a record from the kv store
+    #[inline]
+    pub fn delete(&self, key: &str) -> std::io::Result<()> {
+        if let Some(rec) = self.get_raw(key) {
+            let deleting = rec.delete();
+            debug!(is_delete = deleting.opts().is_deleted(), "Found rec for deletion");
+            self.put_raw(deleting)
+        } else {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Cannot delete record that does not exist"))
+        }
     }
 
     /// Returns a new snapshot of the kv-store

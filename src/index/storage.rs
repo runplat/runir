@@ -1,6 +1,6 @@
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
-use dashmap::mapref::{multiple::RefMulti, one::Ref};
+use dashmap::mapref::{multiple::RefMulti, one::{Ref, RefMut}};
 use futures::Stream;
 
 use crate::IRecord;
@@ -28,6 +28,12 @@ pub trait Storage: Default {
         Self: 'b,
         Self::Record: 'b;
 
+    /// Type returned from a borrow
+    type BorrowMut<'b>: DerefMut<Target = Self::Record>
+    where
+        Self: 'b,
+        Self::Record: 'b;
+
     /// Type returned from an iterator borrow
     type IterBorrow<'b>: crate::IRecord + Deref<Target = Self::Record>
     where
@@ -44,6 +50,11 @@ pub trait Storage: Default {
     /// Returns None if the key was not recognized by Storage
     fn record<'a: 'b, 'b>(&'a self, key: u64) -> Option<Self::Borrow<'b>>;
 
+    /// Returns a mutable reference to a record
+    ///
+    /// Returns None if the key was not recognized by storage
+    fn record_mut<'a: 'b, 'b>(&'a mut self, key: u64) -> Option<Self::BorrowMut<'b>>;
+
     /// Returns an iterator over all records in storage
     fn iter_records<'a: 'b, 'b>(&'a self)
     -> impl Iterator<Item = Self::IterBorrow<'b>> + Send + 'b;
@@ -53,7 +64,7 @@ pub trait Storage: Default {
     -> impl Stream<Item = Self::IterBorrow<'b>> + Send + 'b;
 
     /// Returns true if a record was replaced at key
-    fn replace(&mut self, key: u64, record: Self::Record) -> bool;
+    fn replace(&mut self, key: u64, record: Self::Record) -> Option<Self::Record>;
 }
 
 impl<R: crate::IRecord + Sync> Storage for ahash::HashMap<u64, R>
@@ -66,6 +77,12 @@ where
         = &'b Self::Record
     where
         R: 'b;
+
+    type BorrowMut<'b>
+        = &'b mut Self::Record
+    where
+        Self: 'b,
+        Self::Record: 'b;
 
     type IterBorrow<'b>
         = &'b Self::Record
@@ -95,8 +112,12 @@ where
         futures::stream::iter(self.iter_records())
     }
 
-    fn replace(&mut self, key: u64, record: Self::Record) -> bool {
-        self.insert(key, record).is_some()
+    fn replace(&mut self, key: u64, record: Self::Record) -> Option<Self::Record> {
+        self.insert(key, record)
+    }
+
+    fn record_mut<'a: 'b, 'b>(&'a mut self, key: u64) -> Option<Self::BorrowMut<'b>> {
+        self.get_mut(&key)
     }
 }
 
@@ -108,6 +129,12 @@ where
 
     type Borrow<'b>
         = &'b Self::Record
+    where
+        Self: 'b,
+        Self::Record: 'b;
+
+    type BorrowMut<'b>
+        = &'b mut Self::Record
     where
         Self: 'b,
         Self::Record: 'b;
@@ -141,12 +168,18 @@ where
         futures::stream::iter(self.iter_records())
     }
 
-    fn replace(&mut self, key: u64, record: Self::Record) -> bool {
+    fn replace(&mut self, key: u64, record: Self::Record) -> Option<Self::Record> {
         if self.len() < key as usize {
-            return false;
+            return None;
         }
-        self[key as usize] = record;
-        true
+
+        let entry = &mut self[key as usize];
+        let previous = std::mem::replace(entry, record);
+        Some(previous)
+    }
+
+    fn record_mut<'a: 'b, 'b>(&'a mut self, key: u64) -> Option<Self::BorrowMut<'b>> {
+        self.get_mut(key as usize)
     }
 }
 
@@ -156,6 +189,12 @@ impl<R: crate::IRecord + Send + Sync> Storage for dashmap::DashMap<u64, R> {
     type Borrow<'b>
         = Ref<'b, u64, Self::Record>
     where
+        Self::Record: 'b;
+
+    type BorrowMut<'b>
+        = RefMut<'b, u64, Self::Record>
+    where
+        Self: 'b,
         Self::Record: 'b;
 
     type IterBorrow<'b>
@@ -186,8 +225,12 @@ impl<R: crate::IRecord + Send + Sync> Storage for dashmap::DashMap<u64, R> {
         futures::stream::iter(self.iter_records())
     }
 
-    fn replace(&mut self, key: u64, record: Self::Record) -> bool {
-        self.insert(key, record).is_some()
+    fn replace(&mut self, key: u64, record: Self::Record) -> Option<Self::Record> {
+        self.insert(key, record)
+    }
+
+    fn record_mut<'a: 'b, 'b>(&'a mut self, key: u64) -> Option<Self::BorrowMut<'b>> {
+        self.get_mut(&key)
     }
 }
 
@@ -211,6 +254,10 @@ impl<R: IRecord> IRecord for dashmap::mapref::one::Ref<'_, u64, R> {
     fn to_record(&self) -> crate::Record {
         self.deref().to_record()
     }
+
+    fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
+        None
+    }
 }
 
 impl<R: IRecord> IRecord for dashmap::mapref::multiple::RefMulti<'_, u64, R> {
@@ -232,5 +279,9 @@ impl<R: IRecord> IRecord for dashmap::mapref::multiple::RefMulti<'_, u64, R> {
 
     fn to_record(&self) -> crate::Record {
         self.deref().to_record()
+    }
+
+    fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
+        None
     }
 }
