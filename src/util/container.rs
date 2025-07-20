@@ -4,6 +4,7 @@ use std::{
     marker::PhantomData,
 };
 
+use ahash::HashSet;
 use anyhow::anyhow;
 use bytes::{BufMut, Bytes, BytesMut};
 use generic_array::{GenericArray, typenum::U32};
@@ -471,6 +472,34 @@ impl<P: Packer> MultiRoot<P> {
                 .map(|p| p.0)
                 .collect(),
         })
+    }
+
+    /// Returns true if this container is a super set of the other container
+    #[inline]
+    pub fn is_super_set(&self, other: &Container) -> bool {
+        if self.content() != other.content() {
+            return false;
+        }
+
+        let current = self.to_record();
+        let next = other.to_record();
+
+        match (current.iter_layer_desc(), next.iter_layer_desc()) {
+            (Ok(l), Ok(r)) => {
+                let lhs = l.skip(2).fold(HashSet::default(), |mut s, l| {
+                    s.insert(l.content().clone());
+                    s
+                });
+
+                let rhs = r.skip(2).fold(HashSet::default(), |mut s, l| {
+                    s.insert(l.content().clone());
+                    s
+                });
+
+                lhs.is_superset(&rhs)
+            },
+            _ => false
+        }
     }
 
     /// Prepares the multi-root for runtime

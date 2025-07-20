@@ -66,7 +66,7 @@ pub mod par {
 
     pub trait Search<R: IRecord + Send + Sync>: AsRef<dashmap::DashMap<u64, R>> {
         /// Searches the index with a query
-        /// 
+        ///
         /// Returns a parallel iterator over matching records
         #[inline]
         fn search<'query>(
@@ -77,10 +77,75 @@ pub mod par {
             R: 'query,
         {
             let query: Query<_> = query.into();
-            self.as_ref()
-                .par_iter_mut()
-                .filter(move |r| query.matches(&r))
-                .map(|r| r.to_record())
+            self.as_ref().par_iter_mut().filter_map(move |r| {
+                if query.matches(&r) {
+                    Some(r.to_record())
+                } else {
+                    None
+                }
+            })
+        }
+    }
+
+    impl<R: IRecord + Send + Sync> Search<R> for Index<R, dashmap::DashMap<u64, R>> {}
+}
+
+pub mod par_stream {
+    use crate::{IRecord, Index, Query, Record};
+    use async_stream::stream;
+    use futures::{Stream, StreamExt, stream};
+    use rayon::prelude::*;
+    use tracing::error;
+
+    pub trait Search<R: IRecord + Send + Sync>:
+        AsRef<dashmap::DashMap<u64, R>> + Send + Sync
+    {
+        /// Searches the index with a query
+        ///
+        /// Returns a stream that returns results as batches are completed
+        #[inline]
+        fn search<'query>(
+            &'query self,
+            query: impl Into<Query<'query, R>> + Send + Sync,
+        ) -> impl Stream<Item = Record>
+        where
+            R: 'query,
+        {
+            std::thread::scope(move |scope| {
+                let (tx, rx) = crossbeam::channel::unbounded();
+                let query: Query<_> = query.into();
+                let iter = self.as_ref().par_iter_mut().filter_map(move |r| {
+                    if query.matches(&r) {
+                        match tx.send(r.to_record()) {
+                            Ok(_) => None,
+                            Err(err) => Some(err.0),
+                        }
+                    } else {
+                        None
+                    }
+                });
+
+                let scoped = scope.spawn(|| iter.collect::<Vec<_>>());
+                stream! {
+                    for next in rx.iter() {
+                        yield next;
+                    }
+                }
+                .chain({
+                    // In case of a very unexpected failure in the channel;
+                    // Ensure no records are lost silently
+                    stream::iter(
+                        scoped
+                            .join()
+                            .inspect(|v| {
+                                if !v.is_empty() {
+                                    error!("Channel disconnected before stream could complete");
+                                }
+                            })
+                            .unwrap_or(vec![]),
+                    )
+                })
+            })
         }
     }
 

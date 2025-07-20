@@ -217,11 +217,19 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
                         return IndexResult::CannotPromote(record);
                     }
                 } else if !current.opts().is_multi() && record.opts().is_multi() {
-                    match Self::try_auto_promote_to_container(&current, &mut record) {
+                    match Self::try_auto_promote_from_record_to_container(&current, &mut record) {
                         Err(err) => {
                             error!("{err}");
                             return IndexResult::CannotPromote(record);
-                        },
+                        }
+                        _ => {}
+                    }
+                } else if current.opts().is_multi() && record.opts().is_multi() {
+                    match Self::try_auto_promote_from_container_to_container(&current, &mut record) {
+                        Err(err) => {
+                            error!("{err}");
+                            return IndexResult::CannotPromote(record);
+                        }
                         _ => {}
                     }
                 } else {
@@ -232,16 +240,21 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
             }
 
             if let Some(replaced) = self.storage.replace(*key, record) {
-                if replaced.opts().is_soft_deleted() {
+                if replaced.opts().is_deleted() && replaced.opts().is_soft_deleted() {
                     debug!(
                         "Previous record is in soft-deletion mode, including it in index result"
                     );
                     return IndexResult::Promoted(*key, Some(replaced));
-                } else {
+                } else if replaced.opts().is_deleted() {
                     debug!(
                         "Previous record was in staging mode, and was also deleted, dropping completely"
                     );
                     return IndexResult::Promoted(*key, None);
+                } else {
+                    debug!(
+                        "Previous record was a previous HEAD, including it with index result"
+                    );
+                    return IndexResult::Promoted(*key, Some(replaced));
                 }
             } else {
                 unreachable!("We check if there is a record to replace before we tried to replace")
@@ -264,11 +277,11 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
         }
     }
 
-    /// Tries to auto promote a container, if the existing record is not a multi-root, and the next
+    /// Tries to auto promote record to a container, if the existing record is not a multi-root, and the next
     /// record is a multi-root in staging mode, and the root content digest matches the xisting
     /// record, auto-promotes the container
     #[inline]
-    fn try_auto_promote_to_container(current: &R, next: &mut R) -> crate::Result<()> {
+    fn try_auto_promote_from_record_to_container(current: &R, next: &mut R) -> crate::Result<()> {
         debug!(
             "Detected upgrade from record to container, checking if auto-promotion condition is met"
         );
@@ -292,6 +305,47 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
             }
             Err(err) => Err(anyhow!(
                 "Could not read as container, auto-promotion could not proceed {err}"
+            )
+            .into()),
+        }
+    }
+
+    /// Tries to auto promote container to a container
+    ///
+    /// If the next container has the same layer content, and the same root, then proceed with an auto-promotion
+    #[inline]
+    fn try_auto_promote_from_container_to_container(
+        current: &R,
+        next: &mut R,
+    ) -> crate::Result<()> {
+        debug!(
+            "Detected upgrade from container to container, checking if auto-promotion condition is met"
+        );
+
+        let current_record = current.to_record();
+        let next_record = next.to_record();
+        match (
+            Container::read(&current_record),
+            Container::read(&next_record),
+        ) {
+            (Ok(lhs), Ok(rhs)) => {
+                if rhs.is_super_set(&lhs) {
+                    debug!("Next container is a super set of the current container, auto-promotion may proceed");
+
+                    if let Some(opts) = next.opts_mut() {
+                        opts.promote();
+
+                        return Ok(());
+                    }
+
+                    error!("Could not promote next, item type is immutable");
+                }
+                Err(anyhow!("Could not auto-promote container, next container must be a valid super set of previous container").into())
+            }
+            (l, r) => Err(anyhow!(
+                "Could not auto-promote container, current has error: {}. next has error: {}",
+                l.is_err(),
+                r.is_err()
             )
             .into()),
         }
@@ -343,7 +397,10 @@ mod test {
     use rayon::iter::ParallelIterator;
 
     use crate::{
-        field, filter, namespace, query::QueryBuilder, util::{Container, PeekExtensions}, HashMapStorage, IRecord, Namespace, Record, RecordableExtensions, ToNamespace, Worker
+        HashMapStorage, IRecord, Namespace, Record, RecordableExtensions, ToNamespace, Worker,
+        field, filter, namespace,
+        query::QueryBuilder,
+        util::{Container, PeekExtensions},
     };
 
     use super::{ConcurrentStorage, Index, VecIndex};
@@ -481,11 +538,28 @@ mod test {
             .unwrap();
         let built = container.to_read_only().unwrap();
 
-        let key = index.index(rec).result().unwrap();
+        let key = index.index(rec.clone()).result().unwrap();
         let key2 = index.index(built.to_record()).result().unwrap();
         assert_eq!(key, key2);
-        let rec = index.get(key2).map(Container::read).unwrap().unwrap();
-        assert_eq!("test container", rec.object(2).at("name").str().unwrap())
+        let _rec = index.get(key2).map(Container::read).unwrap().unwrap();
+        assert_eq!("test container", _rec.object(2).at("name").str().unwrap());
+        
+
+        let mut container = Container::build(rec.clone());
+        container
+            .push_object(&toml::toml! {
+                name = "test container"
+            })
+            .unwrap();
+        container.push_object(&toml::toml! {
+            name = "other test container"
+        }).unwrap();
+
+        let key3 = index.index(container.to_read_only().unwrap().to_record()).result().unwrap();
+        assert_eq!(key2, key3);
+        let _rec = index.get(key3).map(Container::read).unwrap().unwrap();
+        assert_eq!("test container", _rec.object(2).at("name").str().unwrap());
+        assert_eq!("other test container", _rec.object(3).at("name").str().unwrap());
     }
 
     #[test]
@@ -493,21 +567,63 @@ mod test {
         use super::search::par::Search;
         let mut index = Index::<Record, ConcurrentStorage<Record>>::default();
 
-        index.index(Namespace::ephemeral().store("test", &toml::toml! {
-            test = "hello"
-        }));
+        index.index(Namespace::ephemeral().store(
+            "test",
+            &toml::toml! {
+                test = "hello"
+            },
+        ));
 
-        index.index(Namespace::ephemeral().store("test1", &toml::toml! {
-            test = "hello world"
-        }));
+        index.index(Namespace::ephemeral().store(
+            "test1",
+            &toml::toml! {
+                test = "hello world"
+            },
+        ));
 
-
-        index.index(Namespace::ephemeral().store("test2", &toml::toml! {
-            not_test = "hello world 2"
-        }));
+        index.index(Namespace::ephemeral().store(
+            "test2",
+            &toml::toml! {
+                not_test = "hello world 2"
+            },
+        ));
 
         let results = index.search(field("test"));
 
         assert_eq!(2, results.count());
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_index_search_par_stream() {
+        use futures::StreamExt;
+        use super::search::par_stream::Search;
+        let mut index = Index::<Record, ConcurrentStorage<Record>>::default();
+
+        index.index(Namespace::ephemeral().store(
+            "test",
+            &toml::toml! {
+                test = "hello"
+            },
+        ));
+
+        index.index(Namespace::ephemeral().store(
+            "test1",
+            &toml::toml! {
+                test = "hello world"
+            },
+        ));
+
+        index.index(Namespace::ephemeral().store(
+            "test2",
+            &toml::toml! {
+                not_test = "hello world 2"
+            },
+        ));
+
+        let results = index.search(field("test"));
+
+        let count = results.count().await;
+        assert_eq!(2, count);
     }
 }
