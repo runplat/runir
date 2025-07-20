@@ -1,5 +1,6 @@
 mod container;
 pub use container::Container;
+pub use container::ILayerDescriptor;
 pub(crate) use container::Packer;
 
 mod interner;

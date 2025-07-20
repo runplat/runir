@@ -449,6 +449,30 @@ impl<P: Packer> MultiRoot<P> {
         }
     }
 
+    /// Finds all layers that match a predicate based on layer labels
+    #[inline]
+    pub fn find_all_layer_by_labels(
+        &self,
+        find: impl Fn(&Peek) -> bool,
+    ) -> crate::Result<Vec<usize>> {
+        Ok(match &self.state {
+            State::Build { layers, .. } => layers
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, l)| l.0.labels().map(|l| (idx, l)))
+                .filter(|(_, l)| find(l))
+                .map(|p| p.0 + 2)
+                .collect(),
+            State::Read { record } | State::Run { record, .. } => record
+                .iter_layer_desc()?
+                .enumerate()
+                .skip(2) // System/Root layers never have labels
+                .filter(|(.., l)| l.labels().map(|l| find(&l)).unwrap_or_default())
+                .map(|p| p.0)
+                .collect(),
+        })
+    }
+
     /// Prepares the multi-root for runtime
     ///
     /// Note: This state-transition is only required when a multi-root record has packed layers

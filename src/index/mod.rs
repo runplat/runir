@@ -1,11 +1,11 @@
 pub mod search;
 mod storage;
 
-use crate::{IRecord, opts::Branch};
+use crate::{IRecord, opts::Branch, util::Container};
 use anyhow::anyhow;
 use std::u64;
 pub use storage::Storage;
-use tracing::debug;
+use tracing::{debug, error};
 
 /// Index backed by HashMap Storage
 pub type HashIndex<R> = Index<R, HashMapStorage<R>>;
@@ -58,9 +58,10 @@ impl<R> IndexResult<R> {
         R: IRecord,
     {
         match self {
-            IndexResult::Inserted(k) | IndexResult::Deleted(k) | IndexResult::Exists(k, _) | IndexResult::Promoted(k, _) => {
-                Ok(k)
-            }
+            IndexResult::Inserted(k)
+            | IndexResult::Deleted(k)
+            | IndexResult::Exists(k, _)
+            | IndexResult::Promoted(k, _) => Ok(k),
             IndexResult::CannotPromote(r) => {
                 Err(anyhow!("Failed to promote record {}", r.uuid()).into())
             }
@@ -208,6 +209,14 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
                         );
                         return IndexResult::CannotPromote(record);
                     }
+                } else if !current.opts().is_multi() && record.opts().is_multi() {
+                    match Self::try_auto_promote_to_container(&current, &mut record) {
+                        Err(err) => {
+                            error!("{err}");
+                            return IndexResult::CannotPromote(record);
+                        },
+                        _ => {}
+                    }
                 } else {
                     return IndexResult::CannotPromote(record);
                 }
@@ -245,6 +254,39 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
             }
 
             self.index(record)
+        }
+    }
+
+    /// Tries to auto promote a container, if the existing record is not a multi-root, and the next
+    /// record is a multi-root in staging mode, and the root content digest matches the xisting
+    /// record, auto-promotes the container
+    #[inline]
+    fn try_auto_promote_to_container(current: &R, next: &mut R) -> crate::Result<()> {
+        debug!(
+            "Detected upgrade from record to container, checking if auto-promotion condition is met"
+        );
+
+        let record = next.to_record();
+        match Container::read(&record) {
+            Ok(container) => {
+                if container.content() == current.content() {
+                    debug!(
+                        "Current container content digest matches container root's content digest, auto-promote conditions have been met"
+                    );
+
+                    if let Some(opts) = next.opts_mut() {
+                        opts.promote();
+
+                        return Ok(());
+                    }
+                }
+
+                Err(anyhow!("Could not auto-promote container, root digest does not match current root digest").into())
+            }
+            Err(err) => Err(anyhow!(
+                "Could not read as container, auto-promotion could not proceed {err}"
+            )
+            .into()),
         }
     }
 }
@@ -293,7 +335,10 @@ mod test {
     use bytes::Bytes;
 
     use crate::{
-        field, filter, namespace, query::QueryBuilder, util::{Container, PeekExtensions}, HashMapStorage, IRecord, Namespace, Record, RecordableExtensions, ToNamespace, Worker
+        HashMapStorage, IRecord, Namespace, Record, RecordableExtensions, ToNamespace, Worker,
+        field, filter, namespace,
+        query::QueryBuilder,
+        util::{Container, PeekExtensions},
     };
 
     use super::VecIndex;
@@ -390,10 +435,16 @@ mod test {
 
         let mut index = VecIndex::default();
         let key = index.index(rec.clone()).result().unwrap();
-        index.index(rec.clone()).result().expect("should just skip if record is already indexed");
+        index
+            .index(rec.clone())
+            .result()
+            .expect("should just skip if record is already indexed");
 
         let staged = rec.stage(Bytes::from_static(b"hello world 2")).unwrap();
-        assert!(index.index(staged.clone()).result().is_err(), "should not be able to auto-promote a record if the previous was not deleted");
+        assert!(
+            index.index(staged.clone()).result().is_err(),
+            "should not be able to auto-promote a record if the previous was not deleted"
+        );
         assert!(index.delete(key), "should be able to delete full records");
 
         let key = index.index(staged).result().unwrap();
@@ -403,14 +454,32 @@ mod test {
         // When no existing record exists
         let rec = ns.commit("test2", b"hello world");
         let mut container = Container::build(rec);
-        container.push_object(&toml::toml! {
-            name = "test container"
-        }).unwrap();
+        container
+            .push_object(&toml::toml! {
+                name = "test container"
+            })
+            .unwrap();
         let built = container.to_read_only().unwrap();
 
         let key = index.index(built.to_record()).result().unwrap();
 
         let rec = index.get(key).map(Container::read).unwrap().unwrap();
+        assert_eq!("test container", rec.object(2).at("name").str().unwrap());
+
+        // Test auto-promoting a container
+        let rec = ns.commit("test3", b"hello world");
+        let mut container = Container::build(rec.clone());
+        container
+            .push_object(&toml::toml! {
+                name = "test container"
+            })
+            .unwrap();
+        let built = container.to_read_only().unwrap();
+
+        let key = index.index(rec).result().unwrap();
+        let key2 = index.index(built.to_record()).result().unwrap();
+        assert_eq!(key, key2);
+        let rec = index.get(key2).map(Container::read).unwrap().unwrap();
         assert_eq!("test container", rec.object(2).at("name").str().unwrap())
     }
 }

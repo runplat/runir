@@ -344,8 +344,8 @@ impl Record {
     #[inline]
     pub fn load<'de, T: Deserialize<'de> + 'de>(&'de self) -> Option<T> {
         match &self.data {
-            Data::Bytes(bytes) if self.is_valid() => flexbuffers::from_slice(&bytes).ok(),
-            Data::Virtual(bytes) if self.is_valid() => flexbuffers::from_slice(&bytes).ok(),
+            Data::Bytes(bytes) if self.is_valid() && self.opts().is_object() => flexbuffers::from_slice(&bytes).ok(),
+            Data::Virtual(bytes) if self.is_valid() && self.opts().is_object() => flexbuffers::from_slice(&bytes).ok(),
             _ => None,
         }
     }

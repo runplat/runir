@@ -3,6 +3,7 @@ use cmd::CreateRecord;
 use cmd::DeleteRecord;
 use cmd::LookupRecord;
 use cmd::ObjectFormat;
+use runir::util::Container;
 use runir::util::PeekExtensions;
 
 use clap::{Args, Parser, Subcommand};
@@ -45,19 +46,19 @@ struct KvConfig {
 #[derive(Subcommand)]
 enum KvCommands {
     /// Puts a record into the kv store
-    /// 
+    ///
     /// NOTE: When storing a structured object (via `-o` or `--json`/`--toml`/`--yaml`),
     /// the original input content is **not preserved verbatim**.
-    /// 
+    ///
     /// Instead, it is parsed, restructured internally, and re-serialized for storage.
     /// This means the resulting digest or output format on round-trip may differ from the original input.
-    /// 
+    ///
     /// Use raw blob mode (no `-o`) if you want exact byte-for-byte content preservation.
     Put(CreateRecord),
     /// Gets a record from the kv store
-    /// 
+    ///
     /// NOTE: If the record was stored as a structured object, it will be deserialized and re-encoded in the selected format.
-    /// 
+    ///
     /// This round-trip will not preserve the original byte layout of the input — even if the logical content is the same.
     /// For lossless raw content retrieval, avoid `-o` and use blob mode.
     Get(LookupRecord),
@@ -68,7 +69,7 @@ enum KvCommands {
 }
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> runir::Result<()> {
     let program = Runir::parse();
 
     let mut filter = tracing_subscriber::EnvFilter::from_default_env();
@@ -120,6 +121,69 @@ async fn main() -> std::io::Result<()> {
                         peek,
                     } = lookup_record;
                     if let Some(value) = kv.ns(ns).get_raw(&label) {
+                        if value.opts().is_multi() {
+                            let container = Container::read(value)?;
+
+                            let matches = container.find_all_layer_by_labels(|p| {
+                                matches!(
+                                    p.at("object_projection").str(),
+                                    Some("json") | Some("toml") | Some("yaml")
+                                )
+                            })?;
+
+                            use runir::util::ILayerDescriptor;
+                            if let Some((.., layer)) = matches
+                                .iter()
+                                .filter_map(|m| {
+                                    container
+                                        .layer_desc(*m)
+                                        .filter(|d| d.is_object())
+                                        .map(|d| (d, *m))
+                                })
+                                .next()
+                            {
+                                if let Some(ref peek) = peek {
+                                    if peek == "." {
+                                        if let Some(map) = container.object(layer).iter_kv() {
+                                            for kvp in map {
+                                                eprintln!(
+                                                    "{}: {:?} = {}",
+                                                    kvp.0,
+                                                    kvp.1.flexbuffer_type(),
+                                                    kvp.1.deref()
+                                                );
+                                            }
+                                        } else if let Some(vec) = container.object(layer).iter() {
+                                            for (i, v) in vec.enumerate() {
+                                                eprintln!(
+                                                    "[{i}]: {:?} = {}",
+                                                    v.flexbuffer_type(),
+                                                    v.deref()
+                                                );
+                                            }
+                                        } else {
+                                            eprintln!(
+                                                "Record is neither a map or vec at the root, this record has been mis-configured"
+                                            );
+                                            exit(1);
+                                        }
+                                    } else {
+                                        if let Some(s) = container.object(layer).at_dot(&peek).val()
+                                        {
+                                            println!("{}", s.deref());
+                                        }
+                                    }
+
+                                    return Ok(());
+                                } else {
+                                    tokio::io::stdout()
+                                        .write_all(IRecord::bytes(&container))
+                                        .await?;
+                                    return Ok(());
+                                }
+                            }
+                        }
+
                         if value.opts().is_object() {
                             if let Some(peek) = peek {
                                 if peek == "." {
@@ -208,57 +272,23 @@ async fn main() -> std::io::Result<()> {
                             kv.refresh().await?;
                             kv.save().await?;
                             eprintln!("Deleted `{label}`");
-                        },
+                        }
                         Err(err) => {
                             eprintln!("{err}");
                             exit(1)
-                        },
+                        }
                     }
-
                 }
                 KvCommands::Info(lookup_record) => {
                     let LookupRecord { label, .. } = lookup_record;
 
                     if let Some(value) = kv.get_raw(&label) {
-                        let content = format!("sha256:{}", hex::encode(value.content()));
-                        let is_virtual = value.is_virtual();
-                        let is_valid = value.is_valid();
-                        let uuid = value.uuid().as_simple().to_string();
-                        let opts = value.opts();
-                        let is_archivable = opts.is_archivable();
-                        let is_idempotent = opts.is_idempotent();
-                        let is_indexable = opts.is_indexable();
-                        let is_object = opts.is_object();
-                        let is_manifest = opts.is_manifest();
-                        let size = value.bytes().len();
-                        let ts = time::UtcDateTime::from_unix_timestamp(value.ts() as i64)
-                            .expect("should be valid timestamp")
-                            .to_string();
-                        let age = format!("{:#?}", value.age());
-
-                        println!(
-                            "{}",
-                            toml::toml! {
-                                uuid = uuid
-                                ts = ts
-
-                                [data]
-                                content = content
-                                size = size
-
-                                [archive_state]
-                                is_virtual = is_virtual
-                                is_valid = is_valid
-                                age = age
-
-                                [opts]
-                                is_archivable = is_archivable
-                                is_idempotent = is_idempotent
-                                is_indexable = is_indexable
-                                is_object = is_object
-                                is_manifest = is_manifest
-                            }
-                        );
+                        if value.opts().is_multi() {
+                            let container = Container::read(value)?;
+                            print_info(container);
+                        } else {
+                            print_info(value);
+                        }
                     } else {
                         eprintln!("Object not found");
                         exit(1)
@@ -269,4 +299,36 @@ async fn main() -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_info(value: impl IRecord) {
+    let content = format!("sha256:{}", hex::encode(value.content()));
+    let uuid = value.uuid().as_simple().to_string();
+    let opts = value.opts();
+    let is_archivable = opts.is_archivable();
+    let is_idempotent = opts.is_idempotent();
+    let is_indexable = opts.is_indexable();
+    let is_object = opts.is_object();
+    let is_manifest = opts.is_manifest();
+    let is_multi = opts.is_multi();
+    let size = value.bytes().len();
+
+    println!(
+        "{}",
+        toml::toml! {
+            uuid = uuid
+
+            [data]
+            content = content
+            size = size
+
+            [opts]
+            is_archivable = is_archivable
+            is_idempotent = is_idempotent
+            is_indexable = is_indexable
+            is_object = is_object
+            is_manifest = is_manifest
+            is_multi = is_multi
+        }
+    );
 }

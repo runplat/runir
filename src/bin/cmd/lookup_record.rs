@@ -6,7 +6,7 @@ use super::Format;
 pub struct LookupRecord {
     #[clap(flatten)]
     pub format: Format,
-    #[clap(long)]
+    #[clap(long, short)]
     pub peek: Option<String>,
     /// Record label
     pub label: String,
