@@ -150,7 +150,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     io::Error,
     ops::{Deref, DerefMut},
-    path::PathBuf,
+    path::PathBuf, sync::Arc,
 };
 use tracing::{debug, error};
 
@@ -348,6 +348,12 @@ impl KeyValue {
     #[inline]
     pub fn take_snapshot(&self) -> VecIndex<Record> {
         self.shared.snapshot().clone()
+    }
+
+    /// Returns snapshot of staging
+    #[inline]
+    pub fn staging(&self) -> Arc<VecIndex<Record>> {
+        self.shared.state().snapshot(super::state::Snapshot::Staging).clone()
     }
 
     /// Forces a sync of the underlying store.

@@ -6,6 +6,7 @@ use cmd::LookupRecord;
 use cmd::ObjectFormat;
 use runir::container;
 use runir::content;
+use runir::search::iter::Search;
 use runir::util::Container;
 use runir::util::PeekExtensions;
 
@@ -122,7 +123,12 @@ async fn main() -> runir::Result<()> {
                     if let Some(inserted) = kv.search(content(record.content()).or(container(record.content()))).next() {
                         println!("{}", hex::encode(inserted.content()));
                     } else {
-                        println!("{} @ Staging", hex::encode(record.content()));
+                        if let Some(_) = kv.staging().search(content(record.content()).or(container(record.content()))).next() {
+                            println!("{} @ Staging", hex::encode(record.content()));
+                        } else {
+                            eprintln!("Cannot stage {}, Staging is already occupied", hex::encode(record.content()));
+                            exit(1)
+                        }
                     }
                     return Ok(());
                 }

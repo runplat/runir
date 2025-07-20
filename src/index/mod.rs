@@ -219,7 +219,7 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
                 } else if !current.opts().is_multi() && record.opts().is_multi() {
                     match Self::try_auto_promote_from_record_to_container(&current, &mut record) {
                         Err(err) => {
-                            error!("{err}");
+                            debug!("{err}");
                             return IndexResult::CannotPromote(record);
                         }
                         _ => {}
@@ -227,7 +227,7 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
                 } else if current.opts().is_multi() && record.opts().is_multi() {
                     match Self::try_auto_promote_from_container_to_container(&current, &mut record) {
                         Err(err) => {
-                            error!("{err}");
+                            debug!("{err}");
                             return IndexResult::CannotPromote(record);
                         }
                         _ => {}
