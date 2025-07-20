@@ -535,7 +535,7 @@ impl From<&str> for PeekPath {
 
 mod peek_path {
     use super::PeekExtensions;
-    use crate::util::{Intern, impl_interner};
+    use crate::util::{impl_interner, Intern};
 
     /// ⚠️ **Experimental API** – uses pointer arithmetic and interning.
     ///
@@ -686,13 +686,11 @@ mod peek_path {
         // }
 
         pub fn append(&self, seg: &str) -> &'static PeekPath {
-            let _seg = seg.intern();
-            let seg: *const _ = _seg;
-            let chain_hash = self.structural_hash(seg as *const () as usize); // XOR of all previous segment pointers
+            let chain_hash = self.structural_hash(seg.addr_of_interned() as usize); // XOR of all previous segment pointers
 
             // Create a new immutable node
             let new = PathNode {
-                current: _seg,
+                current: seg.intern(),
                 link: chain_hash,
             }
             .intern();
@@ -707,7 +705,7 @@ mod peek_path {
             self.resolve()
                 .iter()
                 .last()
-                .map(|s| *s as *const _ as *const () as usize)
+                .map(|s| s.addr_of_interned() as usize)
                 .map_or(0, |l| l ^ next)
         }
 
@@ -717,16 +715,14 @@ mod peek_path {
 
             // let mut last_n_link = 0;
 
-            let interner = PathNode::interner();
+            let intern_state = PathNode::interner_state();
             while let Some(node) = current {
                 let node = unsafe { node.as_ref().unwrap() };
                 path.push(node.current);
 
-                let next_ptr = node.link ^ (node.current as *const _ as *const () as usize);
+                let next_ptr = node.link ^ (node.current.addr_of_interned() as usize);
 
-                current = interner
-                    .interned
-                    .iter()
+                current = intern_state.iter().copied()
                     .find(|n| {
                         // debug!(
                         //     "Searching: n.link: {}, node.link: {} - \t\t\t depth: {}, path.len: {}",
@@ -736,7 +732,7 @@ mod peek_path {
                         //     self.depth,
                         //     path.len(),
                         // );
-                        (n.current as *const _ as *const () as usize) == next_ptr
+                        (n.current.addr_of_interned() as usize) == next_ptr
                             && n.link != node.link
                             && if node.link == 0 { // last_n_link ^ node.link == 0 {
                                 // we're inside the chain
@@ -756,11 +752,10 @@ mod peek_path {
                     //     );
                     //     // last_n_link = n.link;
                     // })
-                    .map(|n| *n as *const _);
+                    .map(|n| n as *const _);
 
                 if current.is_none() {
-                    if let Some(last) = interner
-                        .interned
+                    if let Some(last) = intern_state
                         .iter()
                         .find(|n| {
                             // debug!(
@@ -771,7 +766,7 @@ mod peek_path {
                             //     self.depth,
                             //     path.len(),
                             // );
-                            (n.current as *const _ as *const () as usize) == next_ptr
+                            (n.current.addr_of_interned() as usize) == next_ptr
                         })
                         // .inspect(|n| {
                         //     debug!(
@@ -797,24 +792,8 @@ mod peek_path {
         }
     }
 
-    impl_interner!(path_node_interner, PathNode);
-    impl_interner!(path_interner, PeekPath);
-
-    impl Intern for PathNode {
-        type Interner = path_node_interner::Interner;
-
-        fn to_static(val: &Self) -> &'static Self {
-            Box::leak(Box::new(val.clone()))
-        }
-    }
-
-    impl Intern for PeekPath {
-        type Interner = path_interner::Interner;
-    
-        fn to_static(val: &Self) -> &'static Self {
-            Box::leak(Box::new(val.clone()))
-        }
-    }
+    impl_interner!(path_node_interner, PathNode, Clone::clone);
+    impl_interner!(path_interner, PeekPath, Clone::clone);
 
     #[test]
     #[tracing_test::traced_test]
