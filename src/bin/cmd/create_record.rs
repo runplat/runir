@@ -48,6 +48,8 @@ impl CreateRecord {
             let record = ns.commit(&label, content.as_bytes());
             let mut container = Container::build(record);
 
+            let content_digest = hex::encode(container.content());
+
             match projection {
                 ObjectFormat::Yaml => {
                     let yaml = serde_yaml::from_str::<serde_yaml::Value>(&content)
@@ -57,6 +59,7 @@ impl CreateRecord {
                         &yaml,
                         toml::toml! {
                              object_projection = "yaml"
+                             projected_content = content_digest
                         },
                     )?;
                 }
@@ -68,6 +71,7 @@ impl CreateRecord {
                         &json,
                         toml::toml! {
                              object_projection = "json"
+                             projected_content = content_digest
                         },
                     )?;
                 }
@@ -79,6 +83,7 @@ impl CreateRecord {
                         &toml,
                         toml::toml! {
                              object_projection = "toml"
+                             projected_content = content_digest
                         },
                     )?;
                 }

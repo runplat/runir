@@ -122,13 +122,17 @@ async fn main() -> runir::Result<()> {
                     } = lookup_record;
                     if let Some(value) = kv.ns(ns).get_raw(&label) {
                         if value.opts().is_multi() {
+                            debug!("Record is multi-root, reading as Container");
                             let container = Container::read(value)?;
+
+                            let content_digest = hex::encode(container.content());
 
                             let matches = container.find_all_layer_by_labels(|p| {
                                 matches!(
                                     p.at("object_projection").str(),
                                     Some("json") | Some("toml") | Some("yaml")
-                                )
+                                ) &&
+                                p.at("projected_content").str() ==  Some(content_digest.as_str())
                             })?;
 
                             use runir::util::ILayerDescriptor;
@@ -142,6 +146,7 @@ async fn main() -> runir::Result<()> {
                                 })
                                 .next()
                             {
+                                debug!("Found projection at layer: {layer}");
                                 if let Some(ref peek) = peek {
                                     if peek == "." {
                                         if let Some(map) = container.object(layer).iter_kv() {
