@@ -610,6 +610,18 @@ impl<P: Packer> MultiRoot<P> {
         }
     }
 
+    /// Converts to the inner record
+    /// 
+    /// Note: If currently in "Build" state, all pending layers will be lost
+    #[inline]
+    pub fn to_inner(self) -> Record {
+        match self.state {
+            State::Build { root, .. } => root,
+            State::Read { record } => record,
+            State::Run { record, .. } => record,
+        }
+    }
+
     #[inline]
     fn unpack(&self, layer: usize, desc: impl ILayerDescriptor) -> crate::Result<()> {
         match &self.state {
