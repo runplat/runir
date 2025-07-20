@@ -39,7 +39,7 @@ pub enum IndexResult<R> {
     Promoted(u64, Option<R>),
     /// Index did not insert the record because it already exists
     Exists(u64, R),
-    /// Failed to promote the record, because the record was not mutable
+    /// Failed to promote the record
     CannotPromote(R),
     /// Cannot insert a deleted record
     CannotInsertDeletedRecord(R),

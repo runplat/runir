@@ -116,7 +116,12 @@ async fn main() -> runir::Result<()> {
                     kv.put_raw(record.clone())?;
                     kv.refresh().await?;
                     kv.save().await?;
-                    println!("{}", hex::encode(record.content()));
+
+                    if let Some(inserted) = kv.search(content(record.content())).next() {
+                        println!("{}", hex::encode(inserted.content()));
+                    } else {
+                        println!("{} @ Staging", hex::encode(record.content()));
+                    }
                     return Ok(());
                 }
                 KvCommands::Get(lookup_record) => {

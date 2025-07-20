@@ -137,15 +137,22 @@ impl State {
                     }
                     crate::index::IndexResult::CannotPromote(staging) => {
                         let uuid = staging.uuid();
-                        match staging_index.index_unchecked(staging) {
-                            crate::index::IndexResult::Inserted(k) => {
-                                debug!("Staging {uuid} @ {k}")
-                            },
-                            crate::index::IndexResult::Exists(k, skipping) => {
-                                debug!("Staging already occupied @ {k}, skipping {}", skipping.uuid())
-                            },
-                            _ => {
+                        let key = next_snapshot.reverse_lookup(&staging).expect("should return a key since cannot promote was returned");
+                        let existing = next_snapshot.get(key).expect("should return since cannot promoted returned");
 
+                        if existing.content() == staging.content() {
+                            debug!("Attempted to insert duplicate content {uuid} @ {key}, skipping");
+                        } else {
+                            match staging_index.index_unchecked(staging) {
+                                crate::index::IndexResult::Inserted(k) => {
+                                    debug!("Staging {uuid} @ {k}")
+                                },
+                                crate::index::IndexResult::Exists(k, skipping) => {
+                                    debug!("Staging already occupied @ {k}, skipping {}", skipping.uuid())
+                                },
+                                _ => {
+    
+                                }
                             }
                         }
                     }

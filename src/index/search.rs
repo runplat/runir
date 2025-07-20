@@ -1,7 +1,5 @@
 pub mod iter {
     use ahash::{HashSet, HashSetExt};
-    use tracing::debug;
-
     use crate::{IRecord, Query, Storage};
 
     pub trait Search<S: Storage>: AsRef<S> {
@@ -20,7 +18,6 @@ pub mod iter {
             self.as_ref().iter_records().filter(move |r| {
                 let matches = query.matches(r);
                 let dedupe = dedupe.insert(r.content());
-                debug!(dedupe = !dedupe, "will dedupe");
                 dedupe && matches
             })
         }
