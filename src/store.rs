@@ -1,11 +1,9 @@
 use crate::{
-    IRecord, Namespace, Queue, Record, VecIndex, VirtualData, Worker,
-    archive::{Entry, FileEntryReference, Manifest},
-    queue::Pusher,
+    archive::{Entry, FileEntryReference, Manifest}, queue::Pusher, util::Intern, IRecord, Namespace, Queue, Record, VecIndex, VirtualData, Worker
 };
 use ahash::{HashSet, HashSetExt};
 use sha2::{Digest, Sha256};
-use std::{io::Error, path::{Path, PathBuf}, sync::{Arc, OnceLock}
+use std::{io::Error, path::{Path, PathBuf}, sync::Arc
 };
 use tracing::{debug, error};
 
@@ -366,7 +364,7 @@ impl StoreArchive {
         Ok(Self {
             members,
             output_dir,
-            archive: intern_str(&archive),
+            archive: &archive.intern(),
         })
     }
 
@@ -452,48 +450,6 @@ impl Default for Store {
             work_dir: std::env::temp_dir(),
         }
     }
-}
-
-static INTERNER: OnceLock<Interner> = OnceLock::new();
-
-pub(crate) fn intern_str(str: &str) -> &'static str {
-    let interner = INTERNER.get_or_init(Interner::default);
-    interner.intern(str)
-}
-
-#[derive(Default)]
-struct Interner {
-    strings: dashmap::DashSet<&'static str>,
-    check_list: dashmap::DashMap<u64, &'static str>,
-}
-
-impl Interner {
-    pub fn intern(&self, str: &str) -> &'static str {
-        use std::hash::Hash;
-        use std::hash::Hasher;
-        if let Some(v) = self.strings.get(str) {
-            &(*v)
-        } else {
-            let mut hasher = ahash::AHasher::default();
-            str.hash(&mut hasher);
-
-            let s = self.check_list.entry(hasher.finish()).or_insert_with(|| {
-                let interned: &'static str = Box::leak(str.to_string().into_boxed_str());
-                &interned
-            });
-
-            let s = &(*s);
-            self.strings.insert(s);
-            s
-        }
-    }
-}
-
-#[test]
-fn test_interner() {
-    let interner = Interner::default();
-    let hello_world = interner.intern("hello world");
-    assert_eq!("hello world", hello_world);
 }
 
 #[cfg(test)]

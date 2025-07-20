@@ -557,13 +557,11 @@ impl UStarHeader {
 }
 
 /// Adapter that provides common fn's for working with the bytes of an archive entry header,
-///
 #[derive(Clone, Debug, Default)]
 struct HeaderAdapter(Bytes);
 
 impl HeaderAdapter {
     /// Creates a new header adapter,
-    ///
     const fn new() -> Self {
         HeaderAdapter(Bytes::new())
     }

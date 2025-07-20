@@ -2,6 +2,10 @@ mod container;
 pub use container::Container;
 pub(crate) use container::Packer;
 
+mod interner;
+pub use interner::Intern;
+pub(crate) use interner::impl_interner;
+
 mod peek;
 pub use peek::Peek;
 pub use peek::PeekPath;

@@ -280,7 +280,7 @@ impl<'peek> PeekExtensions<'peek> for &'peek Peek<'peek> {
     fn val(self) -> Option<Peek<'peek>> {
         Some(self.clone())
     }
-    
+
     #[inline]
     fn blob(self) -> Option<&'peek [u8]> {
         self.clone().0.get_blob().ok().map(|b| b.0)
@@ -355,7 +355,7 @@ impl<'peek> PeekExtensions<'peek> for Peek<'peek> {
     fn val(self) -> Option<Peek<'peek>> {
         Some(self)
     }
-    
+
     #[inline]
     fn blob(self) -> Option<&'peek [u8]> {
         self.0.get_blob().ok().map(|b| b.0)
@@ -483,10 +483,10 @@ impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
     fn val(self) -> Option<Peek<'peek>> {
         self.cloned()
     }
-    
+
     #[inline]
     fn blob(self) -> Option<&'peek [u8]> {
-       self.cloned().and_then(|r| r.blob())
+        self.cloned().and_then(|r| r.blob())
     }
 }
 
@@ -535,6 +535,7 @@ impl From<&str> for PeekPath {
 
 mod peek_path {
     use super::PeekExtensions;
+    use crate::util::{Intern, impl_interner};
 
     /// ⚠️ **Experimental API** – uses pointer arithmetic and interning.
     ///
@@ -596,8 +597,8 @@ mod peek_path {
         }
     }
 
-    #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct PathNode {
+    #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct PathNode {
         current: &'static str,
         link: usize,
     }
@@ -634,12 +635,6 @@ mod peek_path {
         #[inline]
         pub fn lookup<'a>(&'a self, peek: impl PeekExtensions<'a>) -> impl PeekExtensions<'a> {
             peek.at_path(self.resolve().as_slice())
-        }
-
-        /// Converts PeekPath into &'static PeekPath
-        #[inline]
-        pub fn to_static(self) -> &'static Self {
-            intern_path(self)
         }
 
         // fn append(&self, segment: &str) -> &'static PeekPath {
@@ -691,20 +686,21 @@ mod peek_path {
         // }
 
         pub fn append(&self, seg: &str) -> &'static PeekPath {
-            let _seg = intern_str(seg);
+            let _seg = seg.intern();
             let seg: *const _ = _seg;
             let chain_hash = self.structural_hash(seg as *const () as usize); // XOR of all previous segment pointers
 
             // Create a new immutable node
-            let new = intern_path_node(PathNode {
+            let new = PathNode {
                 current: _seg,
                 link: chain_hash,
-            });
+            }
+            .intern();
 
-            intern_path(PeekPath {
+            PeekPath {
                 head: Some(new),
                 depth: self.depth + 1,
-            })
+            }.intern()
         }
 
         fn structural_hash(&self, next: usize) -> usize {
@@ -719,7 +715,7 @@ mod peek_path {
             let mut path = Vec::new();
             let mut current = self.head;
 
-            let mut last_n_link = 0;
+            // let mut last_n_link = 0;
 
             while let Some(node) = current {
                 let node = unsafe { node.as_ref().unwrap() };
@@ -727,41 +723,67 @@ mod peek_path {
 
                 let next_ptr = node.link ^ (node.current as *const _ as *const () as usize);
 
-                current = PATH_NODE_INTERNER
-                    .get()
-                    .and_then(|set| {
-                        set.nodes
-                            .iter()
-                            .find(|n| {
-                                (n.current as *const _ as *const () as usize) == next_ptr
-                                    && n.link != node.link
-                                    && if last_n_link ^ node.link == 0 {
-                                        // we're inside the chain
-                                        path.len() < self.depth && n.link != 0 // while we're inside the chain, and still not at the root, lhs can't be 0
-                                    } else {
-                                        n.link != 0 && last_n_link == 0 // we're not yet inside the chain, so lhs_link must be 0 and n.link can't be the root
-                                    }
-                            })
-                            .inspect(|n| {
-                                // eprintln!(
-                                //     "link: {}, {}, {} - \t\t\t depth: {}, path.len: {}",
-                                //     n.link,
-                                //     node.link,
-                                //     last_n_link ^ node.link == 0,
-                                //     self.depth,
-                                //     path.len(),
-                                // );
-                                last_n_link = n.link;
-                            })
+                current = PathNode::interner()
+                    .interned
+                    .iter()
+                    .find(|n| {
+                        // debug!(
+                        //     "Searching: n.link: {}, node.link: {} - \t\t\t depth: {}, path.len: {}",
+                        //     n.link,
+                        //     node.link,
+                        //     // last_n_link ^ node.link == 0,
+                        //     self.depth,
+                        //     path.len(),
+                        // );
+                        (n.current as *const _ as *const () as usize) == next_ptr
+                            && n.link != node.link
+                            && if node.link == 0 { // last_n_link ^ node.link == 0 {
+                                // we're inside the chain
+                                path.len() < self.depth && n.link != 0 // while we're inside the chain, and still not at the root, lhs can't be 0
+                            } else {
+                                n.link != 0 // && last_n_link == 0 // we're not yet inside the chain, so lhs_link must be 0 and n.link can't be the root
+                            }
                     })
+                    // .inspect(|n| {
+                    //     debug!(
+                    //         "\tFound --> n.link: {}, node.link: {} - \t\t\t depth: {}, path.len: {}",
+                    //         n.link,
+                    //         node.link,
+                    //         // last_n_link ^ node.link == 0,
+                    //         self.depth,
+                    //         path.len(),
+                    //     );
+                    //     // last_n_link = n.link;
+                    // })
                     .map(|n| *n as *const _);
 
                 if current.is_none() {
-                    if let Some(last) = PATH_NODE_INTERNER.get().and_then(|set| {
-                        set.nodes
-                            .iter()
-                            .find(|n| (n.current as *const _ as *const () as usize) == next_ptr)
-                    }) {
+                    if let Some(last) = PathNode::interner()
+                        .interned
+                        .iter()
+                        .find(|n| {
+                            // debug!(
+                            //     "Searching for root: n.current: {}, next_ptr: {} - \t\t\t depth: {}, path.len: {}",
+                            //     n.current,
+                            //     next_ptr,
+                            //     // last_n_link ^ node.link == 0,
+                            //     self.depth,
+                            //     path.len(),
+                            // );
+                            (n.current as *const _ as *const () as usize) == next_ptr
+                        })
+                        // .inspect(|n| {
+                        //     debug!(
+                        //         "\tFound root --> n.current: {}, next_ptr: {} - \t\t\t depth: {}, path.len: {}",
+                        //         n.current,
+                        //         next_ptr,
+                        //         // last_n_link ^ node.link == 0,
+                        //         self.depth,
+                        //         path.len(),
+                        //     );
+                        // })
+                            
+                    {
                         if path.len() > 1 {
                             path.push(last.current);
                         }
@@ -774,84 +796,34 @@ mod peek_path {
         }
     }
 
-    static PATH_NODE_INTERNER: std::sync::OnceLock<NodeInterner> = std::sync::OnceLock::new();
+    impl_interner!(path_node_interner, PathNode);
+    impl_interner!(path_interner, PeekPath);
 
-    fn intern_path_node(node: PathNode) -> &'static PathNode {
-        let interner = PATH_NODE_INTERNER.get_or_init(NodeInterner::default);
-        interner.intern(node)
-    }
+    impl Intern for PathNode {
+        type Interner = path_node_interner::Interner;
 
-    static PATH_INTERNER: std::sync::OnceLock<PathInterner> = std::sync::OnceLock::new();
-
-    fn intern_path(path: PeekPath) -> &'static PeekPath {
-        let interner = PATH_INTERNER.get_or_init(PathInterner::default);
-        interner.intern(path)
-    }
-
-    #[derive(Default)]
-    struct PathInterner {
-        paths: dashmap::DashSet<&'static PeekPath>,
-        check_list: dashmap::DashMap<u64, &'static PeekPath>,
-    }
-
-    impl PathInterner {
-        pub fn intern(&self, path: PeekPath) -> &'static PeekPath {
-            use std::hash::Hash;
-            use std::hash::Hasher;
-            if let Some(v) = self.paths.get(&path) {
-                &(*v)
-            } else {
-                let mut hasher = ahash::AHasher::default();
-                path.hash(&mut hasher);
-
-                let s = self.check_list.entry(hasher.finish()).or_insert_with(|| {
-                    let interned: &'static PeekPath = Box::leak(Box::new(path));
-                    interned
-                });
-
-                self.paths.insert(&s);
-
-                &s
-            }
+        fn to_static(val: &Self) -> &'static Self {
+            Box::leak(Box::new(val.clone()))
         }
     }
 
-    #[derive(Default)]
-    struct NodeInterner {
-        nodes: dashmap::DashSet<&'static PathNode>,
-        check_list: dashmap::DashMap<u64, &'static PathNode>,
-    }
-
-    impl NodeInterner {
-        pub fn intern(&self, node: PathNode) -> &'static PathNode {
-            use std::hash::Hash;
-            use std::hash::Hasher;
-            if let Some(v) = self.nodes.get(&node) {
-                &(*v)
-            } else {
-                let mut hasher = ahash::AHasher::default();
-                node.hash(&mut hasher);
-
-                let s = self.check_list.entry(hasher.finish()).or_insert_with(|| {
-                    let interned: &'static PathNode = Box::leak(Box::new(node));
-                    interned
-                });
-
-                self.nodes.insert(&s);
-
-                &s
-            }
+    impl Intern for PeekPath {
+        type Interner = path_interner::Interner;
+    
+        fn to_static(val: &Self) -> &'static Self {
+            Box::leak(Box::new(val.clone()))
         }
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_peek_path() {
         let peek_path = PeekPath::default();
         let other_values = &peek_path["other"]["values"]["also_important"];
 
-        // eprintln!("{:?}", &peek_path["other"].resolve());
-        // eprintln!("{:?}", other_values["also_important"].resolve());
-        // eprintln!("{:?}", other_values["test1"]["test2"].resolve());
+        eprintln!("{:?}", &peek_path["other"].resolve());
+        eprintln!("{:?}", other_values["also_important"].resolve());
+        eprintln!("{:?}", other_values["test1"]["test2"].resolve());
 
         assert_eq!(
             vec!["other", "values", "also_important", "also_important"],
@@ -865,47 +837,5 @@ mod peek_path {
             vec!["other", "values", "also_important", "also_important"],
             other_values["also_important"].resolve()
         );
-    }
-
-    static INTERNER: std::sync::OnceLock<Interner> = std::sync::OnceLock::new();
-
-    pub(crate) fn intern_str(str: &str) -> &'static str {
-        let interner = INTERNER.get_or_init(Interner::default);
-        interner.intern(str)
-    }
-
-    #[derive(Default)]
-    struct Interner {
-        strings: dashmap::DashSet<&'static str>,
-        check_list: dashmap::DashMap<u64, &'static str>,
-    }
-
-    impl Interner {
-        pub fn intern(&self, str: &str) -> &'static str {
-            use std::hash::Hash;
-            use std::hash::Hasher;
-            if let Some(v) = self.strings.get(str) {
-                &(*v)
-            } else {
-                let mut hasher = ahash::AHasher::default();
-                str.hash(&mut hasher);
-
-                let s = self.check_list.entry(hasher.finish()).or_insert_with(|| {
-                    let interned: &'static str = Box::leak(str.to_string().into_boxed_str());
-                    &interned
-                });
-
-                let s = &(*s);
-                self.strings.insert(s);
-                s
-            }
-        }
-    }
-
-    #[test]
-    fn test_interner() {
-        let interner = Interner::default();
-        let hello_world = interner.intern("hello world");
-        assert_eq!("hello world", hello_world);
     }
 }
