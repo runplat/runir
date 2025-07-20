@@ -412,7 +412,10 @@ impl<P: Packer> MultiRoot<P> {
                 multi_root.end_vector();
 
                 let mut record = root.stage(Bytes::copy_from_slice(builder.view()))?;
-                record.opts_mut().expect("should always be able to mutate options from a full record").set_multi_root_storage(true);
+                record
+                    .opts_mut()
+                    .expect("should always be able to mutate options from a full record")
+                    .set_multi_root_storage(true);
 
                 Ok(Self {
                     state: State::Read { record },
@@ -956,20 +959,9 @@ impl<P> IRecord for MultiRoot<P> {
     fn bytes(&self) -> &[u8] {
         match &self.state {
             State::Build { root, .. } => root.bytes(),
-            State::Read { record } | State::Run { record, .. } => record.bytes(),
-        }
-    }
-
-    fn peek<'peek>(&'peek self) -> impl super::PeekExtensions<'peek> {
-        match &self.state {
-            // While in the build state, layers are not active to maintain idempotency
-            State::Build { root, .. } => root.peek().val(),
-            // The canonical record when reading a container is always the root
-            State::Read { record } | State::Run { record, .. } => record
-                .peek()
-                .val()
-                .map(|p| p.as_vector().idx(0))
-                .map(super::Peek::from),
+            State::Read { record } | State::Run { record, .. } => {
+                record.layer(0).expect("should always have a layer 0")
+            }
         }
     }
 
@@ -979,7 +971,7 @@ impl<P> IRecord for MultiRoot<P> {
             State::Read { record } | State::Run { record, .. } => record.to_record(),
         }
     }
-    
+
     fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
         match &mut self.state {
             State::Build { root, .. } => root.opts_mut(),
