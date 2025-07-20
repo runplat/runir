@@ -1,12 +1,14 @@
 mod cmd;
 use cmd::CreateRecord;
 use cmd::DeleteRecord;
+use cmd::Format;
 use cmd::LookupRecord;
 use cmd::ObjectFormat;
 use runir::util::Container;
 use runir::util::PeekExtensions;
 
 use clap::{Args, Parser, Subcommand};
+use runir::Record;
 use runir::{IRecord, ToNamespace, frontend::Frontend};
 use std::ops::Deref;
 use std::process::exit;
@@ -76,6 +78,8 @@ async fn main() -> runir::Result<()> {
 
     if program.debug {
         filter = filter.add_directive("runir=debug".parse().unwrap());
+    } else {
+        filter = filter.add_directive("runir=warn".parse().unwrap());
     }
 
     tracing_subscriber::fmt()
@@ -122,148 +126,9 @@ async fn main() -> runir::Result<()> {
                     } = lookup_record;
                     if let Some(value) = kv.ns(ns).get_raw(&label) {
                         if value.opts().is_multi() {
-                            debug!("Record is multi-root, reading as Container");
-                            let container = Container::read(value)?;
-
-                            let content_digest = hex::encode(container.content());
-
-                            let matches = container.find_all_layer_by_labels(|p| {
-                                matches!(
-                                    p.at("object_projection").str(),
-                                    Some("json") | Some("toml") | Some("yaml")
-                                ) &&
-                                p.at("projected_content").str() ==  Some(content_digest.as_str())
-                            })?;
-
-                            use runir::util::ILayerDescriptor;
-                            if let Some((.., layer)) = matches
-                                .iter()
-                                .filter_map(|m| {
-                                    container
-                                        .layer_desc(*m)
-                                        .filter(|d| d.is_object())
-                                        .map(|d| (d, *m))
-                                })
-                                .next()
-                            {
-                                debug!("Found projection at layer: {layer}");
-                                if let Some(ref peek) = peek {
-                                    if peek == "." {
-                                        if let Some(map) = container.object(layer).iter_kv() {
-                                            for kvp in map {
-                                                eprintln!(
-                                                    "{}: {:?} = {}",
-                                                    kvp.0,
-                                                    kvp.1.flexbuffer_type(),
-                                                    kvp.1.deref()
-                                                );
-                                            }
-                                        } else if let Some(vec) = container.object(layer).iter() {
-                                            for (i, v) in vec.enumerate() {
-                                                eprintln!(
-                                                    "[{i}]: {:?} = {}",
-                                                    v.flexbuffer_type(),
-                                                    v.deref()
-                                                );
-                                            }
-                                        } else {
-                                            eprintln!(
-                                                "Record is neither a map or vec at the root, this record has been mis-configured"
-                                            );
-                                            exit(1);
-                                        }
-                                    } else {
-                                        if let Some(s) = container.object(layer).at_dot(&peek).val()
-                                        {
-                                            println!("{}", s);
-                                        }
-                                    }
-
-                                    return Ok(());
-                                }
-                            }
-
-                            tokio::io::stdout()
-                                .write_all(IRecord::bytes(&container))
-                                .await?;
-                            return Ok(());
-                        }
-
-                        if value.opts().is_object() {
-                            if let Some(peek) = peek {
-                                if peek == "." {
-                                    if let Some(map) = value.peek().iter_kv() {
-                                        for kvp in map {
-                                            eprintln!(
-                                                "{}: {:?} = {}",
-                                                kvp.0,
-                                                kvp.1.flexbuffer_type(),
-                                                kvp.1.deref()
-                                            );
-                                        }
-                                    } else if let Some(vec) = value.peek().iter() {
-                                        for (i, v) in vec.enumerate() {
-                                            eprintln!(
-                                                "[{i}]: {:?} = {}",
-                                                v.flexbuffer_type(),
-                                                v.deref()
-                                            );
-                                        }
-                                    } else {
-                                        eprintln!(
-                                            "Record is neither a map or vec at the root, this record has been mis-configured"
-                                        );
-                                        exit(1);
-                                    }
-                                } else {
-                                    if let Some(s) = value.field(&peek).val() {
-                                        println!("{}", s);
-                                    }
-                                }
-                            } else {
-                                match format.resolve() {
-                                    Some(format) => match format {
-                                        ObjectFormat::Yaml => {
-                                            let yaml = value.load::<serde_yaml::Value>().unwrap();
-                                            println!("{}", serde_yaml::to_string(&yaml).unwrap());
-                                        }
-                                        ObjectFormat::Json => {
-                                            match value.load::<serde_json::Value>() {
-                                                Some(json) => {
-                                                    println!("{json}");
-                                                }
-                                                None => {
-                                                    eprintln!(
-                                                        "Failed to load JSON representation from the object. The stored data is likely not an actual valid object. (Tip: try --peek . for introspection)"
-                                                    );
-                                                    exit(1);
-                                                }
-                                            }
-                                        }
-                                        ObjectFormat::Toml => {
-                                            if let Some(toml) = value.load::<toml::Value>() {
-                                                match toml::to_string_pretty(&toml) {
-                                                    Ok(formatted) => println!("{formatted}"),
-                                                    Err(err) => {
-                                                        eprintln!(
-                                                            "Failed to serialize TOML: {err}"
-                                                        );
-                                                        exit(1);
-                                                    }
-                                                }
-                                            } else {
-                                                eprintln!(
-                                                    "Failed to load TOML representation from object. (Tip: null values are not valid in TOML, try --json)"
-                                                );
-                                                exit(1);
-                                            }
-                                        }
-                                    },
-                                    None => todo!(),
-                                }
-                            }
+                            kv_get_multi_root(value, format, peek).await?;
                         } else {
-                            tokio::io::stdout().write_all(value.bytes()).await?;
+                            kv_get(value, format, peek).await?;
                         }
                     } else {
                         eprintln!("Object not found");
@@ -304,6 +169,166 @@ async fn main() -> runir::Result<()> {
     }
 
     Ok(())
+}
+
+/// Executes `kv get` command
+async fn kv_get(value: &impl IRecord, format: Format, peek: Option<String>) -> runir::Result<()> {
+    if value.opts().is_object() {
+        if let Some(peek) = peek {
+            if peek == "." {
+                if let Some(map) = value.peek().iter_kv() {
+                    for kvp in map {
+                        eprintln!(
+                            "{}: {:?} = {}",
+                            kvp.0,
+                            kvp.1.flexbuffer_type(),
+                            kvp.1.deref()
+                        );
+                    }
+                } else if let Some(vec) = value.peek().iter() {
+                    for (i, v) in vec.enumerate() {
+                        eprintln!("[{i}]: {:?} = {}", v.flexbuffer_type(), v.deref());
+                    }
+                } else {
+                    eprintln!(
+                        "Record is neither a map or vec at the root, this record has been mis-configured"
+                    );
+                    exit(1);
+                }
+            } else {
+                if let Some(s) = value.field(&peek).val() {
+                    println!("{}", s);
+                }
+            }
+
+            Ok(())
+        } else {
+            debug!("Resolving original object format");
+            match format.resolve() {
+                Some(format) => match format {
+                    ObjectFormat::Yaml => {
+                        let yaml = value.peek().to_obj::<serde_yaml::Value>().unwrap();
+                        println!("{}", serde_yaml::to_string(&yaml).unwrap());
+                    }
+                    ObjectFormat::Json => match value.peek().to_obj::<serde_json::Value>() {
+                        Some(json) => {
+                            println!("{json}");
+                        }
+                        None => {
+                            eprintln!(
+                                "Failed to load JSON representation from the object. The stored data is likely not an actual valid object. (Tip: try --peek . for introspection)"
+                            );
+                            exit(1);
+                        }
+                    },
+                    ObjectFormat::Toml => {
+                        if let Some(toml) = value.peek().to_obj::<toml::Value>() {
+                            match toml::to_string_pretty(&toml) {
+                                Ok(formatted) => println!("{formatted}"),
+                                Err(err) => {
+                                    eprintln!("Failed to serialize TOML: {err}");
+                                    exit(1);
+                                }
+                            }
+                        } else {
+                            eprintln!(
+                                "Failed to load TOML representation from object. (Tip: null values are not valid in TOML, try --json)"
+                            );
+                            exit(1);
+                        }
+                    }
+                },
+                None => {
+                    debug!("No formatting option provided, using default format");
+                    if let Some(peek) = value.peek().val() {
+                        println!("{peek}");
+                    } else {
+                        eprintln!("Record corruption detected");
+                        exit(1)
+                    }
+                }
+            }
+            Ok(())
+        }
+    } else {
+        tokio::io::stdout().write_all(value.bytes()).await?;
+        Ok(())
+    }
+}
+
+/// Executes `kv get` command w/ multi-root record
+///
+/// First proccesses record w/ [`Container::read`], returns an Error if unsuccessful
+///
+/// If the root of the container is not an object, searches for an objection projection layer;
+/// Otherwise, executes [`kv_get`] w/ Container as [`IRecord`]
+async fn kv_get_multi_root(
+    value: &Record,
+    format: Format,
+    peek: Option<String>,
+) -> runir::Result<()> {
+    debug!("Record is multi-root, reading as Container");
+    let container = Container::read(value)?;
+
+    if !container.opts().is_object() {
+        debug!("Container root is not an object, searching for object projection layer");
+        let content_digest = hex::encode(container.content());
+
+        let matches = container.find_all_layer_by_labels(|p| {
+            matches!(
+                p.at("object_projection").str(),
+                Some("json") | Some("toml") | Some("yaml")
+            ) && p.at("projected_content").str() == Some(content_digest.as_str())
+        })?;
+
+        use runir::util::ILayerDescriptor;
+        if let Some((.., layer)) = matches
+            .iter()
+            .filter_map(|m| {
+                container
+                    .layer_desc(*m)
+                    .filter(|d| d.is_object())
+                    .map(|d| (d, *m))
+            })
+            .next()
+        {
+            debug!("Found projection at layer: {layer}");
+            if let Some(ref peek) = peek {
+                if peek == "." {
+                    if let Some(map) = container.object(layer).iter_kv() {
+                        for kvp in map {
+                            eprintln!(
+                                "{}: {:?} = {}",
+                                kvp.0,
+                                kvp.1.flexbuffer_type(),
+                                kvp.1.deref()
+                            );
+                        }
+                    } else if let Some(vec) = container.object(layer).iter() {
+                        for (i, v) in vec.enumerate() {
+                            eprintln!("[{i}]: {:?} = {}", v.flexbuffer_type(), v.deref());
+                        }
+                    } else {
+                        eprintln!(
+                            "Record is neither a map or vec at the root, this record has been mis-configured"
+                        );
+                        exit(1);
+                    }
+                } else {
+                    if let Some(s) = container.object(layer).at_dot(&peek).val() {
+                        println!("{}", s);
+                    }
+                }
+
+                return Ok(());
+            }
+        }
+
+        debug!("Could not find projection layer, falling back to default kv_get procedure");
+    }
+
+    debug!("Container root is object, using default kv_get procedure");
+    return kv_get(&container, format, peek).await;
 }
 
 fn print_info(value: impl IRecord) {
