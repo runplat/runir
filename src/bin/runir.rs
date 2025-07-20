@@ -168,19 +168,20 @@ async fn main() -> runir::Result<()> {
                                             exit(1);
                                         }
                                     } else {
-                                        if let Some(s) = container.object(layer).at_dot(&peek).val() {
-                                            println!("{}", s.deref()); // This dereferences to a flexbuffer::Reader which handles the Display impl
+                                        if let Some(s) = container.object(layer).at_dot(&peek).val()
+                                        {
+                                            println!("{}", s);
                                         }
                                     }
 
                                     return Ok(());
-                                } else {
-                                    tokio::io::stdout()
-                                        .write_all(IRecord::bytes(&container))
-                                        .await?;
-                                    return Ok(());
                                 }
                             }
+
+                            tokio::io::stdout()
+                                .write_all(IRecord::bytes(&container))
+                                .await?;
+                            return Ok(());
                         }
 
                         if value.opts().is_object() {
@@ -211,7 +212,7 @@ async fn main() -> runir::Result<()> {
                                     }
                                 } else {
                                     if let Some(s) = value.field(&peek).val() {
-                                        println!("{}", s.deref());
+                                        println!("{}", s);
                                     }
                                 }
                             } else {

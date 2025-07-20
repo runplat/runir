@@ -1,4 +1,4 @@
-use std::{cell::RefCell, ops::Deref};
+use std::{cell::RefCell, fmt::Display, ops::Deref};
 
 /// Wrapper over a flexbuffer reader, returned by IRecord::peek(..)
 #[derive(Clone)]
@@ -7,6 +7,12 @@ pub struct Peek<'peek>(flexbuffers::Reader<&'peek [u8]>);
 impl<'peek> From<flexbuffers::Reader<&'peek [u8]>> for Peek<'peek> {
     fn from(value: flexbuffers::Reader<&'peek [u8]>) -> Self {
         Self(value)
+    }
+}
+
+impl<'peek> Display for Peek<'peek> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.deref())
     }
 }
 
