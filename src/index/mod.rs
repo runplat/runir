@@ -19,6 +19,9 @@ pub type HashMapStorage<R> = ahash::HashMap<u64, R>;
 /// Type-alias for Vec implementing Storage trait
 pub type VecStorage<R> = Vec<R>;
 
+/// Type-alias for dashmap::DashMap based Storage
+pub type ConcurrentStorage<R> = dashmap::DashMap<u64, R>;
+
 pub enum IndexResult<R> {
     /// Index inserted the record
     Inserted(u64),
@@ -333,15 +336,13 @@ impl<R: crate::IRecord, S: Storage<Record = R> + Clone> Clone for Index<R, S> {
 #[cfg(test)]
 mod test {
     use bytes::Bytes;
+    use rayon::iter::ParallelIterator;
 
     use crate::{
-        HashMapStorage, IRecord, Namespace, Record, RecordableExtensions, ToNamespace, Worker,
-        field, filter, namespace,
-        query::QueryBuilder,
-        util::{Container, PeekExtensions},
+        field, filter, namespace, query::QueryBuilder, util::{Container, PeekExtensions}, HashMapStorage, IRecord, Namespace, Record, RecordableExtensions, ToNamespace, Worker
     };
 
-    use super::VecIndex;
+    use super::{ConcurrentStorage, Index, VecIndex};
 
     #[tokio::test]
     async fn test_index_query() {
@@ -481,5 +482,28 @@ mod test {
         assert_eq!(key, key2);
         let rec = index.get(key2).map(Container::read).unwrap().unwrap();
         assert_eq!("test container", rec.object(2).at("name").str().unwrap())
+    }
+
+    #[test]
+    fn test_index_search_par() {
+        use super::search::par::Search;
+        let mut index = Index::<Record, ConcurrentStorage<Record>>::default();
+
+        index.index(Namespace::ephemeral().store("test", &toml::toml! {
+            test = "hello"
+        }));
+
+        index.index(Namespace::ephemeral().store("test1", &toml::toml! {
+            test = "hello world"
+        }));
+
+
+        index.index(Namespace::ephemeral().store("test2", &toml::toml! {
+            not_test = "hello world 2"
+        }));
+
+        let results = index.search(field("test"));
+
+        assert_eq!(2, results.count());
     }
 }

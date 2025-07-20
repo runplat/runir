@@ -73,7 +73,7 @@ pub trait QueryBuilder<'query, R: crate::IRecord + 'query> {
 /// Wraps query components for use w/ search infrastructure
 #[derive(Debug)]
 pub struct Query<'query, R> {
-    matches: std::sync::Arc<dyn Matches<Record = R> + 'query>,
+    matches: std::sync::Arc<dyn Matches<Record = R> + Send + Sync + 'query>,
 }
 
 impl<'query, R> Clone for Query<'query, R> {
@@ -93,7 +93,7 @@ impl<'query, R: crate::IRecord> Query<'query, R> {
 }
 
 /// Wraps a closure that implements Matches/LayeredQuery
-pub struct Filter<'q, R>(std::sync::Arc<dyn Fn(&R) -> bool + 'q>);
+pub struct Filter<'q, R>(std::sync::Arc<dyn Fn(&R) -> bool + Send + Sync + 'q>);
 
 impl<'q, R> Clone for Filter<'q, R> {
     fn clone(&self) -> Self {
@@ -103,7 +103,7 @@ impl<'q, R> Clone for Filter<'q, R> {
 
 /// Begins a record filter query
 #[inline]
-pub fn filter<'q, R>(filter: impl Fn(&R) -> bool + 'q) -> Filter<'q, R> {
+pub fn filter<'q, R>(filter: impl Fn(&R) -> bool + Send + Sync + 'q) -> Filter<'q, R> {
     Filter(std::sync::Arc::new(filter))
 }
 
@@ -196,7 +196,7 @@ impl<'query, R: crate::IRecord> Matches for Filter<'query, R> {
     }
 }
 
-impl<'query, T: Matches + 'query> From<T> for Query<'query, T::Record> {
+impl<'query, T: Matches + Send + Sync + 'query> From<T> for Query<'query, T::Record> {
     #[inline]
     fn from(value: T) -> Self {
         Self {
