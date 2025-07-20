@@ -13,6 +13,9 @@ pub type HashIndex<R> = Index<R, HashMapStorage<R>>;
 /// Index backed by Vec Storage
 pub type VecIndex<R> = Index<R, VecStorage<R>>;
 
+/// Index backed by dashmap::DashMap based Storage
+pub type ConcurrentIndex<R> = Index<R, ConcurrentStorage<R>>;
+
 /// Type-alias for HashMap implementing Storage trait
 pub type HashMapStorage<R> = ahash::HashMap<u64, R>;
 

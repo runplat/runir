@@ -33,6 +33,7 @@ pub use index::HashIndex;
 pub use index::HashMapStorage;
 pub use index::VecIndex;
 pub use index::VecStorage;
+pub use index::ConcurrentIndex;
 pub use index::ConcurrentStorage;
 pub use index::search;
 
