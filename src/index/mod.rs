@@ -28,6 +28,7 @@ pub type ConcurrentStorage<R> = dashmap::DashMap<u64, R>;
 pub enum IndexResult<R> {
     /// Index inserted the record
     Inserted(u64),
+    /// Index deleted a record
     Deleted(u64),
     /// Index promoted the inserting record automatically
     ///
