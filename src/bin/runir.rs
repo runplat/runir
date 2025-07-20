@@ -4,6 +4,7 @@ use cmd::DeleteRecord;
 use cmd::Format;
 use cmd::LookupRecord;
 use cmd::ObjectFormat;
+use runir::content;
 use runir::util::Container;
 use runir::util::PeekExtensions;
 
@@ -123,8 +124,36 @@ async fn main() -> runir::Result<()> {
                         label,
                         format,
                         peek,
+                        digest,
                     } = lookup_record;
-                    if let Some(value) = kv.ns(ns).get_raw(&label) {
+
+                    let kv = kv.ns(ns);
+
+                    let value = if digest {
+                        let digest = hex::decode(label.trim_start_matches("sha256"))?;
+                        let is_partial = digest.len() < 32;
+                        let mut search = kv.search(content(digest));
+
+                        if is_partial {
+                            let m = search.next();
+
+                            if let Some(s) = search.next() {
+                                eprintln!(
+                                    "Partial digest returned multiple matches\n\t{}\n\t{}",
+                                    hex::encode(m.unwrap().content()),
+                                    hex::encode(s.content())
+                                );
+                                exit(1)
+                            }
+                            m
+                        } else {
+                            search.next()
+                        }
+                    } else {
+                        kv.get_raw(&label)
+                    };
+
+                    if let Some(value) = value {
                         if value.opts().is_multi() {
                             kv_get_multi_root(value, format, peek).await?;
                         } else {

@@ -8,6 +8,9 @@ pub struct LookupRecord {
     pub format: Format,
     #[clap(long, short)]
     pub peek: Option<String>,
+    /// Treats the label as a digest (sha256 prefix can be optionally included)
+    #[clap(long, short)]
+    pub digest: bool,
     /// Record label
     pub label: String,
 }

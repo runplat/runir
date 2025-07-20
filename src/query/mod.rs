@@ -1,18 +1,18 @@
+mod field;
 mod indexer;
-use std::fmt::Debug;
-
-pub use indexer::Indexer;
-
+mod namespaced;
 mod text;
+
+pub use field::Field;
+pub use indexer::Indexer;
+pub use namespaced::Namespaced;
+use std::fmt::Debug;
 pub use text::TextMetadata;
 
-mod namespaced;
-pub use namespaced::Namespaced;
-
-mod field;
-pub use field::Field;
-
-use crate::util::PeekExtensions;
+use crate::{
+    IRecord,
+    util::{Container, PeekExtensions},
+};
 
 /// Trait to apply match conditions on a Record
 pub trait Matches: std::fmt::Debug {
@@ -125,6 +125,39 @@ pub fn field<'query, R: crate::IRecord + 'query>(field: &'query str) -> Field<'q
             .into(),
         ),
     }
+}
+
+/// Begins a content digest query
+/// 
+/// Note: For multi-root records will use the canonical digest which is the container root digest
+#[inline]
+pub fn content<'query, R: crate::IRecord + 'query>(content: impl AsRef<[u8]> + Send + Sync + 'static) -> Filter<'query, R> {
+    filter::<R>(move |record| {
+        if record.opts().is_multi() {
+            Container::read(record)
+                .map(|r| r.content().starts_with(content.as_ref()))
+                .unwrap_or_default()
+        } else {
+            record.content().starts_with(content.as_ref())
+        }
+    })
+    .into()
+}
+
+/// Begins a container digest query
+/// 
+/// Specifically searches for the "container" content digest, which is the digest
+/// of the entire inner record
+#[inline]
+pub fn container<'query, R: crate::IRecord + 'query>(content: [u8; 32]) -> Filter<'query, R> {
+    filter::<R>(move |record| {
+        if record.opts().is_multi() {
+            record.content() == content
+        } else {
+            false
+        }
+    })
+    .into()
 }
 
 /// Begins a field query, checks a record to see if a field is set and is a str type

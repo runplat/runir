@@ -22,6 +22,12 @@ impl From<anyhow::Error> for Error {
     }
 }
 
+impl From<hex::FromHexError> for Error {
+    fn from(value: hex::FromHexError) -> Self {
+        anyhow::anyhow!(value).into()
+    }
+}
+
 impl From<flexbuffers::SerializationError> for Error {
     fn from(value: flexbuffers::SerializationError) -> Self {
         anyhow::anyhow!(value).into()

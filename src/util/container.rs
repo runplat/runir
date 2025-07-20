@@ -83,14 +83,14 @@ impl<P: Packer> MultiRoot<P> {
     ///
     /// Returns an error if the record is not a Multi Record
     #[inline]
-    pub fn read(record: &Record) -> crate::Result<Self> {
+    pub fn read(record: &impl IRecord) -> crate::Result<Self> {
         if !record.opts().is_multi() {
             return Err(anyhow!("Cannot read a non-multi root record as a Container").into());
         }
 
         Ok(Self {
             state: State::Read {
-                record: record.clone(),
+                record: record.to_record(),
             },
             _p: PhantomData::default(),
         })

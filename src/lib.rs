@@ -45,6 +45,8 @@ pub use query::string;
 pub use query::namespace;
 pub use query::filter;
 pub use query::not;
+pub use query::content;
+pub use query::container;
 pub use query::QueryBuilder;
 pub use query::Query;
 
