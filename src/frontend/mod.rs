@@ -68,11 +68,11 @@ pub trait Frontend {
     ///
     /// Returns an error if file system permissions do not exist
     fn default_store_exists() -> std::io::Result<bool> {
-        let dot_folder = format!(".{}", env!("CARGO_PKG_NAME"));
+        let state_dir = Self::state_dir_name();
         let dir = std::env::var("RUNIR_WORK_DIR")
             .map(|w| std::path::PathBuf::from(w))
             .ok()
-            .unwrap_or(std::env::current_dir()?.join(&dot_folder));
+            .unwrap_or(std::env::current_dir()?.join(&state_dir));
 
         Ok(dir.join(Self::archive_name()).exists())
     }
@@ -83,14 +83,14 @@ pub trait Frontend {
     /// 
     /// Returns an error if file system permissions do not exist
     fn default_save_dir() -> std::io::Result<std::path::PathBuf> {
-        let dot_folder = format!(".{}", env!("CARGO_PKG_NAME"));
+        let state_dir = Self::state_dir_name();
         let dir = std::env::var("RUNIR_WORK_DIR")
             .map(|w| std::path::PathBuf::from(w))
             .ok()
-            .unwrap_or(std::env::current_dir()?.join(&dot_folder));
+            .unwrap_or(std::env::current_dir()?.join(&state_dir));
 
-        if !dir.exists() && dir.ends_with(dot_folder) {
-            tracing::debug!("Creating .runir folder {dir:?}");
+        if !dir.exists() && dir.ends_with(&state_dir) {
+            tracing::debug!("Creating {state_dir:?} folder {dir:?}");
             std::fs::create_dir(&dir)?;
         } else if !dir.exists() {
             // Since this is passed into the process, do not attempt to create directory unless opt-in
@@ -101,6 +101,13 @@ pub trait Frontend {
         }
 
         Ok(dir)
+    }
+
+    /// Returns the name of the state directory
+    /// 
+    /// If RUNIR_STATE_DIR_NAME is not set, this will default to .CARGO_PKG_NAME (.runir)
+    fn state_dir_name() -> String {
+       std::env::var("RUNIR_STATE_DIR_NAME").ok().unwrap_or(format!(".{}", env!("CARGO_PKG_NAME")))
     }
 }
 
