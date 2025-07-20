@@ -168,9 +168,8 @@ async fn main() -> runir::Result<()> {
                                             exit(1);
                                         }
                                     } else {
-                                        if let Some(s) = container.object(layer).at_dot(&peek).val()
-                                        {
-                                            println!("{}", s.deref());
+                                        if let Some(s) = container.object(layer).at_dot(&peek).val() {
+                                            println!("{}", s.deref()); // This dereferences to a flexbuffer::Reader which handles the Display impl
                                         }
                                     }
 
