@@ -4,11 +4,13 @@ use cmd::DeleteRecord;
 use cmd::Format;
 use cmd::LookupRecord;
 use cmd::ObjectFormat;
+use runir::container;
 use runir::content;
 use runir::util::Container;
 use runir::util::PeekExtensions;
 
 use clap::{Args, Parser, Subcommand};
+use runir::QueryBuilder;
 use runir::Record;
 use runir::{IRecord, ToNamespace, frontend::Frontend};
 use std::ops::Deref;
@@ -117,7 +119,7 @@ async fn main() -> runir::Result<()> {
                     kv.refresh().await?;
                     kv.save().await?;
 
-                    if let Some(inserted) = kv.search(content(record.content())).next() {
+                    if let Some(inserted) = kv.search(content(record.content()).or(container(record.content()))).next() {
                         println!("{}", hex::encode(inserted.content()));
                     } else {
                         println!("{} @ Staging", hex::encode(record.content()));
@@ -310,9 +312,9 @@ async fn kv_get_multi_root(
 
         let matches = container.find_all_layer_by_labels(|p| {
             matches!(
-                p.at("object_projection").str(),
+                p.at_dot("projection.format").str(),
                 Some("json") | Some("toml") | Some("yaml")
-            ) && p.at("projected_content").str() == Some(content_digest.as_str())
+            ) && p.at_dot("projection.content").str() == Some(content_digest.as_str())
         })?;
 
         use runir::util::ILayerDescriptor;
@@ -356,12 +358,11 @@ async fn kv_get_multi_root(
 
                 return Ok(());
             }
+        } else {
+            debug!("Could not find projection layer, falling back to default kv_get procedure");
         }
-
-        debug!("Could not find projection layer, falling back to default kv_get procedure");
     }
 
-    debug!("Container root is object, using default kv_get procedure");
     return kv_get(&container, format, peek).await;
 }
 

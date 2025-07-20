@@ -58,8 +58,9 @@ impl CreateRecord {
                     container.push_object_with(
                         &yaml,
                         toml::toml! {
-                             object_projection = "yaml"
-                             projected_content = content_digest
+                            [projection]
+                            format = "yaml"
+                            content = content_digest
                         },
                     )?;
                 }
@@ -70,8 +71,9 @@ impl CreateRecord {
                     container.push_object_with(
                         &json,
                         toml::toml! {
-                             object_projection = "json"
-                             projected_content = content_digest
+                            [projection]
+                            format = "json"
+                            content = content_digest
                         },
                     )?;
                 }
@@ -82,8 +84,9 @@ impl CreateRecord {
                     container.push_object_with(
                         &toml,
                         toml::toml! {
-                             object_projection = "toml"
-                             projected_content = content_digest
+                            [projection]
+                            format = "toml"
+                            content = content_digest
                         },
                     )?;
                 }
