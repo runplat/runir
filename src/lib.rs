@@ -68,7 +68,9 @@ pub trait RecordableExtensions {
     where
         Self: Sized,
     {
-        Recordable::<Self, false>::from(self).indexable()
+        let mut indexable = Recordable::<Self, false>::from(self).indexable();
+        indexable.opts_mut().set_object_storage(true);
+        indexable
     }
 
     /// Prevents the record from being archived
@@ -77,7 +79,9 @@ pub trait RecordableExtensions {
     where
         Self: Sized,
     {
-        Recordable::<Self, false>::from(self).no_archive()
+        let mut no_archive = Recordable::<Self, false>::from(self).no_archive();
+        no_archive.opts_mut().set_object_storage(true);
+        no_archive
     }
 }
 
