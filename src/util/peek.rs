@@ -717,13 +717,14 @@ mod peek_path {
 
             // let mut last_n_link = 0;
 
+            let interner = PathNode::interner();
             while let Some(node) = current {
                 let node = unsafe { node.as_ref().unwrap() };
                 path.push(node.current);
 
                 let next_ptr = node.link ^ (node.current as *const _ as *const () as usize);
 
-                current = PathNode::interner()
+                current = interner
                     .interned
                     .iter()
                     .find(|n| {
@@ -758,7 +759,7 @@ mod peek_path {
                     .map(|n| *n as *const _);
 
                 if current.is_none() {
-                    if let Some(last) = PathNode::interner()
+                    if let Some(last) = interner
                         .interned
                         .iter()
                         .find(|n| {
