@@ -535,7 +535,7 @@ impl From<&str> for PeekPath {
 
 mod peek_path {
     use super::PeekExtensions;
-    use crate::util::{impl_interner, Intern};
+    use crate::util::{Intern, impl_interner};
 
     /// ⚠️ **Experimental API** – uses pointer arithmetic and interning.
     ///
@@ -698,7 +698,8 @@ mod peek_path {
             PeekPath {
                 head: Some(new),
                 depth: self.depth + 1,
-            }.intern()
+            }
+            .intern()
         }
 
         fn structural_hash(&self, next: usize) -> usize {
@@ -720,66 +721,77 @@ mod peek_path {
                 let node = unsafe { node.as_ref().unwrap() };
                 path.push(node.current);
 
+                if self.depth == path.len() {
+                    break;
+                }
+                
                 let next_ptr = node.link ^ (node.current.addr_of_interned() as usize);
 
-                current = intern_state.iter().copied()
-                    .find(|n| {
-                        // debug!(
-                        //     "Searching: n.link: {}, node.link: {} - \t\t\t depth: {}, path.len: {}",
-                        //     n.link,
-                        //     node.link,
-                        //     // last_n_link ^ node.link == 0,
-                        //     self.depth,
-                        //     path.len(),
-                        // );
-                        (n.current.addr_of_interned() as usize) == next_ptr
-                            && n.link != node.link
-                            && if node.link == 0 { // last_n_link ^ node.link == 0 {
-                                // we're inside the chain
-                                path.len() < self.depth && n.link != 0 // while we're inside the chain, and still not at the root, lhs can't be 0
-                            } else {
-                                n.link != 0 // && last_n_link == 0 // we're not yet inside the chain, so lhs_link must be 0 and n.link can't be the root
-                            }
-                    })
-                    // .inspect(|n| {
-                    //     debug!(
-                    //         "\tFound --> n.link: {}, node.link: {} - \t\t\t depth: {}, path.len: {}",
-                    //         n.link,
-                    //         node.link,
-                    //         // last_n_link ^ node.link == 0,
-                    //         self.depth,
-                    //         path.len(),
-                    //     );
-                    //     // last_n_link = n.link;
-                    // })
-                    .map(|n| n as *const _);
-
-                if current.is_none() {
-                    if let Some(last) = intern_state
+                current = if self.depth.saturating_sub(path.len()) == 1 {
+                    // The below search algo would never find the root, so we leave early to let the last step complete
+                    None
+                } else {
+                    intern_state
                         .iter()
+                        .copied()
                         .find(|n| {
-                            // debug!(
-                            //     "Searching for root: n.current: {}, next_ptr: {} - \t\t\t depth: {}, path.len: {}",
-                            //     n.current,
-                            //     next_ptr,
+                            // tracing::debug!(
+                            //     depth = self.depth,
+                            //     path_len = path.len(),
+                            //     "Searching: n.link: {}, node.link: {}",
+                            //     n.link,
+                            //     node.link,
                             //     // last_n_link ^ node.link == 0,
-                            //     self.depth,
-                            //     path.len(),
                             // );
                             (n.current.addr_of_interned() as usize) == next_ptr
+                                && n.link != node.link
+                                && if node.link == 0 {
+                                    // last_n_link ^ node.link == 0 {
+                                    // we're inside the chain
+                                    path.len() < self.depth && n.link != 0 // while we're inside the chain, and still not at the root, lhs can't be 0
+                                } else {
+                                    n.link != 0 // && last_n_link == 0 // we're not yet inside the chain, so lhs_link must be 0 and n.link can't be the root
+                                }
                         })
                         // .inspect(|n| {
-                        //     debug!(
-                        //         "\tFound root --> n.current: {}, next_ptr: {} - \t\t\t depth: {}, path.len: {}",
-                        //         n.current,
-                        //         next_ptr,
+                        //     tracing::debug!(
+                        //         depth = self.depth,
+                        //         path_len = path.len(),
+                        //         "\tFound --> n.link: {}, node.link: {}",
+                        //         n.link,
+                        //         node.link,
                         //         // last_n_link ^ node.link == 0,
-                        //         self.depth,
-                        //         path.len(),
                         //     );
+                        //     // last_n_link = n.link;
                         // })
-                            
+                        .map(|n| n as *const _)
+                };
+                if current.is_none() {
+                    if let Some(last) = intern_state.iter().find(|n| {
+                        // tracing::debug!(
+                        //     depth = self.depth,
+                        //     path_len = path.len(),
+                        //     "Searching for root: n.current: {}, next_ptr: {}",
+                        //     n.current,
+                        //     next_ptr,
+                        //     // last_n_link ^ node.link == 0,
+                        // );
+                        (n.current.addr_of_interned() as usize) == next_ptr
+                    })
+                    // .inspect(|n| {
+                    //     tracing::debug!(
+                    //         depth = self.depth,
+                    //         path_len = path.len(),
+                    //         "\tFound root --> n.current: {}, next_ptr: {}",
+                    //         n.current,
+                    //         next_ptr,
+                    //         // last_n_link ^ node.link == 0,
+                    //     );
+                    // })
                     {
+                        // If our depth is only 1, which means we are at the root;
+                        // Then, the root will be the first segment added to path.
+                        // The below is only required when path len is greater than 1, which means we did begin at the root
                         if path.len() > 1 {
                             path.push(last.current);
                         }
@@ -801,10 +813,11 @@ mod peek_path {
         let peek_path = PeekPath::default();
         let other_values = &peek_path["other"]["values"]["also_important"];
 
-        eprintln!("{:?}", &peek_path["other"].resolve());
-        eprintln!("{:?}", other_values["also_important"].resolve());
-        eprintln!("{:?}", other_values["test1"]["test2"].resolve());
+        // eprintln!("{:?}", &peek_path["other"].resolve());
+        // eprintln!("{:?}", other_values["also_important"].resolve());
+        // eprintln!("{:?}", other_values["test1"]["test2"].resolve());
 
+        assert_eq!(vec!["other"], peek_path["other"].resolve());
         assert_eq!(
             vec!["other", "values", "also_important", "also_important"],
             other_values["also_important"].resolve()
