@@ -364,7 +364,7 @@ impl StoreArchive {
         Ok(Self {
             members,
             output_dir,
-            archive: &archive.intern(),
+            archive: archive.intern(),
         })
     }
 
