@@ -237,11 +237,15 @@ impl HeaderBuilder {
         let gnu = GNUHeader(HeaderAdapter(gnu));
 
         let ustar = bytes.slice_ref(&bytes[257..]);
-        let ustar = UStarHeader(HeaderAdapter(ustar));
+        let ustar = HeaderAdapter(ustar);
         Ok(Header {
             bytes,
             gnu,
-            ustar: Some(ustar),
+            ustar: if ustar.as_str(0..6) == "ustar\0" {
+                Some(UStarHeader(ustar))
+            } else {
+                None
+            },
         })
     }
 }
