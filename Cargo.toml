@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = ["tokio"]
-tokio = ["dep:tokio", "dep:async-compat"]
+tokio = ["dep:tokio"]
 cli = ["dep:serde_json", "dep:serde_yaml", "dep:clap"]
 
 [dependencies]
@@ -33,20 +33,19 @@ parking_lot = "0.12.4"
 stackfuture = "0.3.0"
 tracing-subscriber = "0.3.19"
 pin-project-lite = "0.2.16"
-
-# TODO: This would only be available in a full-fledged OS runtime
+async-compat = "0.2.4"
 memmap2 = "0.9.5"
-tokio = { version = "1.45.1", features = ["full"], optional = true }
-async-compat = { version = "0.2.4", optional = true }
-clap =  { version = "4.5.40", features = ["derive", "env"], optional = true }
-serde_json = { version = "1.0.140", optional = true }
-serde_yaml = { version = "0.9.34", optional = true }
 anyhow = "1.0.98"
 zstd = "0.13.3"
 generic-array = "1.2.0"
 either = "1.15.0"
 thiserror = "2.0.12"
 rayon = "1.10.0"
+
+tokio = { version = "1.45.1", features = ["full"], optional = true }
+clap =  { version = "4.5.40", features = ["derive", "env"], optional = true }
+serde_json = { version = "1.0.140", optional = true }
+serde_yaml = { version = "0.9.34", optional = true }
 
 [[bin]]
 name = "runir"
