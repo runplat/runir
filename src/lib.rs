@@ -52,9 +52,9 @@ mod store;
 pub use store::Store;
 
 mod virt;
+pub use virt::vol;
 pub use virt::RecordExtent;
 pub use virt::VirtualData;
-pub use virt::vol;
 
 pub mod frontend;
 pub use frontend::kv;
@@ -228,10 +228,5 @@ mod test {
                 .as_str()
                 .unwrap()
         );
-
-        // let mut index = Index::<Record>::default();
-        // index.index(&rec);
-        // assert_eq!(1, index.search_text("value", "hello").count());
-        // assert_eq!(0, index.search_text("value", "goodbye").count());
     }
 }
