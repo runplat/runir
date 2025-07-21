@@ -1,6 +1,10 @@
 pub mod archive;
 pub mod util;
 
+mod symbol;
+pub use symbol::ComputedSymbol;
+pub use symbol::Symbol;
+
 mod error;
 pub use error::Error;
 

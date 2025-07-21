@@ -4,6 +4,7 @@ use bytes::Bytes;
 use bytes::BytesMut;
 use serde::Serialize;
 
+use crate::symbol::Symbol;
 use crate::IRecord;
 use crate::Opts;
 use crate::RawRecordable;
@@ -60,7 +61,9 @@ impl Namespace {
     /// of hashing is handled in the Index code which should be servicing the majority
     /// of hash-based lookups
     #[inline]
-    pub fn new(namespace: &str) -> Namespace {
+    pub fn new(namespace: impl Symbol) -> Namespace {
+        let namespace = namespace.symbol();
+
         let init_hash = ahash::RandomState::with_seeds(1, 0, 0, 0);
         let k1 = init_hash.hash_one(namespace);
 

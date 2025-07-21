@@ -22,6 +22,12 @@ impl From<anyhow::Error> for Error {
     }
 }
 
+impl From<mustache::Error> for Error {
+    fn from(value: mustache::Error) -> Self {
+        anyhow::anyhow!(value).into()
+    }
+}
+
 impl From<hex::FromHexError> for Error {
     fn from(value: hex::FromHexError) -> Self {
         anyhow::anyhow!(value).into()
