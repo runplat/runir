@@ -1,12 +1,10 @@
 mod field;
 mod namespaced;
-mod text;
 
 pub use field::Field;
 pub use namespaced::Namespaced;
-use std::fmt::Debug;
-pub use text::TextMetadata;
 
+use std::fmt::Debug;
 use crate::{
     IRecord,
     util::{Container, PeekExtensions},

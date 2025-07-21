@@ -38,7 +38,6 @@ pub use index::ConcurrentStorage;
 pub use index::search;
 
 mod query;
-pub use query::TextMetadata;
 pub use query::field;
 pub use query::string;
 pub use query::namespace;
