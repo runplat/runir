@@ -1,10 +1,8 @@
 mod field;
-mod indexer;
 mod namespaced;
 mod text;
 
 pub use field::Field;
-pub use indexer::Indexer;
 pub use namespaced::Namespaced;
 use std::fmt::Debug;
 pub use text::TextMetadata;
