@@ -344,12 +344,6 @@ impl KeyValue {
         }
     }
 
-    /// Returns a new snapshot of the kv-store
-    #[inline]
-    pub fn take_snapshot(&self) -> VecIndex<Record> {
-        self.shared.snapshot().clone()
-    }
-
     /// Returns snapshot of staging
     #[inline]
     pub fn staging(&self) -> Arc<VecIndex<Record>> {
