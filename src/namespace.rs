@@ -130,6 +130,16 @@ impl Namespace {
         self.hash_state().hash_one(self.opts)
     }
 
+    /// Returns true if this namespace is canonical
+    ///
+    /// A canonical namespace does not propagate any options to a record
+    ///
+    /// Most namespace constructors produce canonical namespaces by default
+    #[inline]
+    pub fn is_canonical(&self) -> bool {
+        self.opts.encode() == 0
+    }
+
     /// Returns a uuid representing this namespace
     #[inline]
     pub fn ns_uuid(&self) -> uuid::Uuid {
@@ -200,7 +210,10 @@ impl Namespace {
                 .with_opts(self.opts | recordable.opts)
                 .commit(Bytes::from(ser.take_buffer()));
 
-            record.opts_mut().expect("should always be able to mutate options from a full record").set_object_storage(true);
+            record
+                .opts_mut()
+                .expect("should always be able to mutate options from a full record")
+                .set_object_storage(true);
             record
         } else {
             record
@@ -218,7 +231,10 @@ impl Namespace {
             author(flexbuffers::Builder::default()).take_buffer(),
         ));
 
-        record.opts_mut().expect("should always be able to mutate options from a full record").set_object_storage(true);
+        record
+            .opts_mut()
+            .expect("should always be able to mutate options from a full record")
+            .set_object_storage(true);
         record
     }
 
@@ -298,7 +314,7 @@ mod test {
         assert_eq!(ns2.chk(), ns2.clone().chk());
         assert_eq!(ns.clone().chk(), ns2.clone().chk());
     }
-    
+
     #[test]
     fn test_namespace_ephemeral_clone() {
         let ns = Namespace::ephemeral();
@@ -323,6 +339,10 @@ mod test {
     #[test]
     fn test_encoded_string() {
         let ns = Namespace::from("test");
-        assert_eq!("8c19ec392f10fbb9edd2535ab21f480a06488f769c70261120337e6a374207ef_07fdafedb529a03e0000000000000000", ns.encoded_string());
+        assert_eq!(
+            "8c19ec392f10fbb9edd2535ab21f480a06488f769c70261120337e6a374207ef_07fdafedb529a03e0000000000000000",
+            ns.encoded_string()
+        );
+        assert!(ns.is_canonical())
     }
 }
