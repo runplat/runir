@@ -1,5 +1,7 @@
 use ahash::RandomState;
+use bytes::BufMut;
 use bytes::Bytes;
+use bytes::BytesMut;
 use serde::Serialize;
 
 use crate::IRecord;
@@ -236,6 +238,19 @@ impl Namespace {
                 .get_or_init(|| RandomState::with_seeds(self.k1, self.k2, self.k3, self.k4))
         }
     }
+
+    /// Returns an encoded string of the namespace
+    #[inline]
+    pub fn encoded_string(&self) -> String {
+        let mut buf = BytesMut::new();
+        buf.put_u64(self.k1);
+        buf.put_u64(self.k2);
+        buf.put_u64(self.k3);
+        buf.put_u64(self.k4);
+
+        let keys = &buf.as_ref()[..32];
+        format!("{}_{}", hex::encode(keys), self.ns_uuid().simple())
+    }
 }
 
 impl Clone for Namespace {
@@ -303,5 +318,11 @@ mod test {
         assert!(ns_encoded[1].is_nil());
 
         assert!(Namespace::decode(ns_encoded).is_none())
+    }
+
+    #[test]
+    fn test_encoded_string() {
+        let ns = Namespace::from("test");
+        assert_eq!("8c19ec392f10fbb9edd2535ab21f480a06488f769c70261120337e6a374207ef_07fdafedb529a03e0000000000000000", ns.encoded_string());
     }
 }
