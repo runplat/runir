@@ -16,7 +16,7 @@ use tracing::{debug, trace};
 use crate::{
     IRecord, Index, Opts, Record, Storage,
     record::record_crc,
-    virt::ObjectEncoder,
+    virt::{BackingData, ObjectEncoder},
     vol::{MemoryMappedTarget, SharedVolume, Volume, new_mmap_anon_target},
 };
 
@@ -58,17 +58,22 @@ pub struct MultiRoot<P> {
     _p: PhantomData<P>,
 }
 
+struct Builder {
+    /// Internal serializer
+    ser: flexbuffers::FlexbufferSerializer,
+    /// Internal working buffer
+    buffer: BytesMut,
+    /// Layers being built into this container
+    layers: Vec<(BuildDescriptor, BackingData)>,
+}
+
 enum State {
     /// Build state allows new layers to be pushed
     Build {
         /// Root record of the container
         root: Record,
-        /// Internal serializer
-        ser: flexbuffers::FlexbufferSerializer,
-        /// Internal working buffer
-        buffer: BytesMut,
-        /// Layers being built into this container
-        layers: Vec<(BuildDescriptor, BytesMut)>,
+        /// Layer builder
+        builder: Builder,
     },
     /// Read-only state collapses all layers into a single record for read-only
     Read {
@@ -108,13 +113,44 @@ impl<P: Packer> MultiRoot<P> {
         let container = Self {
             state: State::Build {
                 root,
-                ser: flexbuffers::FlexbufferSerializer::new(),
-                buffer: BytesMut::new(),
-                layers: vec![],
+                builder: Builder {
+                    ser: flexbuffers::FlexbufferSerializer::new(),
+                    buffer: BytesMut::new(),
+                    layers: vec![],
+                },
             },
             _p: PhantomData::default(),
         };
         container
+    }
+
+    /// Creates a multi-root record from an existing multi-root record in "append" mode
+    #[inline]
+    pub fn append(root: Record) -> crate::Result<Self> {
+        let read = Self::read(&root)?;
+
+        let system_layer = read.system_layer()?;
+        let mut building = Self::build(read.to_record());
+
+        match &mut building.state {
+            State::Build {
+                root,
+                builder: Builder { layers, .. },
+            } => {
+                for (idx, _) in root.iter_layer_desc()?.enumerate().skip(2) {
+                    layers.push((
+                        BuildDescriptor::Existing {
+                            system: system_layer.clone(),
+                            layer: idx,
+                        },
+                        Bytes::new().into(),
+                    ));
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(building)
     }
 
     /// Pushes a content based layer
@@ -146,7 +182,10 @@ impl<P: Packer> MultiRoot<P> {
         let mut digest = Sha256::new();
         digest.update(content);
         match &mut self.state {
-            State::Build { buffer, .. } => {
+            State::Build {
+                builder: Builder { buffer, .. },
+                ..
+            } => {
                 P::pack_bytes(content, buffer)?;
             }
             _ => {}
@@ -187,7 +226,10 @@ impl<P: Packer> MultiRoot<P> {
         let mut content = Sha256::new();
         let content_len;
         match &mut self.state {
-            State::Build { ser, buffer, .. } => {
+            State::Build {
+                builder: Builder { buffer, ser, .. },
+                ..
+            } => {
                 ser.reset();
 
                 P::pack_object(obj, ser, buffer)?;
@@ -210,7 +252,11 @@ impl<P: Packer> MultiRoot<P> {
     #[inline]
     pub fn fetch_content(&self, layer: usize, buf: &mut BytesMut) -> crate::Result<()> {
         match &self.state {
-            State::Build { root, layers, .. } => {
+            State::Build {
+                root,
+                builder: Builder { layers, .. },
+                ..
+            } => {
                 if layer == 0 {
                     buf.put(root.bytes());
                     Ok(())
@@ -267,7 +313,11 @@ impl<P: Packer> MultiRoot<P> {
     #[inline]
     pub fn bytes(&self, layer: usize) -> crate::Result<&[u8]> {
         match &self.state {
-            State::Build { root, layers, .. } => {
+            State::Build {
+                root,
+                builder: Builder { layers, .. },
+                ..
+            } => {
                 if layer == 0 {
                     Ok(root.bytes())
                 } else if layer == 1 {
@@ -333,7 +383,11 @@ impl<P: Packer> MultiRoot<P> {
     #[inline]
     pub fn try_content(&self, layer: usize) -> crate::Result<&[u8]> {
         match &self.state {
-            State::Build { root, layers, .. } => {
+            State::Build {
+                root,
+                builder: Builder { layers, .. },
+                ..
+            } => {
                 if layer == 0 {
                     return Ok(root.bytes());
                 }
@@ -393,7 +447,11 @@ impl<P: Packer> MultiRoot<P> {
     #[inline]
     pub fn to_read_only(self) -> crate::Result<Self> {
         match self.state {
-            State::Build { root, layers, .. } => {
+            State::Build {
+                root,
+                builder: Builder { layers, .. },
+                ..
+            } => {
                 // 1) Build system layer
                 let mut builder = flexbuffers::Builder::default();
                 let mut sys = builder.start_vector();
@@ -405,7 +463,10 @@ impl<P: Packer> MultiRoot<P> {
                     let mut layer = sys.start_map();
                     layer.push("is_object", desc.is_object());
                     layer.push("is_packed", desc.is_packed());
-                    layer.push("labels", flexbuffers::Blob(desc.labels.as_slice()));
+                    layer.push(
+                        "labels",
+                        flexbuffers::Blob(desc.labels().map(|l| l.buffer()).unwrap_or_default()),
+                    );
                     layer.push("content", flexbuffers::Blob(desc.content().as_slice()));
                     layer.push(
                         "distribution",
@@ -418,10 +479,23 @@ impl<P: Packer> MultiRoot<P> {
                 let system_layer = builder.take_buffer();
 
                 let mut multi_root = builder.start_vector();
-                multi_root.push(flexbuffers::Blob(root.bytes()));
-                multi_root.push(flexbuffers::Blob(system_layer.as_slice()));
-                for (.., bytes) in layers.iter() {
-                    multi_root.push(flexbuffers::Blob(bytes.as_ref()));
+                if root.opts().is_multi() {
+                    debug!("Detected 'append' mode");
+                    multi_root.push(flexbuffers::Blob(root.layer(0).unwrap_or_default()));
+                    multi_root.push(flexbuffers::Blob(system_layer.as_slice()));
+                    for (idx, (_, bytes)) in layers.iter().enumerate() {
+                        if bytes.is_empty() {
+                            multi_root.push(flexbuffers::Blob(root.layer(idx + 2).unwrap_or_default()));
+                        } else {
+                            multi_root.push(flexbuffers::Blob(bytes.as_ref()));
+                        }
+                    }
+                } else {
+                    multi_root.push(flexbuffers::Blob(root.bytes()));
+                    multi_root.push(flexbuffers::Blob(system_layer.as_slice()));
+                    for (.., bytes) in layers.iter() {
+                        multi_root.push(flexbuffers::Blob(bytes.as_ref()));
+                    }
                 }
                 multi_root.end_vector();
 
@@ -448,7 +522,10 @@ impl<P: Packer> MultiRoot<P> {
     #[inline]
     pub fn layer_desc(&self, layer: usize) -> Option<impl ILayerDescriptor> {
         match &self.state {
-            State::Build { layers, .. } => {
+            State::Build {
+                builder: Builder { layers, .. },
+                ..
+            } => {
                 if layer == 0 {
                     return None;
                 }
@@ -470,7 +547,10 @@ impl<P: Packer> MultiRoot<P> {
         find: impl Fn(&Peek) -> bool,
     ) -> crate::Result<Vec<usize>> {
         Ok(match &self.state {
-            State::Build { layers, .. } => layers
+            State::Build {
+                builder: Builder { layers, .. },
+                ..
+            } => layers
                 .iter()
                 .enumerate()
                 .filter_map(|(idx, l)| l.0.labels().map(|l| (idx, l)))
@@ -574,7 +654,7 @@ impl<P: Packer> MultiRoot<P> {
 
                     if desc.is_packed() && desc.is_object() {
                         let _idx = objects
-                            .pre_encode_object(*desc.content(), desc.runtime_size() as u32)?;
+                            .pre_encode_object(desc.content(), desc.runtime_size() as u32)?;
                         debug_assert_eq!(idx, _idx);
                     } else {
                         let _idx = objects.pre_encode_object_inline();
@@ -667,9 +747,12 @@ impl<P: Packer> MultiRoot<P> {
     ) -> crate::Result<()> {
         match &mut self.state {
             State::Build {
-                buffer,
-                layers,
-                ser,
+                builder:
+                    Builder {
+                        ser,
+                        buffer,
+                        layers,
+                    },
                 ..
             } => {
                 let next = buffer.split();
@@ -684,7 +767,7 @@ impl<P: Packer> MultiRoot<P> {
                     packed.update(next.as_ref());
 
                     layers.push((
-                        BuildDescriptor {
+                        BuildDescriptor::New {
                             content: digest,
                             packed: Some(Packed {
                                 digest: packed.finalize().into(),
@@ -694,18 +777,18 @@ impl<P: Packer> MultiRoot<P> {
                             labels: ser.take_buffer(),
                             is_object,
                         },
-                        next,
+                        next.freeze().into(),
                     ));
                 } else {
                     layers.push((
-                        BuildDescriptor {
+                        BuildDescriptor::New {
                             content: digest,
                             packed: None,
                             len: next.len() as u64,
                             labels: ser.take_buffer(),
                             is_object,
                         },
-                        next,
+                        next.freeze().into(),
                     ));
                 }
             }
@@ -721,7 +804,10 @@ impl<P: Packer> MultiRoot<P> {
     #[inline]
     fn has_packed(&self) -> bool {
         match &self.state {
-            State::Build { layers, .. } => layers.iter().any(|l| l.0.is_packed()),
+            State::Build {
+                builder: Builder { layers, .. },
+                ..
+            } => layers.iter().any(|l| l.0.is_packed()),
             State::Read { record } | State::Run { record, .. } => record
                 .iter_layer_desc()
                 .map(|mut l| l.any(|l| l.is_packed()))
@@ -739,7 +825,9 @@ impl<P: Packer> MultiRoot<P> {
         S: Storage<Record = Layer>,
     {
         if matches!(self.state, State::Build { .. }) {
-            debug!("Multi-root record is in a build state, finalizing w/ to_read_only(..) before proceeding");
+            debug!(
+                "Multi-root record is in a build state, finalizing w/ to_read_only(..) before proceeding"
+            );
             self = self.to_read_only()?;
         }
 
@@ -752,6 +840,13 @@ impl<P: Packer> MultiRoot<P> {
 
         match &self.state {
             State::Read { record } => {
+                let container: Arc<_> = Container {
+                    state: State::Read {
+                        record: record.clone(),
+                    },
+                    _p: PhantomData,
+                }
+                .into();
                 for (idx, desc) in record.iter_layer_desc()?.enumerate().skip(2) {
                     let mut opts = Opts::default();
                     if desc.is_object() {
@@ -759,12 +854,7 @@ impl<P: Packer> MultiRoot<P> {
                     }
                     index
                         .index(Layer {
-                            container: Container {
-                                state: State::Read {
-                                    record: record.clone(),
-                                },
-                                _p: PhantomData,
-                            },
+                            container: container.clone(),
                             opts,
                             layer: idx,
                         })
@@ -772,6 +862,15 @@ impl<P: Packer> MultiRoot<P> {
                 }
             }
             State::Run { record, vol } => {
+                let container: Arc<_> = Container {
+                    state: State::Run {
+                        record: record.clone(),
+                        vol: vol.clone(),
+                    },
+                    _p: PhantomData,
+                }
+                .into();
+
                 for (idx, desc) in record.iter_layer_desc()?.enumerate().skip(2) {
                     let mut opts = Opts::default();
                     if desc.is_object() {
@@ -779,13 +878,7 @@ impl<P: Packer> MultiRoot<P> {
                     }
                     index
                         .index(Layer {
-                            container: Container {
-                                state: State::Run {
-                                    record: record.clone(),
-                                    vol: vol.clone(),
-                                },
-                                _p: PhantomData,
-                            },
+                            container: container.clone(),
                             opts,
                             layer: idx,
                         })
@@ -798,11 +891,85 @@ impl<P: Packer> MultiRoot<P> {
         }
         Ok(index)
     }
+
+    /// Returns the system layer
+    ///
+    /// Return an error if the current state is not in read or run mode
+    #[inline]
+    pub fn system_layer(&self) -> crate::Result<SystemLayer> {
+        match &self.state {
+            State::Read { record } => {
+                let mut opts = Opts::default();
+                opts.set_object_storage(true);
+                Ok(SystemLayer(Layer {
+                    container: Container {
+                        state: State::Read {
+                            record: record.clone(),
+                        },
+                        _p: PhantomData,
+                    }
+                    .into(),
+                    opts,
+                    layer: 1,
+                }))
+            }
+            State::Run { record, vol } => {
+                let mut opts = Opts::default();
+                opts.set_object_storage(true);
+                Ok(SystemLayer(Layer {
+                    container: Container {
+                        state: State::Run {
+                            record: record.clone(),
+                            vol: vol.clone(),
+                        },
+                        _p: PhantomData,
+                    }
+                    .into(),
+                    opts,
+                    layer: 1,
+                }))
+            }
+            _ => Err(anyhow!("System layer is only available in read or run state").into()),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SystemLayer(Layer);
+
+impl SystemLayer {
+    /// Returns a descriptor for layer
+    #[inline]
+    fn desc<'a: 'b, 'b>(&'a self, layer: usize) -> Option<LayerDesc<'b>> {
+        self.0
+            .peek()
+            .val()?
+            .get_vector()
+            .ok()
+            .map(|v| LayerDesc::Read(v.idx(layer).into()))
+    }
+
+    fn labels<'p>(&'p self, layer: usize) -> Option<Peek<'p>>
+    where
+        Self: 'p,
+    {
+        self.0
+            .peek()
+            .val()?
+            .get_vector()
+            .ok()
+            .map(|v| v.idx(layer).into())
+            .and_then(|v: Peek| {
+                let labels = v.at("labels").blob()?;
+                Some(Peek::from(flexbuffers::Reader::get_root(labels).ok()?))
+            })
+    }
 }
 
 /// Scopes the view of a container into a single layer stored in the container
+#[derive(Clone)]
 pub struct Layer {
-    container: Container,
+    container: Arc<Container>,
     opts: Opts,
     layer: usize,
 }
@@ -1015,10 +1182,10 @@ pub trait ILayerDescriptor {
     fn runtime_size(&self) -> u64;
 
     /// Returns the "distribution" digest of this layer
-    fn distribution(&self) -> &GenericArray<u8, U32>;
+    fn distribution(&self) -> GenericArray<u8, U32>;
 
     /// Returns the "content" digest of this layer
-    fn content(&self) -> &GenericArray<u8, U32>;
+    fn content(&self) -> GenericArray<u8, U32>;
 
     /// Returns true if the layer has been packed
     fn is_packed(&self) -> bool;
@@ -1027,7 +1194,7 @@ pub trait ILayerDescriptor {
     fn is_object(&self) -> bool;
 
     /// Returns labels stored w/ this layer
-    fn labels<'a: 'b, 'b>(&'a self) -> Option<Peek<'b>>;
+    fn labels(&self) -> Option<Peek<'_>>;
 }
 
 enum LayerDesc<'p> {
@@ -1043,14 +1210,14 @@ impl<'p> ILayerDescriptor for LayerDesc<'p> {
         }
     }
 
-    fn distribution(&self) -> &GenericArray<u8, U32> {
+    fn distribution(&self) -> GenericArray<u8, U32> {
         match self {
             LayerDesc::Build(build_descriptor) => build_descriptor.distribution(),
             LayerDesc::Read(peek) => peek.distribution(),
         }
     }
 
-    fn content(&self) -> &GenericArray<u8, U32> {
+    fn content(&self) -> GenericArray<u8, U32> {
         match self {
             LayerDesc::Build(build_descriptor) => build_descriptor.content(),
             LayerDesc::Read(peek) => peek.content(),
@@ -1071,7 +1238,7 @@ impl<'p> ILayerDescriptor for LayerDesc<'p> {
         }
     }
 
-    fn labels<'a: 'b, 'b>(&'a self) -> Option<Peek<'b>> {
+    fn labels(&self) -> Option<Peek<'_>> {
         match self {
             LayerDesc::Build(build_descriptor) => build_descriptor.labels(),
             LayerDesc::Read(peek) => peek.labels(),
@@ -1080,23 +1247,29 @@ impl<'p> ILayerDescriptor for LayerDesc<'p> {
 }
 
 #[derive(Clone)]
-struct BuildDescriptor {
-    /// Content digest of the layer
-    ///
-    /// The content digest is the digest of the bytes of the provided data
-    content: [u8; 32],
-    /// Packed digest of the layer
-    ///
-    /// If set, indicates that the stored data is "packed", and the digest should be the digest
-    /// of the "packed" bytes, while the content digest should be the digest of the "unpacked"
-    /// bytes
-    packed: Option<Packed>,
-    /// Length of the stored layer
-    len: u64,
-    /// List of labels that describe the layer
-    labels: Vec<u8>,
-    /// True if the layer being build is an object
-    is_object: bool,
+enum BuildDescriptor {
+    New {
+        /// Content digest of the layer
+        ///
+        /// The content digest is the digest of the bytes of the provided data
+        content: [u8; 32],
+        /// Packed digest of the layer
+        ///
+        /// If set, indicates that the stored data is "packed", and the digest should be the digest
+        /// of the "packed" bytes, while the content digest should be the digest of the "unpacked"
+        /// bytes
+        packed: Option<Packed>,
+        /// Length of the stored layer
+        len: u64,
+        /// Labels data
+        labels: Vec<u8>,
+        /// True if the layer being build is an object
+        is_object: bool,
+    },
+    Existing {
+        system: SystemLayer,
+        layer: usize,
+    },
 }
 
 const EMPTY_DIGEST: GenericArray<u8, U32> = GenericArray::from_array([0; 32]);
@@ -1106,18 +1279,18 @@ impl<'p> ILayerDescriptor for Peek<'p> {
         self.at("runtime_size").u64().unwrap_or_default()
     }
 
-    fn distribution(&self) -> &GenericArray<u8, U32> {
+    fn distribution(&self) -> GenericArray<u8, U32> {
         self.at("distribution")
             .blob()
-            .map(|b| GenericArray::<u8, U32>::from_slice(b))
-            .unwrap_or(&EMPTY_DIGEST)
+            .map(|b| GenericArray::<u8, U32>::from_slice(b).clone())
+            .unwrap_or(EMPTY_DIGEST.clone())
     }
 
-    fn content(&self) -> &GenericArray<u8, U32> {
+    fn content(&self) -> GenericArray<u8, U32> {
         self.at("content")
             .blob()
-            .map(|b| GenericArray::<u8, U32>::from_slice(b))
-            .unwrap_or(&EMPTY_DIGEST)
+            .map(|b| GenericArray::<u8, U32>::from_slice(b).clone())
+            .unwrap_or(EMPTY_DIGEST.clone())
     }
 
     fn is_packed(&self) -> bool {
@@ -1128,53 +1301,86 @@ impl<'p> ILayerDescriptor for Peek<'p> {
         self.at("is_object").bool().unwrap_or_default()
     }
 
-    fn labels<'a: 'b, 'b>(&'a self) -> Option<Peek<'b>> {
+    fn labels(&self) -> Option<Peek<'_>> {
         let labels = self.at("labels").blob()?;
         Some(Peek::from(flexbuffers::Reader::get_root(labels).ok()?))
     }
 }
 
-impl ILayerDescriptor for BuildDescriptor {
+impl<'p> ILayerDescriptor for BuildDescriptor {
     /// Total required-size at runtime for this layer
     #[inline]
     fn runtime_size(&self) -> u64 {
-        self.packed.as_ref().map(|p| p.unpacked).unwrap_or(self.len)
+        match self {
+            BuildDescriptor::New { packed, len, .. } => {
+                packed.as_ref().map(|p| p.unpacked).unwrap_or(*len)
+            }
+            BuildDescriptor::Existing { system, layer } => system
+                .desc(*layer)
+                .map(|l| l.runtime_size())
+                .unwrap_or_default(),
+        }
     }
 
     /// Returns the "distribution" digest of this layer
     #[inline]
-    fn distribution(&self) -> &GenericArray<u8, U32> {
-        self.packed
-            .as_ref()
-            .map(|p| &p.digest)
-            .unwrap_or(&self.content)
-            .into()
+    fn distribution(&self) -> GenericArray<u8, U32> {
+        match self {
+            BuildDescriptor::New {
+                content, packed, ..
+            } => packed.as_ref().map(|p| p.digest).unwrap_or(*content).into(),
+            BuildDescriptor::Existing { system, layer } => match system.desc(*layer) {
+                Some(p) => p.distribution(),
+                None => [0; 32].into(),
+            },
+        }
     }
 
     /// Returns the "content" digest of this layer
     #[inline]
-    fn content(&self) -> &GenericArray<u8, U32> {
-        (&self.content).into()
+    fn content(&self) -> GenericArray<u8, U32> {
+        match self {
+            BuildDescriptor::New { content, .. } => (*content).into(),
+            BuildDescriptor::Existing { system, layer } => match system.desc(*layer) {
+                Some(p) => p.content(),
+                None => [0; 32].into(),
+            },
+        }
     }
 
     /// Returns true if the layer has been packed
     #[inline]
     fn is_packed(&self) -> bool {
-        self.packed.is_some()
+        match self {
+            BuildDescriptor::New { packed, .. } => packed.is_some(),
+            BuildDescriptor::Existing { system, layer } => match system.desc(*layer) {
+                Some(p) => p.is_packed(),
+                None => false,
+            },
+        }
     }
 
     /// Returns true if the layer is an object
     #[inline]
     fn is_object(&self) -> bool {
-        self.is_object
+        match self {
+            BuildDescriptor::New { is_object, .. } => *is_object,
+            BuildDescriptor::Existing { system, layer } => match system.desc(*layer) {
+                Some(p) => p.is_object(),
+                None => false,
+            },
+        }
     }
 
     /// Returns labels for the this layer
     #[inline]
-    fn labels<'a: 'b, 'b>(&'a self) -> Option<Peek<'b>> {
-        flexbuffers::Reader::get_root(self.labels.as_slice())
-            .ok()
-            .map(Peek::from)
+    fn labels(&self) -> Option<Peek<'_>> {
+        match self {
+            BuildDescriptor::New { labels, .. } => flexbuffers::Reader::get_root(labels.as_slice())
+                .ok()
+                .map(Peek::from),
+            BuildDescriptor::Existing { system, layer } => system.labels(*layer),
+        }
     }
 }
 
@@ -1252,6 +1458,7 @@ mod test {
     use toml::toml;
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_container() {
         let ns = Namespace::ephemeral();
 
@@ -1340,10 +1547,72 @@ mod test {
                 .unwrap()
         );
 
+        let system_layer = container.system_layer().unwrap();
+        assert_eq!(
+            "test",
+            system_layer
+                .desc(2)
+                .unwrap()
+                .labels()
+                .at("name")
+                .str()
+                .unwrap()
+        );
+
+        let inner = container.to_record();
+
+        let mut appending = Container::append(inner).unwrap();
+        appending.push_object(&toml::toml! {
+            name = "append layer"
+        }).unwrap();
+
+        let container_appended = appending.to_read_only().unwrap();
+        let obj = container_appended.try_object(3).unwrap();
+
+        assert_eq!(
+            "hello world",
+            obj.to_obj::<toml::Value>().unwrap()["message"]
+                .as_str()
+                .unwrap()
+        );
+
+        assert_eq!(
+            "test2",
+            container_appended
+                .layer_desc(3)
+                .unwrap()
+                .labels()
+                .at("name")
+                .str()
+                .unwrap()
+        );
+
+        assert_eq!(
+            "test",
+            container_appended
+                .layer_desc(2)
+                .unwrap()
+                .labels()
+                .at("name")
+                .str()
+                .unwrap()
+        );
+
+        assert_eq!(
+            "append layer",
+            container_appended
+                .object(4)
+                .at("name")
+                .str()
+                .unwrap()
+        );
+
+        assert!(container_appended.is_super_set(&container));
         assert!(
-            container.to_run().is_err(),
+            container_appended.to_run().is_err(),
             "container should not have any packed layers"
         );
+        assert!(logs_contain("Detected 'append' mode"))
     }
 
     #[test]
@@ -1519,7 +1788,11 @@ mod test {
         let rec = rec.to_record();
         assert_eq!("goodbye", rec.field("name").str().unwrap());
 
-        assert!(logs_contain("Multi-root record is in a build state, finalizing w/ to_read_only(..) before proceeding"));
-        assert!(logs_contain(" Multi-root record has packed layers, upgrade w/ to_run(..) before proceeding"));
+        assert!(logs_contain(
+            "Multi-root record is in a build state, finalizing w/ to_read_only(..) before proceeding"
+        ));
+        assert!(logs_contain(
+            " Multi-root record has packed layers, upgrade w/ to_run(..) before proceeding"
+        ));
     }
 }
