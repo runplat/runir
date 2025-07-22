@@ -1,14 +1,15 @@
 use crate::{
     archive::{Entry, TapeEncoder},
-    store::ArchiveMember, util::Packer,
+    store::ArchiveMember,
+    util::Packer,
 };
 use anyhow::anyhow;
 use asynchronous_codec::{FramedWrite, FramedWriteParts};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{AsyncRead, AsyncSeek, AsyncWrite, SinkExt};
-use generic_array::{typenum::U32, GenericArray};
+use generic_array::{GenericArray, typenum::U32};
 use memmap2::{Mmap, MmapMut};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use pin_project_lite::pin_project;
 use std::{
     io::{Read, Write},
@@ -21,7 +22,7 @@ use std::{
 };
 use tracing::trace;
 
-use super::{data::BackingData, ObjectEncoder, VirtualData};
+use super::{ObjectEncoder, VirtualData, data::BackingData};
 
 pub const KIB: usize = 2usize.pow(10);
 pub const MIB: usize = 2usize.pow(20);
@@ -144,6 +145,40 @@ pub struct Volume<T, Enc> {
     encoder: Enc,
 }
 
+impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc> Deref for Volume<T, Enc> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.target.as_ref()
+    }
+}
+
+/// Wrapper over a shared volume
+/// 
+/// Allows conversion into BackingData
+pub struct SharedVolume<T, Enc>(pub(crate) Arc<RwLock<Volume<T, Enc>>>);
+
+impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc: Send + Sync + 'static> Deref
+    for SharedVolume<T, Enc>
+{
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        match unsafe { self.0.data_ptr().as_ref() } {
+            Some(data) => data.deref(),
+            None => &[],
+        }
+    }
+}
+
+impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc: Send + Sync + 'static> From<SharedVolume<T, Enc>>
+    for BackingData
+{
+    fn from(value: SharedVolume<T, Enc>) -> Self {
+        BackingData(Arc::new(value))
+    }
+}
+
 impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
     /// Returns a volume for storing object bytes
     #[inline]
@@ -155,9 +190,9 @@ impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
     }
 
     /// "Pre-" encode an inline-object
-    /// 
+    ///
     /// Returns the index for the inline-object
-    /// 
+    ///
     /// Note: This ensures that both sides are in sync and can return useful errors
     #[inline]
     pub fn pre_encode_object_inline(&mut self) -> usize {
@@ -165,12 +200,16 @@ impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
     }
 
     /// "Pre-" encodes an object
-    /// 
+    ///
     /// Returns an error if the target does not have enough capacity for this object;
-    /// 
+    ///
     /// Otherwise, returns the index of the object
     #[inline]
-    pub fn pre_encode_object(&mut self, expected: GenericArray<u8, U32>, expected_len: u32) -> crate::Result<usize> {
+    pub fn pre_encode_object(
+        &mut self,
+        expected: GenericArray<u8, U32>,
+        expected_len: u32,
+    ) -> crate::Result<usize> {
         let _size_check = self.encoder.total_runtime_size() as u64 + expected_len as u64;
         if _size_check > self.target.remaining() {
             Err(anyhow!("Not enough space to pre-encode object").into())
@@ -181,11 +220,12 @@ impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
     }
 
     /// Encodes a packed object
-    /// 
+    ///
     /// Returns an error if the unpacked object did not match the expected pre-encoded digest, or if the idx returned an inline object
     #[inline]
     pub fn encode_packed_obj<P: Packer>(&mut self, idx: usize, packed: &[u8]) -> crate::Result<()> {
-        self.encoder.encode_packed_object::<P>(idx, packed, self.target.as_mut())
+        self.encoder
+            .encode_packed_object::<P>(idx, packed, self.target.as_mut())
     }
 
     /// Returns true if the obj at idx has been marked as unpacked
@@ -200,10 +240,8 @@ impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
         match self.encoder.object(idx) {
             Some((offset, len)) => {
                 Ok(&self.target.view()[offset as usize..offset as usize + len as usize])
-            },
-            None => {
-                Err(anyhow!("Object {idx} not found").into())
-            },
+            }
+            None => Err(anyhow!("Object {idx} not found").into()),
         }
     }
 }
@@ -374,12 +412,12 @@ impl VolumeTarget for MemoryMappedTarget {
     fn view<'view>(&'view self) -> &'view [u8] {
         &self.inner[..self.pos]
     }
-    
+
     #[inline]
     fn remaining(&self) -> u64 {
         self.remaining_capacity() as u64
     }
-    
+
     #[inline]
     fn advance(&mut self, count: usize) -> std::io::Result<()> {
         self.pos += count;
@@ -409,12 +447,12 @@ impl VolumeTarget for InMemoryTarget {
     fn view<'view>(&'view self) -> &'view [u8] {
         &self.inner[..self.pos]
     }
-    
+
     #[inline]
     fn remaining(&self) -> u64 {
         self.remaining_capacity() as u64
     }
-    
+
     #[inline]
     fn advance(&mut self, count: usize) -> std::io::Result<()> {
         self.pos += count;

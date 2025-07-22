@@ -11,11 +11,13 @@ use generic_array::{GenericArray, typenum::U32};
 use parking_lot::RwLock;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tracing::{debug, trace};
 
 use crate::{
     IRecord, Index, Opts, Record, Storage,
+    record::record_crc,
     virt::ObjectEncoder,
-    vol::{MemoryMappedTarget, Volume, new_mmap_anon_target},
+    vol::{MemoryMappedTarget, SharedVolume, Volume, new_mmap_anon_target},
 };
 
 use super::{Peek, PeekExtensions};
@@ -715,14 +717,37 @@ impl<P: Packer> MultiRoot<P> {
         Ok(())
     }
 
-    /// Returns an index of the layers of this multi-root record
-    /// 
-    /// Returns an error if the current state is in "build" mode
+    /// Returns true if the container has any packed layers
     #[inline]
-    pub fn build_index<S>(&self, storage: S) -> crate::Result<LayerIndex<S>>
+    fn has_packed(&self) -> bool {
+        match &self.state {
+            State::Build { layers, .. } => layers.iter().any(|l| l.0.is_packed()),
+            State::Read { record } | State::Run { record, .. } => record
+                .iter_layer_desc()
+                .map(|mut l| l.any(|l| l.is_packed()))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Converts the multi-root record into an Index of the lower layers
+    ///
+    /// If the multi-root record has any packed layers, will call to_run(..) automatically before converting
+    /// to an index
+    #[inline]
+    pub fn to_index<S>(mut self, storage: S) -> crate::Result<LayerIndex<S>>
     where
         S: Storage<Record = Layer>,
     {
+        if matches!(self.state, State::Build { .. }) {
+            debug!("Multi-root record is in a build state, finalizing w/ to_read_only(..) before proceeding");
+            self = self.to_read_only()?;
+        }
+
+        if self.has_packed() {
+            debug!("Multi-root record has packed layers, upgrade w/ to_run(..) before proceeding");
+            self = self.to_run()?;
+        }
+
         let mut index = LayerIndex::from(storage);
 
         match &self.state {
@@ -732,17 +757,18 @@ impl<P: Packer> MultiRoot<P> {
                     if desc.is_object() {
                         opts.set_object_storage(true);
                     }
-                    index.index(Layer {
-                        container: Container {
-                            state: State::Read {
-                                record: record.clone(),
+                    index
+                        .index(Layer {
+                            container: Container {
+                                state: State::Read {
+                                    record: record.clone(),
+                                },
+                                _p: PhantomData,
                             },
-                            _p: PhantomData,
-                        },
-                        opts,
-                        layer: idx,
-                    })
-                    .result()?;
+                            opts,
+                            layer: idx,
+                        })
+                        .result()?;
                 }
             }
             State::Run { record, vol } => {
@@ -751,22 +777,23 @@ impl<P: Packer> MultiRoot<P> {
                     if desc.is_object() {
                         opts.set_object_storage(true);
                     }
-                    index.index(Layer {
-                        container: Container {
-                            state: State::Run {
-                                record: record.clone(),
-                                vol: vol.clone(),
+                    index
+                        .index(Layer {
+                            container: Container {
+                                state: State::Run {
+                                    record: record.clone(),
+                                    vol: vol.clone(),
+                                },
+                                _p: PhantomData,
                             },
-                            _p: PhantomData,
-                        },
-                        opts,
-                        layer: idx,
-                    })
-                    .result()?;
+                            opts,
+                            layer: idx,
+                        })
+                        .result()?;
                 }
             }
             _ => {
-                return Err(anyhow!("Can only create an index in read or run state").into());
+                unreachable!("Should detect this arm before this match")
             }
         }
         Ok(index)
@@ -781,56 +808,86 @@ pub struct Layer {
 }
 
 impl IRecord for Layer {
+    #[inline]
     fn ns_chk(&self) -> u64 {
         self.container.ns_chk()
     }
 
+    #[inline]
     fn uuid(&self) -> uuid::Uuid {
-        let (hi, lo) = self.container.uuid().as_u64_pair();
-        uuid::Uuid::from_u64_pair(hi ^ self.layer as u64, lo)
+        let (hi, _) = self.container.uuid().as_u64_pair();
+        uuid::Uuid::from_u64_pair(
+            hi ^ self.layer as u64,
+            record_crc(self.bytes(), self.container.to_record().ts()),
+        )
     }
 
+    #[inline]
     fn opts(&self) -> &crate::Opts {
         &self.opts
     }
 
+    #[inline]
     fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
         None
     }
 
+    #[inline]
     fn bytes(&self) -> &[u8] {
         self.container.try_content(self.layer).unwrap_or_default()
     }
 
+    #[inline]
     fn to_record(&self) -> Record {
-        self.container.to_record()
+        let (k, data, ns_chk, ts, opts) = self.container.to_record().into_parts();
+
+        if let Some(data) = data
+            .find_view(self.bytes())
+            .or_else(|| match &self.container.state {
+                State::Run { vol, .. } => {
+                    let backing: crate::virt::BackingData = SharedVolume(vol.clone()).into();
+
+                    backing.find_data(self.bytes())
+                }
+                _ => None,
+            })
+        {
+            Record::from_parts((self.uuid(), data, self.ns_chk(), ts, self.opts))
+        } else {
+            Record::from_parts((k, data, ns_chk, ts, opts))
+        }
     }
 }
 
 impl<'a> IRecord for &'a Layer {
+    #[inline]
     fn ns_chk(&self) -> u64 {
-        self.container.ns_chk()
+        <Layer as IRecord>::ns_chk(self)
     }
 
+    #[inline]
     fn uuid(&self) -> uuid::Uuid {
-        let (hi, lo) = self.container.uuid().as_u64_pair();
-        uuid::Uuid::from_u64_pair(hi ^ self.layer as u64, lo)
+        <Layer as IRecord>::uuid(self)
     }
 
+    #[inline]
     fn opts(&self) -> &crate::Opts {
-        &self.opts
+        <Layer as IRecord>::opts(self)
     }
 
+    #[inline]
     fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
         None
     }
 
+    #[inline]
     fn bytes(&self) -> &[u8] {
-        self.container.try_content(self.layer).unwrap_or_default()
+        <Layer as IRecord>::bytes(self)
     }
 
+    #[inline]
     fn to_record(&self) -> Record {
-        self.container.to_record()
+        <Layer as IRecord>::to_record(self)
     }
 }
 
@@ -846,9 +903,10 @@ impl<const SIZE_THRESHOLD: usize, const COMPRESSION_LEVEL: i32> Packer
             buffer.put(bytes);
             Ok(())
         } else {
-            let bytes = zstd::encode_all(bytes, COMPRESSION_LEVEL)?;
-            buffer.reserve(bytes.len());
-            buffer.put(bytes.as_slice());
+            let _bytes = zstd::encode_all(bytes, COMPRESSION_LEVEL)?;
+            buffer.reserve(_bytes.len());
+            buffer.put(_bytes.as_slice());
+            trace!(unpacked = bytes.len(), packed = buffer.len(), "pack_bytes");
             Ok(())
         }
     }
@@ -1183,7 +1241,7 @@ mod test {
 
     use super::{Container, GenericPacker};
     use crate::{
-        Namespace, field,
+        IRecord, Namespace, field,
         search::iter::Search,
         util::{
             PeekExtensions,
@@ -1401,6 +1459,7 @@ mod test {
     }
 
     #[test]
+    #[tracing_test::traced_test]
     fn test_container_index() {
         type TestPacker = GenericPacker<0, 0>;
 
@@ -1429,12 +1488,38 @@ mod test {
         container
             .push_object(&toml! {
                 name = "goodbye"
+
+                [test]
+                a = "lorem ipsum dolor sit amet"
+                b = "consectetur adipiscing elit"
+                c = "sed do eiusmod tempor incididunt"
+                d = "ut labore et dolore magna aliqua"
+
+                [test2]
+                a = "lorem ipsum dolor sit amet"
+                b = "consectetur adipiscing elit"
+                c = "sed do eiusmod tempor incididunt"
+                d = "ut labore et dolore magna aliqua"
+
+                [test3]
+                a = "lorem ipsum dolor sit amet"
+                b = "consectetur adipiscing elit"
+                c = "sed do eiusmod tempor incididunt"
+                d = "ut labore et dolore magna aliqua"
             })
             .unwrap();
 
-        let build = container.to_read_only().unwrap();
-        let index = build.build_index(vec![]).unwrap();
-
+        let index = container.to_index(vec![]).unwrap();
         assert_eq!(3, index.search(field("name").starts_with("hello")).count());
+
+        let rec = index
+            .search(field("name").starts_with("goodbye"))
+            .next()
+            .unwrap();
+        let rec = rec.to_record();
+        assert_eq!("goodbye", rec.field("name").str().unwrap());
+
+        assert!(logs_contain("Multi-root record is in a build state, finalizing w/ to_read_only(..) before proceeding"));
+        assert!(logs_contain(" Multi-root record has packed layers, upgrade w/ to_run(..) before proceeding"));
     }
 }

@@ -24,11 +24,11 @@ pub struct VirtualData {
 #[derive(Debug, Clone)]
 pub struct VirtualDataSlim {
     /// Offset into the mmap
-    offset: usize,
+    pub(crate) offset: usize,
     /// Len of data
-    len: usize,
+    pub(crate) len: usize,
     /// Inner data pointer to backing data
-    inner: BackingData,
+    pub(crate) inner: BackingData,
 }
 
 impl VirtualData {
@@ -36,10 +36,7 @@ impl VirtualData {
     ///
     /// Returns an error if the source/content digests could not be verified
     #[inline]
-    pub fn new(
-        journaled: JournalEntry,
-        data: impl Into<BackingData>,
-    ) -> std::io::Result<Self> {
+    pub fn new(journaled: JournalEntry, data: impl Into<BackingData>) -> std::io::Result<Self> {
         let virt_ref = Self {
             journaled,
             inner: data.into(),
@@ -144,7 +141,26 @@ impl Deref for VirtualDataSlim {
 
 /// Backing-data is a normalized binary type
 #[derive(Clone)]
-pub struct BackingData(Arc<dyn Deref<Target = [u8]> + Sync + Send + 'static>);
+pub struct BackingData(pub(crate) Arc<dyn Deref<Target = [u8]> + Sync + Send + 'static>);
+
+impl BackingData {
+    /// Finds data from backing data
+    /// 
+    /// Returns Data::Virtual if found
+    #[inline]
+    pub fn find_data(&self, data: &[u8]) -> Option<Data> {
+        self.windows(data.len())
+            .enumerate()
+            .find(|(_, d)| *d == data)
+            .map(|(offset, _)| {
+                Data::Virtual(VirtualDataSlim {
+                    offset,
+                    len: data.len(),
+                    inner: self.clone(),
+                })
+            })
+    }
+}
 
 impl Debug for BackingData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

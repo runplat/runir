@@ -516,6 +516,15 @@ impl Record {
     }
 }
 
+/// Returns the record crc value
+#[inline]
+pub fn record_crc(bytes: &[u8], ts: u64) -> u64 {
+    let mut crc = crc_digest();
+    crc.update(bytes);
+    crc.update(&ts.to_le_bytes());
+    crc.finalize()
+}
+
 #[cfg(test)]
 mod test {
     use super::Record;
