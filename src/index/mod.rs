@@ -3,7 +3,6 @@ mod storage;
 
 use crate::{IRecord, opts::Branch, util::Container};
 use anyhow::anyhow;
-use std::u64;
 pub use storage::Storage;
 use tracing::{debug, error};
 
@@ -367,16 +366,11 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Default for Index<R, S> {
     }
 }
 
-impl<R: crate::IRecord, S: Storage<Record = R>> From<Vec<R>> for Index<R, S> {
-    fn from(mut value: Vec<R>) -> Self {
-        let mut reverse = ahash::HashMap::default();
+impl<R: crate::IRecord, S: Storage<Record = R>> From<S> for Index<R, S> {
+    fn from(storage: S) -> Self {
+        let reverse = storage.reverse_map();
         Self {
-            storage: value.drain(..).fold(S::default(), |mut map, r| {
-                let index_key = r.index_key();
-                let result = map.put(r);
-                reverse.insert(index_key, result.key);
-                map
-            }),
+            storage,
             reverse,
         }
     }

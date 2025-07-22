@@ -65,6 +65,9 @@ pub trait Storage: Default {
 
     /// Returns true if a record was replaced at key
     fn replace(&mut self, key: u64, record: Self::Record) -> Option<Self::Record>;
+
+    /// Returns a reverse map of the current storage state
+    fn reverse_map(&self) -> ahash::HashMap<u64, u64>;
 }
 
 impl<R: crate::IRecord + Sync> Storage for ahash::HashMap<u64, R>
@@ -89,6 +92,7 @@ where
     where
         R: 'b;
 
+    #[inline]
     fn put(&mut self, record: Self::Record) -> PutResult<Self::Record> {
         let key = record.index_key();
         let previous = self.insert(key, record);
@@ -96,28 +100,41 @@ where
         PutResult { key, previous }
     }
 
+    #[inline]
     fn record<'a: 'b, 'b>(&'a self, key: u64) -> Option<Self::Borrow<'b>> {
         self.get(&key)
     }
 
+    #[inline]
     fn iter_records<'a: 'b, 'b>(
         &'a self,
     ) -> impl Iterator<Item = Self::IterBorrow<'b>> + Send + 'b {
         self.iter().map(|(_, v)| v)
     }
 
+    #[inline]
     fn stream_records<'a: 'b, 'b>(
         &'a self,
     ) -> impl Stream<Item = Self::IterBorrow<'b>> + Send + 'b {
         futures::stream::iter(self.iter_records())
     }
 
+    #[inline]
     fn replace(&mut self, key: u64, record: Self::Record) -> Option<Self::Record> {
         self.insert(key, record)
     }
 
+    #[inline]
     fn record_mut<'a: 'b, 'b>(&'a mut self, key: u64) -> Option<Self::BorrowMut<'b>> {
         self.get_mut(&key)
+    }
+    
+    #[inline]
+    fn reverse_map(&self) -> ahash::HashMap<u64, u64> {
+        self.iter().fold(Default::default(), |mut a, (k, r)| {
+            a.insert(r.index_key(), *k);
+            a
+        })
     }
 }
 
@@ -144,6 +161,7 @@ where
     where
         R: 'b;
 
+    #[inline]
     fn put(&mut self, record: Self::Record) -> PutResult<Self::Record> {
         let key = self.len() as u64;
         self.push(record);
@@ -154,20 +172,24 @@ where
         }
     }
 
+    #[inline]
     fn record<'a: 'b, 'b>(&'a self, key: u64) -> Option<Self::Borrow<'b>> {
         self.get(key as usize)
     }
 
+    #[inline]
     fn iter_records<'a: 'b, 'b>(
         &'a self,
     ) -> impl Iterator<Item = Self::IterBorrow<'b>> + Send + 'b {
         self.iter()
     }
 
+    #[inline]
     fn stream_records<'a: 'b, 'b>(&'a self) -> impl Stream<Item = Self::IterBorrow<'b>> + Send {
         futures::stream::iter(self.iter_records())
     }
 
+    #[inline]
     fn replace(&mut self, key: u64, record: Self::Record) -> Option<Self::Record> {
         if self.len() < key as usize {
             return None;
@@ -178,8 +200,17 @@ where
         Some(previous)
     }
 
+    #[inline]
     fn record_mut<'a: 'b, 'b>(&'a mut self, key: u64) -> Option<Self::BorrowMut<'b>> {
         self.get_mut(key as usize)
+    }
+    
+    #[inline]
+    fn reverse_map(&self) -> ahash::HashMap<u64, u64> {
+        self.iter().enumerate().fold(Default::default(), |mut a, (k, r)| {
+            a.insert(r.index_key(), k as u64);
+            a
+        })
     }
 }
 
@@ -202,6 +233,7 @@ impl<R: crate::IRecord + Send + Sync> Storage for dashmap::DashMap<u64, R> {
     where
         R: 'b;
 
+    #[inline]
     fn put(&mut self, record: Self::Record) -> PutResult<Self::Record> {
         let key = record.index_key();
         let previous = self.insert(key, record);
@@ -209,28 +241,41 @@ impl<R: crate::IRecord + Send + Sync> Storage for dashmap::DashMap<u64, R> {
         PutResult { key, previous }
     }
 
+    #[inline]
     fn record<'a: 'b, 'b>(&'a self, key: u64) -> Option<Self::Borrow<'b>> {
         self.get(&key)
     }
 
+    #[inline]
     fn iter_records<'a: 'b, 'b>(
         &'a self,
     ) -> impl Iterator<Item = Self::IterBorrow<'b>> + Send + 'b {
         self.iter()
     }
 
+    #[inline]
     fn stream_records<'a: 'b, 'b>(
         &'a self,
     ) -> impl Stream<Item = Self::IterBorrow<'b>> + Send + 'b {
         futures::stream::iter(self.iter_records())
     }
 
+    #[inline]
     fn replace(&mut self, key: u64, record: Self::Record) -> Option<Self::Record> {
         self.insert(key, record)
     }
 
+    #[inline]
     fn record_mut<'a: 'b, 'b>(&'a mut self, key: u64) -> Option<Self::BorrowMut<'b>> {
         self.get_mut(&key)
+    }
+    
+    #[inline]
+    fn reverse_map(&self) -> ahash::HashMap<u64, u64> {
+        self.iter().fold(Default::default(), |mut a, e| {
+            a.insert(e.index_key(), *e.key());
+            a
+        })
     }
 }
 

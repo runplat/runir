@@ -1,23 +1,27 @@
 use std::{
-    cell::RefCell,
     io::{Cursor, Read},
     marker::PhantomData,
+    sync::Arc,
 };
 
 use ahash::HashSet;
 use anyhow::anyhow;
 use bytes::{BufMut, Bytes, BytesMut};
 use generic_array::{GenericArray, typenum::U32};
+use parking_lot::RwLock;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    IRecord, Record,
+    IRecord, Index, Opts, Record, Storage,
     virt::ObjectEncoder,
     vol::{MemoryMappedTarget, Volume, new_mmap_anon_target},
 };
 
 use super::{Peek, PeekExtensions};
+
+/// Type-alias for a layer index
+pub type LayerIndex<S> = Index<Layer, S>;
 
 /// Type-alias for the default multi-root record construct
 ///
@@ -74,7 +78,7 @@ enum State {
         /// Record that contains all layers
         record: Record,
         /// Runtime volume that is able to store any layers that require additional space for unpacking
-        vol: RefCell<RuntimeVolume>,
+        vol: Arc<RwLock<RuntimeVolume>>,
     },
 }
 
@@ -315,14 +319,21 @@ impl<P: Packer> MultiRoot<P> {
     /// Note: This only supports inline, non-packed objects
     #[inline]
     pub fn try_object(&self, layer: usize) -> crate::Result<Peek> {
+        self.try_content(layer)
+            .and_then(|b| Ok(Peek::from(flexbuffers::Reader::get_root(b)?)))
+    }
+
+    /// Returns an content bytes at a layer
+    ///
+    /// Returns an error if unable to access object at layer
+    ///
+    /// Note: This only supports inline, non-packed objects
+    #[inline]
+    pub fn try_content(&self, layer: usize) -> crate::Result<&[u8]> {
         match &self.state {
             State::Build { root, layers, .. } => {
                 if layer == 0 {
-                    return if let Some(peek) = root.peek().val() {
-                        Ok(peek)
-                    } else {
-                        Err(anyhow!("Root is not an object").into())
-                    };
+                    return Ok(root.bytes());
                 }
 
                 if layer == 1 {
@@ -331,12 +342,12 @@ impl<P: Packer> MultiRoot<P> {
 
                 layers
                     .get(layer - 2)
-                    .map(|l| Ok(Peek::from(flexbuffers::Reader::get_root(l.1.as_ref())?)))
+                    .map(|l| Ok(l.1.as_ref()))
                     .unwrap_or(Err(anyhow!("Layer not found").into()))
             }
             State::Read { record } => Ok(flexbuffers::Reader::get_root(record.bytes())
                 .and_then(|root| root.as_vector().idx(layer).get_blob())
-                .and_then(|obj| Ok(Peek::from(flexbuffers::Reader::get_root(obj.0)?)))?),
+                .and_then(|obj| Ok(obj.0))?),
             State::Run { record, vol } => {
                 if let Some(desc) = self.layer_desc(layer) {
                     if !desc.is_object() {
@@ -344,7 +355,7 @@ impl<P: Packer> MultiRoot<P> {
                     }
 
                     if desc.is_packed() {
-                        if !vol.borrow().is_obj_unpacked(layer) {
+                        if !vol.read().is_obj_unpacked(layer) {
                             self.unpack(layer, desc)?;
                         }
 
@@ -356,13 +367,13 @@ impl<P: Packer> MultiRoot<P> {
                         // - This block is only reached if the layer is already unpacked (or has just
                         //   been unpacked), so the pointer is valid and point
                         let obj =
-                            unsafe { vol.as_ptr().as_ref().expect("should be a runtime volume") }
+                            unsafe { vol.data_ptr().as_ref().expect("should be a runtime volume") }
                                 .view_obj(layer)?;
 
-                        Ok(Peek::from(flexbuffers::Reader::get_root(obj)?))
+                        Ok(obj)
                     } else {
                         if let Some(inline) = record.layer(layer) {
-                            Ok(Peek::from(flexbuffers::Reader::get_root(inline)?))
+                            Ok(inline)
                         } else {
                             Err(anyhow!("Record does not have packed layer data").into())
                         }
@@ -497,8 +508,8 @@ impl<P: Packer> MultiRoot<P> {
                 });
 
                 lhs.is_superset(&rhs)
-            },
-            _ => false
+            }
+            _ => false,
         }
     }
 
@@ -572,7 +583,7 @@ impl<P: Packer> MultiRoot<P> {
                 Ok(Self {
                     state: State::Run {
                         record,
-                        vol: RefCell::new(objects),
+                        vol: Arc::new(RwLock::new(objects)),
                     },
                     _p: PhantomData,
                 })
@@ -611,7 +622,7 @@ impl<P: Packer> MultiRoot<P> {
     }
 
     /// Converts to the inner record
-    /// 
+    ///
     /// Note: If currently in "Build" state, all pending layers will be lost
     #[inline]
     pub fn to_inner(self) -> Record {
@@ -635,7 +646,7 @@ impl<P: Packer> MultiRoot<P> {
                         .into());
                     }
 
-                    vol.borrow_mut().encode_packed_obj::<P>(layer, packed)?;
+                    vol.write().encode_packed_obj::<P>(layer, packed)?;
                     Ok(())
                 } else {
                     return Err(anyhow!("Record does not have packed layer data").into());
@@ -702,6 +713,124 @@ impl<P: Packer> MultiRoot<P> {
         }
 
         Ok(())
+    }
+
+    /// Returns an index of the layers of this multi-root record
+    /// 
+    /// Returns an error if the current state is in "build" mode
+    #[inline]
+    pub fn build_index<S>(&self, storage: S) -> crate::Result<LayerIndex<S>>
+    where
+        S: Storage<Record = Layer>,
+    {
+        let mut index = LayerIndex::from(storage);
+
+        match &self.state {
+            State::Read { record } => {
+                for (idx, desc) in record.iter_layer_desc()?.enumerate().skip(2) {
+                    let mut opts = Opts::default();
+                    if desc.is_object() {
+                        opts.set_object_storage(true);
+                    }
+                    index.index(Layer {
+                        container: Container {
+                            state: State::Read {
+                                record: record.clone(),
+                            },
+                            _p: PhantomData,
+                        },
+                        opts,
+                        layer: idx,
+                    })
+                    .result()?;
+                }
+            }
+            State::Run { record, vol } => {
+                for (idx, desc) in record.iter_layer_desc()?.enumerate().skip(2) {
+                    let mut opts = Opts::default();
+                    if desc.is_object() {
+                        opts.set_object_storage(true);
+                    }
+                    index.index(Layer {
+                        container: Container {
+                            state: State::Run {
+                                record: record.clone(),
+                                vol: vol.clone(),
+                            },
+                            _p: PhantomData,
+                        },
+                        opts,
+                        layer: idx,
+                    })
+                    .result()?;
+                }
+            }
+            _ => {
+                return Err(anyhow!("Can only create an index in read or run state").into());
+            }
+        }
+        Ok(index)
+    }
+}
+
+/// Scopes the view of a container into a single layer stored in the container
+pub struct Layer {
+    container: Container,
+    opts: Opts,
+    layer: usize,
+}
+
+impl IRecord for Layer {
+    fn ns_chk(&self) -> u64 {
+        self.container.ns_chk()
+    }
+
+    fn uuid(&self) -> uuid::Uuid {
+        let (hi, lo) = self.container.uuid().as_u64_pair();
+        uuid::Uuid::from_u64_pair(hi ^ self.layer as u64, lo)
+    }
+
+    fn opts(&self) -> &crate::Opts {
+        &self.opts
+    }
+
+    fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
+        None
+    }
+
+    fn bytes(&self) -> &[u8] {
+        self.container.try_content(self.layer).unwrap_or_default()
+    }
+
+    fn to_record(&self) -> Record {
+        self.container.to_record()
+    }
+}
+
+impl<'a> IRecord for &'a Layer {
+    fn ns_chk(&self) -> u64 {
+        self.container.ns_chk()
+    }
+
+    fn uuid(&self) -> uuid::Uuid {
+        let (hi, lo) = self.container.uuid().as_u64_pair();
+        uuid::Uuid::from_u64_pair(hi ^ self.layer as u64, lo)
+    }
+
+    fn opts(&self) -> &crate::Opts {
+        &self.opts
+    }
+
+    fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
+        None
+    }
+
+    fn bytes(&self) -> &[u8] {
+        self.container.try_content(self.layer).unwrap_or_default()
+    }
+
+    fn to_record(&self) -> Record {
+        self.container.to_record()
     }
 }
 
@@ -1054,7 +1183,8 @@ mod test {
 
     use super::{Container, GenericPacker};
     use crate::{
-        Namespace,
+        Namespace, field,
+        search::iter::Search,
         util::{
             PeekExtensions,
             container::{ILayerDescriptor, MultiRoot},
@@ -1268,5 +1398,43 @@ mod test {
 
         let bytes = read.bytes(2).unwrap();
         assert_ne!(b"hello world", bytes, "should still be packed");
+    }
+
+    #[test]
+    fn test_container_index() {
+        type TestPacker = GenericPacker<0, 0>;
+
+        let ns = Namespace::ephemeral();
+        let mut container =
+            MultiRoot::<TestPacker>::build(ns.commit("test", b"hello world".as_slice()));
+
+        container
+            .push_object(&toml! {
+                name = "hello"
+            })
+            .unwrap();
+
+        container
+            .push_object(&toml! {
+                name = "hello2"
+            })
+            .unwrap();
+
+        container
+            .push_object(&toml! {
+                name = "hello3"
+            })
+            .unwrap();
+
+        container
+            .push_object(&toml! {
+                name = "goodbye"
+            })
+            .unwrap();
+
+        let build = container.to_read_only().unwrap();
+        let index = build.build_index(vec![]).unwrap();
+
+        assert_eq!(3, index.search(field("name").starts_with("hello")).count());
     }
 }
