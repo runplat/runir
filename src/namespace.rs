@@ -5,6 +5,7 @@ use bytes::BytesMut;
 use serde::Serialize;
 
 use crate::symbol::Symbol;
+use crate::ComputedSymbol;
 use crate::IRecord;
 use crate::Opts;
 use crate::RawRecordable;
@@ -293,6 +294,12 @@ impl From<()> for Namespace {
 
 impl From<&str> for Namespace {
     fn from(value: &str) -> Self {
+        Namespace::new(value)
+    }
+}
+
+impl From<ComputedSymbol> for Namespace {
+    fn from(value: ComputedSymbol) -> Self {
         Namespace::new(value)
     }
 }
