@@ -147,7 +147,7 @@ impl<P: Packer> MultiRoot<P> {
                     ));
                 }
             }
-            _ => unreachable!(),
+            _ => unreachable!("Should be in build state"),
         }
 
         Ok(building)
@@ -485,7 +485,8 @@ impl<P: Packer> MultiRoot<P> {
                     multi_root.push(flexbuffers::Blob(system_layer.as_slice()));
                     for (idx, (_, bytes)) in layers.iter().enumerate() {
                         if bytes.is_empty() {
-                            multi_root.push(flexbuffers::Blob(root.layer(idx + 2).unwrap_or_default()));
+                            multi_root
+                                .push(flexbuffers::Blob(root.layer(idx + 2).unwrap_or_default()));
                         } else {
                             multi_root.push(flexbuffers::Blob(bytes.as_ref()));
                         }
@@ -1447,7 +1448,7 @@ mod test {
 
     use super::{Container, GenericPacker};
     use crate::{
-        IRecord, Namespace, field,
+        IRecord, Namespace, VecIndex, field, namespace,
         search::iter::Search,
         util::{
             PeekExtensions,
@@ -1562,9 +1563,11 @@ mod test {
         let inner = container.to_record();
 
         let mut appending = Container::append(inner).unwrap();
-        appending.push_object(&toml::toml! {
-            name = "append layer"
-        }).unwrap();
+        appending
+            .push_object(&toml::toml! {
+                name = "append layer"
+            })
+            .unwrap();
 
         let container_appended = appending.to_read_only().unwrap();
         let obj = container_appended.try_object(3).unwrap();
@@ -1600,19 +1603,33 @@ mod test {
 
         assert_eq!(
             "append layer",
-            container_appended
+            container_appended.object(4).at("name").str().unwrap()
+        );
+
+        assert!(container_appended.is_super_set(&container));
+
+        let mut index = VecIndex::default();
+        index.index(container.to_record()).result().unwrap();
+        index
+            .index(container_appended.to_record())
+            .result()
+            .unwrap();
+
+        assert_eq!(
+            "append layer",
+            Container::read(index.search(namespace(ns)).next().unwrap())
+                .unwrap()
                 .object(4)
                 .at("name")
                 .str()
                 .unwrap()
         );
-
-        assert!(container_appended.is_super_set(&container));
         assert!(
             container_appended.to_run().is_err(),
             "container should not have any packed layers"
         );
-        assert!(logs_contain("Detected 'append' mode"))
+        assert!(logs_contain("Detected 'append' mode"));
+        assert!(logs_contain("Next container is a super set of the current container, auto-promotion may proceed"));
     }
 
     #[test]
