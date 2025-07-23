@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelRefIterator, ParallelBridge, ParallelIterator,
@@ -9,7 +9,7 @@ use crate::Data;
 
 type Tree = Vec<Layer>;
 
-type Layer = VecDeque<(String, [u8; 32])>;
+type Layer = VecDeque<(BTreeSet<usize>, [u8; 32])>;
 
 type Proof = Vec<Option<(bool, [u8; 32])>>;
 
@@ -20,32 +20,33 @@ pub fn build_merkle_tree(leaves: Vec<Data>) -> Tree {
         .iter()
         .map(|l| l.digest().finalize().into())
         .enumerate()
-        .inspect(|(i, _)| eprint!("{i} "))
-        .map(|(i, l)| (i.to_string(), l))
-        .collect::<VecDeque<(String, [u8; 32])>>();
+        .map(|(i, l)| (BTreeSet::from_iter(vec![i]), l))
+        .inspect(|(i, _)| eprint!("{i:?} "))
+        .collect::<VecDeque<(BTreeSet<usize>, [u8; 32])>>();
 
     eprintln!();
     levels.push(current_level.clone());
 
-    let mut loops = 10;
     while current_level.len() > 1 {
         let mut next_level = VecDeque::new();
 
         if current_level.len() == 2 {
             let (x, l) = &current_level[0];
             let (y, r) = &current_level[1];
-            let sig = format!("{x}{y}");
-            eprintln!("{sig}");
+            let mut xy = x.clone();
+            xy.append(&mut y.clone());
+            eprintln!("{xy:?}");
             let root = hash_concat(l, r);
-            levels.push(VecDeque::from(vec![(sig, root)]));
+            levels.push(VecDeque::from(vec![(xy, root)]));
             return levels;
         }
-        let last: Option<(String, [u8; 32])> = loop {
+        let last: Option<(BTreeSet<usize>, [u8; 32])> = loop {
             match (current_level.pop_front(), current_level.pop_front()) {
                 (Some((x, l)), Some((y, r))) => {
-                    let sig = format!("{x}{y}");
-                    eprint!("{sig} ");
-                    next_level.push_back((sig, hash_concat(&l, &r)));
+                    let mut xy = x.clone();
+                    xy.append(&mut y.clone());
+                    eprint!("{xy:?} ");
+                    next_level.push_back((xy, hash_concat(&l, &r)));
                 }
                 (Some(l), None) => break Some(l),
                 (None, None) => break None,
@@ -56,7 +57,7 @@ pub fn build_merkle_tree(leaves: Vec<Data>) -> Tree {
         };
 
         if let Some(last) = last {
-            eprint!("{}", last.0);
+            eprint!("{:?}", last.0);
             next_level.push_back(last);
         }
 
