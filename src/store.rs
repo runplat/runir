@@ -1,9 +1,10 @@
 use crate::{
-    archive::{Entry, FileEntryReference, Manifest}, queue::Pusher, util::Intern, IRecord, Namespace, Queue, Record, VecIndex, VirtualData, Worker
+    archive::{Entry, FileEntryReference, Manifest}, queue::Pusher, util::Intern, IRecord, Namespace, Queue, Record, VecIndex, Virtual, Worker
 };
 use ahash::{HashSet, HashSetExt};
+use bytes::Bytes;
 use sha2::{Digest, Sha256};
-use std::{io::Error, path::{Path, PathBuf}, sync::Arc
+use std::{io::Error, path::{Path, PathBuf}
 };
 use tracing::{debug, error};
 
@@ -178,7 +179,7 @@ impl ArchiveMember {
                         .len(*len as usize)
                         .map(&source)?
                 };
-                let mmap = Arc::new(mmap);
+                let mmap = Bytes::from_owner(mmap);
 
                 let mut records = vec![];
                 let entries = manifest.journal_entries()?;
@@ -187,7 +188,7 @@ impl ArchiveMember {
                     // Since we're packed in a single file, the zero-byte paddings aren't going
                     // to be present, new_packed ensures the constructor is aware of this when validating
                     // the data before returning the record
-                    let data = VirtualData::new(entry.clone(), mmap.clone())?;
+                    let data = Virtual::new(entry.clone(), mmap.clone())?;
                     if let Some(rec) = data.materialize() {
                         records.push(rec);
                     }
@@ -269,7 +270,7 @@ impl StoreArchive {
 
         let source = std::fs::File::open(path.as_ref())?;
         let mmap = unsafe { memmap2::MmapOptions::new().map(&source)? };
-        let mmap = Arc::new(mmap);
+        let mmap = Bytes::from_owner(mmap);
 
         let source = Sha256::digest(&mmap[..]);
 
@@ -293,7 +294,7 @@ impl StoreArchive {
                             // Next, find the offset/len of the sector of the pack belonging to the the member
                             // Finally, create a Packed archive entry
 
-                            let virt = VirtualData::new(
+                            let virt = Virtual::new(
                                 crate::archive::JournalEntry::Record(crate::RecordExtent {
                                     source: source.into(),
                                     content: digest,

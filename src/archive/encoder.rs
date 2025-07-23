@@ -145,7 +145,7 @@ impl TapeEncoder {
                 let len = data.len();
                 dst.reserve(len);
                 let padding = len % 512;
-                self.put_update(dst, &data.bytes());
+                self.put_update(dst, &data);
                 self.put_update(dst, &vec![0; 512 - padding]);
                 if let Some(journal_entry) = item.create_journal_entry(offset) {
                     self.journal.push(journal_entry);

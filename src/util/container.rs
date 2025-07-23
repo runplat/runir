@@ -14,9 +14,9 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, trace};
 
 use crate::{
-    IRecord, Index, Opts, Record, Storage,
+    Data, IRecord, Index, Opts, Record, Storage,
     record::record_crc,
-    virt::{BackingData, ObjectEncoder},
+    virt::ObjectEncoder,
     vol::{MemoryMappedTarget, SharedVolume, Volume, new_mmap_anon_target},
 };
 
@@ -64,7 +64,7 @@ struct Builder {
     /// Internal working buffer
     buffer: BytesMut,
     /// Layers being built into this container
-    layers: Vec<(BuildDescriptor, BackingData)>,
+    layers: Vec<(BuildDescriptor, Data)>,
 }
 
 enum State {
@@ -143,7 +143,7 @@ impl<P: Packer> MultiRoot<P> {
                             system: system_layer.clone(),
                             layer: idx,
                         },
-                        Bytes::new().into(),
+                        Data::default(),
                     ));
                 }
             }
@@ -1013,9 +1013,9 @@ impl IRecord for Layer {
             .find_view(self.bytes())
             .or_else(|| match &self.container.state {
                 State::Run { vol, .. } => {
-                    let backing: crate::virt::BackingData = SharedVolume(vol.clone()).into();
+                    let backing: crate::Data = SharedVolume(vol.clone()).into();
 
-                    backing.find_data(self.bytes())
+                    backing.find_view(self.bytes())
                 }
                 _ => None,
             })
@@ -1629,7 +1629,9 @@ mod test {
             "container should not have any packed layers"
         );
         assert!(logs_contain("Detected 'append' mode"));
-        assert!(logs_contain("Next container is a super set of the current container, auto-promotion may proceed"));
+        assert!(logs_contain(
+            "Next container is a super set of the current container, auto-promotion may proceed"
+        ));
     }
 
     #[test]

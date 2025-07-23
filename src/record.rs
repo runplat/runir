@@ -46,7 +46,7 @@ pub trait IRecord {
     fn opts(&self) -> &Opts;
 
     /// Returns a mutable reference to the current record opts.
-    /// 
+    ///
     /// Returns None if the record does not support option mutation
     ///
     /// Note: If the record is empty (has no data), changes to storage options (e.g. `Object`)
@@ -110,17 +110,17 @@ impl IRecord for Record {
 
     #[inline]
     fn bytes(&self) -> &[u8] {
-        self.data.bytes()
+        &self.data
     }
 
     #[inline]
     fn to_record(&self) -> Record {
         self.clone()
     }
-    
+
     #[inline]
     fn opts_mut(&mut self) -> Option<&mut Opts> {
-       Some(&mut self.opts)
+        Some(&mut self.opts)
     }
 }
 
@@ -142,14 +142,14 @@ impl<'b> IRecord for &'b Record {
 
     #[inline]
     fn bytes(&self) -> &[u8] {
-        self.data.bytes()
+        &self.data
     }
 
     #[inline]
     fn to_record(&self) -> Record {
         (*self).clone()
     }
-    
+
     #[inline]
     fn opts_mut(&mut self) -> Option<&mut Opts> {
         None
@@ -182,7 +182,7 @@ impl<'b> IRecord for Option<&'b Record> {
         self.cloned()
             .unwrap_or_else(|| Namespace::ephemeral().record(""))
     }
-    
+
     #[inline]
     fn opts_mut(&mut self) -> Option<&mut Opts> {
         None
@@ -224,7 +224,7 @@ impl Record {
             ns_chk: ns.chk(),
             opts: opts.clone(),
             ts,
-            data: Data::Empty,
+            data: Data::default(),
         }
     }
 
@@ -309,25 +309,16 @@ impl Record {
     /// Note: Records w/ no data are not considered valid
     #[inline]
     pub fn is_valid(&self) -> bool {
-        match &self.data {
-            Data::Bytes(bytes) => {
-                let mut crc = crc_digest();
-                crc.update(&bytes);
-                crc.update(&self.ts.to_le_bytes());
-
-                let (_, lo) = self.key.as_u64_pair();
-                lo == crc.finalize()
-            }
-            Data::Virtual(bytes) => {
-                let mut crc = crc_digest();
-                crc.update(&bytes);
-                crc.update(&self.ts.to_le_bytes());
-
-                let (_, lo) = self.key.as_u64_pair();
-                lo == crc.finalize()
-            }
-            _ => false,
+        if self.data.is_empty() {
+            return false;
         }
+
+        let mut crc = crc_digest();
+        crc.update(&self.data);
+        crc.update(&self.ts.to_le_bytes());
+
+        let (_, lo) = self.key.as_u64_pair();
+        lo == crc.finalize()
     }
 
     /// Returns true if this record matches the provided label
@@ -343,21 +334,17 @@ impl Record {
     /// Attempts to deserialize data to some type
     #[inline]
     pub fn load<'de, T: Deserialize<'de> + 'de>(&'de self) -> Option<T> {
-        match &self.data {
-            Data::Bytes(bytes) if self.is_valid() && self.opts().is_object() => flexbuffers::from_slice(&bytes).ok(),
-            Data::Virtual(bytes) if self.is_valid() && self.opts().is_object() => flexbuffers::from_slice(&bytes).ok(),
-            _ => None,
+        if self.is_valid() && self.opts().is_object() {
+            flexbuffers::from_slice(&self.data).ok()
+        } else {
+            None
         }
     }
 
     /// Attempts to deserialize data to some type, skips checking if the data is valid
     #[inline]
     pub fn unchecked_load<'de, T: Deserialize<'de>>(&'de self) -> Option<T> {
-        match &self.data {
-            Data::Bytes(bytes) => flexbuffers::from_slice(&bytes).ok(),
-            Data::Virtual(bytes) => flexbuffers::from_slice(&bytes).ok(),
-            _ => None,
-        }
+        flexbuffers::from_slice(&self.data).ok()
     }
 
     /// Returns an archive header for this record
@@ -393,19 +380,9 @@ impl Record {
         }
 
         if self.is_valid() {
-            match &self.data {
-                Data::Bytes(bytes) => {
-                    let header = self.make_archive_header()?;
-                    let entry = archive::Entry::regular(header, bytes.clone());
-                    return Ok(entry);
-                }
-                Data::Virtual(bytes) => {
-                    let header = self.make_archive_header()?;
-                    let entry = archive::Entry::from_virtual(header, bytes.clone());
-                    return Ok(entry);
-                }
-                _ => {}
-            }
+            let header = self.make_archive_header()?;
+            let entry = archive::Entry::regular(header, self.data.as_bytes().clone());
+            return Ok(entry);
         }
 
         Err(Error::new(
@@ -428,9 +405,9 @@ impl Record {
                     .map(|(b, d)| {
                         use sha2::Digest;
                         let digest: [u8; 32] = b.digest().finalize().into();
-                        if digest.eq(&d) { b } else { Data::Empty }
+                        if digest.eq(&d) { b } else { Data::default() }
                     })
-                    .unwrap_or(Data::Empty),
+                    .unwrap_or_default(),
                 ns_chk,
                 opts,
                 ts,
@@ -450,12 +427,6 @@ impl Record {
             std::io::ErrorKind::InvalidFilename,
             "File name was not in the expected record archive format",
         ))
-    }
-
-    /// Returns true if the backing data is virtual
-    #[inline]
-    pub fn is_virtual(&self) -> bool {
-        matches!(self.data, Data::Virtual(..))
     }
 
     /// Creates a staged version of the record with new data.
@@ -481,16 +452,19 @@ impl Record {
         } else if self.opts().is_idempotent() || self.opts().is_staging() {
             let data: Data = data.into();
 
-            if self.opts().is_object() && flexbuffers::Reader::get_root(data.bytes()).is_err() {
+            if self.opts().is_object() && flexbuffers::Reader::get_root(data.as_ref()).is_err() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "Current record stores an Object, staged data must also be an object"
-                ))
+                    "Current record stores an Object, staged data must also be an object",
+                ));
             }
 
             let mut staging = self.clone();
-            staging.opts_mut().expect("should always be able to mutate options from a full record").enable_branch(Branch::Staging);
-            
+            staging
+                .opts_mut()
+                .expect("should always be able to mutate options from a full record")
+                .enable_branch(Branch::Staging);
+
             // Since we are about to commit new data, we need to create a new timestamp
             staging.ts = time::UtcDateTime::now().unix_timestamp() as u64;
 
@@ -511,7 +485,10 @@ impl Record {
     #[must_use = "Calling `.delete()` marks the record, but it must be committed or passed to a store to take effect"]
     pub fn delete(&self) -> Self {
         let mut deleting = self.clone();
-        deleting.opts_mut().expect("should always be able to mutate options from a full record").enable_branch(Branch::Deleted);
+        deleting
+            .opts_mut()
+            .expect("should always be able to mutate options from a full record")
+            .enable_branch(Branch::Deleted);
         deleting
     }
 }
@@ -528,7 +505,7 @@ pub fn record_crc(bytes: &[u8], ts: u64) -> u64 {
 #[cfg(test)]
 mod test {
     use super::Record;
-    use crate::{record::Namespace, Data, IRecord, Opts, RecordableExtensions};
+    use crate::{IRecord, Opts, RecordableExtensions, record::Namespace};
     use bytes::Bytes;
     use serde::{Deserialize, Serialize};
     use std::{collections::BTreeMap, time::Duration};
@@ -588,7 +565,7 @@ mod test {
     fn test_record_from_parts_is_invalid_with_random_parts() {
         let record = Record::from_parts((
             Uuid::nil(),
-            Data::Bytes(Bytes::from_static(b"gibberish")),
+            Bytes::from_static(b"gibberish").into(),
             0,
             0,
             Opts::default(),
@@ -680,7 +657,10 @@ mod test {
         let mut record = ns.store("my-test-obj", test.indexable());
         assert!(record.archive().is_err());
 
-        record.opts_mut().expect("should always be able to mutate options from a full record").enable_archiving();
+        record
+            .opts_mut()
+            .expect("should always be able to mutate options from a full record")
+            .enable_archiving();
 
         let key = record.key.clone();
         let archive = record.archive().unwrap();
@@ -714,10 +694,16 @@ mod test {
 
         let record = namespace.record("example");
         let staged = record.stage(Bytes::from_static(b"hello")).unwrap();
-        assert!(!staged.opts().is_staging(), "Since the record was empty to begin-with, this should bypass the STAGING branch");
+        assert!(
+            !staged.opts().is_staging(),
+            "Since the record was empty to begin-with, this should bypass the STAGING branch"
+        );
 
         let deleted = staged.delete();
-        assert!(deleted.stage(Bytes::from_static(b"world")).is_err(), "A deleted record cannot stage data");
+        assert!(
+            deleted.stage(Bytes::from_static(b"world")).is_err(),
+            "A deleted record cannot stage data"
+        );
 
         let staged = staged.stage(Bytes::from_static(b"hello world")).unwrap();
         assert!(staged.is_valid());

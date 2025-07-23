@@ -1,47 +1,20 @@
-use crate::virt::VirtualDataSlim;
+use std::ops::Deref;
+
 use bytes::Bytes;
 use sha2::{Sha256, digest::Update};
 
-/// Enumeration of different data implementations
+/// Wraps Bytes struct to offer additional functions
 #[derive(Default, Debug, Clone)]
-pub enum Data {
-    /// Data has not been set
-    #[default]
-    Empty,
-    /// Data is loaded into memory
-    Bytes(Bytes),
-    /// Data is stored virtually w/ a reference to a journal entry and mmap
-    Virtual(VirtualDataSlim),
+pub struct Data {
+    data: Bytes,
 }
 
 impl Data {
-    /// Returns true if data is empty
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.bytes().is_empty()
-    }
-
-    /// Returns the len in bytes of data
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.bytes().len()
-    }
-
-    /// Returns a slice of the bytes in data
-    #[inline]
-    pub fn bytes(&self) -> &[u8] {
-        match self {
-            Data::Empty => &[],
-            Data::Bytes(bytes) => &bytes,
-            Data::Virtual(virt_ref) => &virt_ref,
-        }
-    }
-
     /// Returns a SHA256 digest of this data
     #[inline]
     pub fn digest(&self) -> Sha256 {
         let mut digest = Sha256::default();
-        digest.update(self.bytes());
+        digest.update(self);
         digest
     }
 
@@ -50,34 +23,43 @@ impl Data {
     /// Note: offset is treated as relative to the current view of data
     #[inline]
     pub fn view(&self, offset: usize, len: usize) -> Data {
-        match self {
-            Data::Empty => Data::Empty,
-            Data::Bytes(bytes) => Data::Bytes(bytes.slice(offset..offset + len)),
-            Data::Virtual(virtual_data_slim) => Data::Virtual(VirtualDataSlim {
-                offset: virtual_data_slim.offset + offset,
-                len,
-                inner: virtual_data_slim.inner.clone(),
-            }),
+        Self {
+            data: self.data.slice(offset..offset + len),
         }
     }
 
     /// Finds a view within Data and returns a new Data
     #[inline]
     pub fn find_view(&self, view: &[u8]) -> Option<Data> {
-        match self {
-            Data::Empty => None,
-            _ => self
-                .bytes()
-                .windows(view.len())
-                .enumerate()
-                .find(|(_, v)| *v == view)
-                .map(|(offset, _)| self.view(offset, view.len())),
-        }
+        self.windows(view.len())
+            .enumerate()
+            .find(|(_, v)| *v == view)
+            .map(|(offset, _)| self.view(offset, view.len()))
+    }
+
+    /// Returns a reference to the inner Bytes
+    #[inline]
+    pub fn as_bytes(&self) -> &Bytes {
+        &self.data
     }
 }
 
 impl From<Bytes> for Data {
     fn from(value: Bytes) -> Self {
-        Self::Bytes(value)
+        Self { data: value }
+    }
+}
+
+impl AsRef<[u8]> for Data {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl Deref for Data {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
     }
 }

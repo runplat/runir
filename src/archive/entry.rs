@@ -1,5 +1,5 @@
 use super::{Header, JournalEntry, Sha256Digest, header::EMPTY_HEADER};
-use crate::{virt::VirtualDataSlim, Data, IRecord, Opts, Record};
+use crate::{Data, IRecord, Opts, Record};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
@@ -14,7 +14,7 @@ pub enum Entry {
     /// Entry can be found on disk, and has been journaled
     Journaled {
         header: Header,
-        data: VirtualDataSlim,
+        data: Data,
     },
     /// Reference entry
     Reference(FileEntryReference),
@@ -52,9 +52,9 @@ pub struct FileEntry {
 }
 
 impl Entry {
-    /// Returns a new journaled entry from virtual data
+    /// Returns a new journaled entry from journaled data
     #[inline]
-    pub fn from_virtual(header: Header, data: VirtualDataSlim) -> Self {
+    pub fn from_journaled(header: Header, data: Data) -> Self {
         Self::Journaled { header, data }
     }
 
@@ -95,22 +95,22 @@ impl Entry {
     #[inline]
     pub fn data(&self) -> Option<(Data, [u8; 32])> {
         match self {
-            Entry::Regular(reg) => Some((Data::Bytes(reg.data.clone()), reg.digest.clone())),
+            Entry::Regular(reg) => Some((Data::from(reg.data.clone()), reg.digest.clone())),
             Entry::Journaled { data, .. } => {
-                let data = Data::Virtual(data.clone());
+                let data = Data::from(data.clone());
                 let digest = data.digest().finalize().into();
                 Some((data, digest))
             }
             Entry::Record(rec) => rec.archive().ok().and_then(|e| match e {
-                Entry::Regular(reg) => Some((Data::Bytes(reg.data), reg.digest.clone())),
+                Entry::Regular(reg) => Some((Data::from(reg.data), reg.digest.clone())),
                 Entry::Journaled { data, .. } => {
-                    let data = Data::Virtual(data.clone());
+                    let data = Data::from(data.clone());
                     let digest = data.digest().finalize().into();
                     Some((data, digest))
                 }
                 _ => None,
             }),
-            Entry::Reference(FileEntryReference { digest, .. }) => Some((Data::Empty, digest.clone().finalize().into())),
+            Entry::Reference(FileEntryReference { digest, .. }) => Some((Data::default(), digest.clone().finalize().into())),
             _ => None,
         }
     }
@@ -160,7 +160,7 @@ impl Entry {
             Entry::Journaled { header, data } => {
                 Some(JournalEntry::Extent {
                     source: [0; 32],
-                    content: Data::Virtual(data.clone()).digest().finalize().into(),
+                    content: Data::from(data.clone()).digest().finalize().into(),
                     offset: offset as u64,
                     len: header.size() as u32,
                 })

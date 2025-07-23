@@ -58,7 +58,7 @@ pub use store::Store;
 mod virt;
 pub use virt::vol;
 pub use virt::RecordExtent;
-pub use virt::VirtualData;
+pub use virt::Virtual;
 
 pub mod frontend;
 pub use frontend::kv;

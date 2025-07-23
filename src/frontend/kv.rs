@@ -580,15 +580,6 @@ mod test {
                 .count()
         );
 
-        assert!(
-            kv.shared
-                .snapshot()
-                .lookup("", "hello")
-                .unwrap()
-                .is_virtual(),
-            "Worker should now be using virtual data, and not the original buffer"
-        );
-
         assert_eq!(
             "hello",
             kv.load::<toml::Value>("hello").unwrap()["other"]["values"]["also_important"]

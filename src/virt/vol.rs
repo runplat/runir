@@ -1,14 +1,14 @@
 use crate::{
     archive::{Entry, TapeEncoder},
     store::ArchiveMember,
-    util::Packer,
+    util::Packer, Data,
 };
 use anyhow::anyhow;
 use asynchronous_codec::{FramedWrite, FramedWriteParts};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{AsyncRead, AsyncSeek, AsyncWrite, SinkExt};
 use generic_array::{GenericArray, typenum::U32};
-use memmap2::{Mmap, MmapMut};
+use memmap2::MmapMut;
 use parking_lot::{Mutex, RwLock};
 use pin_project_lite::pin_project;
 use std::{
@@ -22,7 +22,7 @@ use std::{
 };
 use tracing::trace;
 
-use super::{ObjectEncoder, VirtualData, data::BackingData};
+use super::{ObjectEncoder, Virtual};
 
 pub const KIB: usize = 2usize.pow(10);
 pub const MIB: usize = 2usize.pow(20);
@@ -30,9 +30,6 @@ pub const MIB16: usize = MIB * 16;
 
 /// Super trait for types that [`Volume<T>`] can use as it's binary store
 pub trait VolumeTarget: AsyncWrite + Unpin + Sync + 'static {
-    /// Portable "Bytes" type that is safe and cheap to clone and share
-    type Bytes: Into<BackingData> + Clone;
-
     /// Provides the flush semantics for the volume target
     ///
     /// This enables precise control over flushing behavior, instead of relying
@@ -43,7 +40,7 @@ pub trait VolumeTarget: AsyncWrite + Unpin + Sync + 'static {
     fn path(&self) -> impl AsRef<Path>;
 
     /// Freezes the volume target to ensure it becomes cloneable and read-only
-    fn freeze(self) -> std::io::Result<Self::Bytes>;
+    fn freeze(self) -> std::io::Result<Data>;
 
     /// Returns a readonly view of the volume target
     fn view<'view>(&'view self) -> &'view [u8];
@@ -154,8 +151,8 @@ impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc> Deref for Volume<T, Enc> {
 }
 
 /// Wrapper over a shared volume
-/// 
-/// Allows conversion into BackingData
+///
+/// Allows conversion into Data
 pub struct SharedVolume<T, Enc>(pub(crate) Arc<RwLock<Volume<T, Enc>>>);
 
 impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc: Send + Sync + 'static> Deref
@@ -171,11 +168,19 @@ impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc: Send + Sync + 'static> Deref
     }
 }
 
+impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc: Send + Sync + 'static> AsRef<[u8]>
+    for SharedVolume<T, Enc>
+{
+    fn as_ref(&self) -> &[u8] {
+        &self
+    }
+}
+
 impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc: Send + Sync + 'static> From<SharedVolume<T, Enc>>
-    for BackingData
+    for Data
 {
     fn from(value: SharedVolume<T, Enc>) -> Self {
-        BackingData(Arc::new(value))
+        Data::from(Bytes::from_owner(value))
     }
 }
 
@@ -311,7 +316,7 @@ impl<T: VolumeTarget> Volume<T, TapeEncoder> {
         let entries = manifest.journal_entries()?;
         let count = entries.len();
         for e in entries {
-            let data = VirtualData::new(e, target.clone())?;
+            let data = Virtual::new(e, target.clone())?;
             if let Some(record) = data.materialize() {
                 records.push(record);
             }
@@ -370,26 +375,7 @@ impl<T> CursorTarget<T> {
     }
 }
 
-/// Arc<Mmap> is already frozen, except if the mmap is an anonymous mmap,
-/// we aren't able to re_map/re_size the underlying mmap, which means if
-/// we didn't use all of the capacity, we need to know where the cutoff should be.
-#[derive(Clone)]
-pub struct FrozenMmap {
-    len: usize,
-    inner: Arc<Mmap>,
-}
-
-impl Deref for FrozenMmap {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner[..self.len]
-    }
-}
-
 impl VolumeTarget for MemoryMappedTarget {
-    type Bytes = FrozenMmap;
-
     #[inline]
     fn flush(&self) -> std::io::Result<()> {
         self.inner.flush()
@@ -401,16 +387,15 @@ impl VolumeTarget for MemoryMappedTarget {
     }
 
     #[inline]
-    fn freeze(self) -> std::io::Result<Self::Bytes> {
-        Ok(FrozenMmap {
-            len: self.pos,
-            inner: Arc::new(self.inner.make_read_only()?),
-        })
+    fn freeze(self) -> std::io::Result<Data> {
+        let bytes = Bytes::from_owner(self.inner.make_read_only()?);
+
+        Ok(bytes.slice(..self.pos).into())
     }
 
     #[inline]
     fn view<'view>(&'view self) -> &'view [u8] {
-        &self.inner[..self.pos]
+        &self.inner
     }
 
     #[inline]
@@ -426,8 +411,6 @@ impl VolumeTarget for MemoryMappedTarget {
 }
 
 impl VolumeTarget for InMemoryTarget {
-    type Bytes = Bytes;
-
     #[inline]
     fn flush(&self) -> std::io::Result<()> {
         Ok(())
@@ -439,8 +422,8 @@ impl VolumeTarget for InMemoryTarget {
     }
 
     #[inline]
-    fn freeze(self) -> std::io::Result<Self::Bytes> {
-        Ok(self.inner.freeze().slice(..self.pos))
+    fn freeze(self) -> std::io::Result<Data> {
+        Ok(self.inner.freeze().slice(..self.pos).into())
     }
 
     #[inline]

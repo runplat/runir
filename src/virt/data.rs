@@ -1,42 +1,23 @@
 use crate::{Data, Record, archive::JournalEntry};
-use bytes::Bytes;
-use memmap2::Mmap;
 use sha2::{Digest, Sha256};
-use std::{fmt::Debug, ops::Deref, sync::Arc};
+use std::{fmt::Debug, ops::Deref};
 use tracing::trace;
 
-use super::vol::FrozenMmap;
-
 /// Virtual reference to journaled data
-///
-/// Uses a mmap'ed file to provide access to journaled data
 #[derive(Debug, Clone)]
-pub struct VirtualData {
+pub struct Virtual {
     /// Journal entry for this virtual reference
     journaled: JournalEntry,
     /// Inner data pointer
-    inner: BackingData,
+    inner: Data,
 }
 
-/// Slim virtual data only stores offset/len and the backing data
-///
-/// Can only be constructed from VirtualData which does the validation
-#[derive(Debug, Clone)]
-pub struct VirtualDataSlim {
-    /// Offset into the mmap
-    pub(crate) offset: usize,
-    /// Len of data
-    pub(crate) len: usize,
-    /// Inner data pointer to backing data
-    pub(crate) inner: BackingData,
-}
-
-impl VirtualData {
+impl Virtual {
     /// Returns a new virtual ref, if the provided arguments are valid
     ///
     /// Returns an error if the source/content digests could not be verified
     #[inline]
-    pub fn new(journaled: JournalEntry, data: impl Into<BackingData>) -> std::io::Result<Self> {
+    pub fn new(journaled: JournalEntry, data: impl Into<Data>) -> std::io::Result<Self> {
         let virt_ref = Self {
             journaled,
             inner: data.into(),
@@ -70,53 +51,30 @@ impl VirtualData {
         source_matches && content_matches
     }
 
-    fn compute_source_digest(&self) -> [u8; 32] {
-        Sha256::digest(&self.inner[..]).into()
-    }
-
-    /// Returns the length in bytes
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.as_ref().len()
-    }
-
-    /// Returns true if the backing buffer is empty
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.as_ref().is_empty()
-    }
-
     /// Reverses back into a record if journaled data is a record extent
     #[inline]
     pub fn materialize(&self) -> Option<Record> {
         match &self.journaled {
             JournalEntry::Record(record_extent) => {
-                record_extent.materialize(&Data::Virtual(self.to_slim()))
+                record_extent.materialize(&Data::from(self.clone()))
             }
             _ => None,
         }
     }
 
-    /// Converts this reference into "slim" mode which removes the journal entry
-    /// metadata used for validation
     #[inline]
-    pub fn to_slim(&self) -> VirtualDataSlim {
-        let (offset, len) = self.journaled.extent();
-        VirtualDataSlim {
-            offset: offset as usize,
-            len: len as usize,
-            inner: self.inner.clone(),
-        }
+    fn compute_source_digest(&self) -> [u8; 32] {
+        self.inner.digest().finalize().into()
     }
 }
 
-impl AsRef<[u8]> for VirtualData {
+impl AsRef<[u8]> for Virtual {
     fn as_ref(&self) -> &[u8] {
         &self
     }
 }
 
-impl Deref for VirtualData {
+impl Deref for Virtual {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -125,71 +83,9 @@ impl Deref for VirtualData {
     }
 }
 
-impl AsRef<[u8]> for VirtualDataSlim {
-    fn as_ref(&self) -> &[u8] {
-        &self
-    }
-}
-
-impl Deref for VirtualDataSlim {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner[self.offset as usize..(self.offset + self.len)]
-    }
-}
-
-/// Backing-data is a normalized binary type
-#[derive(Clone)]
-pub struct BackingData(pub(crate) Arc<dyn Deref<Target = [u8]> + Sync + Send + 'static>);
-
-impl BackingData {
-    /// Finds data from backing data
-    /// 
-    /// Returns Data::Virtual if found
-    #[inline]
-    pub fn find_data(&self, data: &[u8]) -> Option<Data> {
-        self.windows(data.len())
-            .enumerate()
-            .find(|(_, d)| *d == data)
-            .map(|(offset, _)| {
-                Data::Virtual(VirtualDataSlim {
-                    offset,
-                    len: data.len(),
-                    inner: self.clone(),
-                })
-            })
-    }
-}
-
-impl Debug for BackingData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("InnerData").finish()
-    }
-}
-
-impl Deref for BackingData {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        self.0.deref()
-    }
-}
-
-impl From<Arc<Mmap>> for BackingData {
-    fn from(value: Arc<Mmap>) -> Self {
-        Self(value)
-    }
-}
-
-impl From<Bytes> for BackingData {
-    fn from(value: Bytes) -> Self {
-        Self(Arc::new(value))
-    }
-}
-
-impl From<FrozenMmap> for BackingData {
-    fn from(value: FrozenMmap) -> Self {
-        Self(Arc::new(value))
+impl From<Virtual> for Data {
+    fn from(value: Virtual) -> Self {
+        let (offset, len) = value.journaled.extent();
+        value.inner.view(offset as usize, len as usize)
     }
 }
