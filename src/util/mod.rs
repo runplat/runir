@@ -17,6 +17,7 @@ mod executor;
 pub use executor::Executor;
 
 pub mod fs;
+pub mod merkle;
 
 use futures::future::RemoteHandle;
 
