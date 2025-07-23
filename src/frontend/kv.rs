@@ -155,7 +155,8 @@ use std::{
 use tracing::{debug, error};
 
 /// Provides a put(..) function that takes a serializable object as the value
-pub trait Put<V> {
+pub trait Put<V>
+{
     /// Puts a value in the store to key
     ///
     /// Returns an Error if stored data could not be validated
@@ -163,7 +164,7 @@ pub trait Put<V> {
     /// Note: All stored-values are expected to be idempotent by default, unless a merge-policy is set
     /// on the Namespace. This means that by default if no merge-policy is set, this function will always
     /// replace any existing values, and not return an error
-    fn put(&mut self, key: &str, value: &V) -> std::io::Result<()>;
+    fn put(&mut self, key: &str, value: V) -> std::io::Result<()>;
 
     /// Put many key_values in the store at once
     ///
@@ -172,7 +173,7 @@ pub trait Put<V> {
     /// Note: All stored-values are expected to be idempotent by default, unless a merge-policy is set
     /// on the Namespace. This means that by default if no merge-policy is set, this function will always
     /// replace any existing values, and not return an error
-    fn put_many(&mut self, key_values: &[(&str, &V)]) -> std::io::Result<()>;
+    fn put_many(&mut self, key_values:  Vec<(&str, V)>) -> std::io::Result<()>;
 }
 
 /// Provides a get(..) function that returns a value by key
@@ -417,27 +418,27 @@ impl DerefMut for KeySerdeValue {
 }
 
 impl<V: Serialize> Put<V> for KeySerdeValue {
-    fn put(&mut self, key: &str, value: &V) -> std::io::Result<()> {
-        self.put_raw(self.ns.store(key, value))
+    fn put(&mut self, key: &str, value: V) -> std::io::Result<()> {
+        self.put_raw(self.ns.store(key, &value))
     }
 
-    fn put_many(&mut self, key_values: &[(&str, &V)]) -> std::io::Result<()> {
-        for (key, v) in key_values {
-            self.put_raw(self.ns.store(key, v))?;
+    fn put_many(&mut self, mut key_values: Vec<(&str, V)>) -> std::io::Result<()> {
+        for (key, v) in key_values.drain(..) {
+            self.put_raw(self.ns.store(key, &v))?;
         }
 
         Ok(())
     }
 }
 
-impl<V: AsRef<[u8]>> Put<V> for KeyValue {
-    fn put(&mut self, key: &str, value: &V) -> std::io::Result<()> {
-        self.put_raw(self.ns.commit(key, value.as_ref()))
+impl<V: AsRef<[u8]> + Sync + Send + 'static> Put<V> for KeyValue {
+    fn put(&mut self, key: &str, value: V) -> std::io::Result<()> {
+        self.put_raw(self.ns.commit(key, value))
     }
 
-    fn put_many(&mut self, key_values: &[(&str, &V)]) -> std::io::Result<()> {
-        for (key, v) in key_values {
-            self.put_raw(self.ns.commit(key, v.as_ref()))?;
+    fn put_many(&mut self, mut key_values: Vec<(&str, V)>) -> std::io::Result<()> {
+        for (key, v) in key_values.drain(..) {
+            self.put_raw(self.ns.commit(key, v))?;
         }
 
         Ok(())

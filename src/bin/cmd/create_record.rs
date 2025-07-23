@@ -45,14 +45,14 @@ impl CreateRecord {
                 content
             };
 
-            let record = ns.commit(&label, content.as_bytes());
+            let record = ns.commit(&label, content);
             let mut container = Container::build(record);
 
             let content_digest = hex::encode(container.content());
 
             match projection {
                 ObjectFormat::Yaml => {
-                    let yaml = serde_yaml::from_str::<serde_yaml::Value>(&content)
+                    let yaml = serde_yaml::from_slice::<serde_yaml::Value>(container.bytes())
                         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
                     container.push_object_with(
@@ -65,7 +65,7 @@ impl CreateRecord {
                     )?;
                 }
                 ObjectFormat::Json => {
-                    let json = serde_json::from_str::<serde_json::Value>(&content)
+                    let json = serde_json::from_slice::<serde_json::Value>(container.bytes())
                         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
                     container.push_object_with(
@@ -78,7 +78,7 @@ impl CreateRecord {
                     )?;
                 }
                 ObjectFormat::Toml => {
-                    let toml = toml::from_str::<toml::Value>(&content)
+                    let toml = toml::from_str::<toml::Value>(str::from_utf8(container.bytes())?)
                         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
                     container.push_object_with(
@@ -144,7 +144,7 @@ impl CreateRecord {
             };
 
             debug!("Storing content as raw binary data");
-            Ok(ns.commit(&label, bytes.as_slice()))
+            Ok(ns.commit(&label, bytes))
         }
     }
 }

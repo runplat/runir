@@ -1,4 +1,4 @@
-use std::fmt::{Debug, Display};
+use std::{fmt::{Debug, Display}, str::Utf8Error};
 
 /// Error type for crate
 pub struct Error {
@@ -24,6 +24,12 @@ impl From<anyhow::Error> for Error {
 
 impl From<mustache::Error> for Error {
     fn from(value: mustache::Error) -> Self {
+        anyhow::anyhow!(value).into()
+    }
+}
+
+impl From<Utf8Error> for Error {
+    fn from(value: Utf8Error) -> Self {
         anyhow::anyhow!(value).into()
     }
 }

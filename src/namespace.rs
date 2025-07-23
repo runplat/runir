@@ -244,8 +244,8 @@ impl Namespace {
 
     /// Authors a flexbuffer root that will become the committed value of the record
     #[inline]
-    pub fn commit(&self, label: &str, commit: &[u8]) -> Record {
-        let record = self.record(label).commit(Bytes::copy_from_slice(commit));
+    pub fn commit(&self, label: &str, commit: impl AsRef<[u8]> + Send + 'static) -> Record {
+        let record = self.record(label).commit(Bytes::from_owner(commit));
         record
     }
 

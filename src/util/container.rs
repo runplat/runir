@@ -310,7 +310,7 @@ impl<P: Packer> MultiRoot<P> {
     ///
     /// Note: If the layer is packed, this function does not unpack the layer
     #[inline]
-    pub fn bytes(&self, layer: usize) -> crate::Result<&[u8]> {
+    pub fn layer_bytes(&self, layer: usize) -> crate::Result<&[u8]> {
         match &self.state {
             State::Build {
                 root,
@@ -339,7 +339,7 @@ impl<P: Packer> MultiRoot<P> {
     /// Returns a reader for a stored layer
     #[inline]
     pub fn reader(&self, layer: usize) -> crate::Result<impl Read> {
-        let bytes = self.bytes(layer)?;
+        let bytes = self.layer_bytes(layer)?;
         let desc = self
             .layer_desc(layer)
             .map(Ok)
@@ -1734,7 +1734,7 @@ mod test {
 
         let read = container.to_read_only().unwrap();
 
-        let bytes = read.bytes(2).unwrap();
+        let bytes = read.layer_bytes(2).unwrap();
         assert_ne!(b"hello world", bytes, "should still be packed");
     }
 

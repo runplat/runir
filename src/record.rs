@@ -688,7 +688,7 @@ mod test {
     fn test_stage() {
         let namespace = Namespace::ephemeral();
 
-        let record = namespace.commit("example", &Bytes::from_static(b"hello"));
+        let record = namespace.commit("example", Bytes::from_static(b"hello"));
         let staged = record.stage(Bytes::from_static(b"world")).unwrap();
         assert!(staged.opts().is_staging());
 

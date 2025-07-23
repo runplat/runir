@@ -103,7 +103,7 @@ async fn main() -> runir::Result<()> {
                 let mut kv = runir::kv::open().await?;
                 kv.put(
                     "__init__runir__version",
-                    &env!("CARGO_PKG_VERSION").as_bytes(),
+                    env!("CARGO_PKG_VERSION").as_bytes(),
                 )?;
                 kv.save().await?;
                 kv
