@@ -63,3 +63,19 @@ impl Deref for Data {
         self.as_ref()
     }
 }
+
+#[cfg(test)]
+mod test {
+    use crate::{util::PeekExtensions, Namespace};
+
+    #[test]
+    fn test_data_util_peek_ext() {
+        let ns = Namespace::ephemeral();
+
+        let rec = ns.store("test", &toml::toml! {
+            name = "test"
+        });
+
+        assert_eq!("test", rec.data.at("name").str().unwrap());
+    }
+}

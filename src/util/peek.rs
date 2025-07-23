@@ -496,6 +496,61 @@ impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
     }
 }
 
+impl<'peek> PeekExtensions<'peek> for &'peek crate::Data {
+    fn in_ref(
+        self,
+    ) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + crate::util::PeekRefExtensions<'peek>
+    {
+        self.val().in_ref()
+    }
+
+    fn at(self, key: &str) -> Option<crate::util::Peek<'peek>> {
+        self.val().at(key)
+    }
+
+    fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<crate::util::Peek<'peek>> {
+        self.val().at_path(keys)
+    }
+
+    fn at_dot(self, path: &'peek str) -> Option<crate::util::Peek<'peek>> {
+        self.val().at_dot(path)
+    }
+
+    fn bool(self) -> Option<bool> {
+        self.val().bool()
+    }
+
+    fn str(self) -> Option<&'peek str> {
+        self.val().str()
+    }
+
+    fn u64(self) -> Option<u64> {
+        self.val().u64()
+    }
+
+    fn int(self) -> Option<i64> {
+        self.val().int()
+    }
+
+    fn blob(self) -> Option<&'peek [u8]> {
+        self.val().blob()
+    }
+
+    fn iter(self) -> Option<impl Iterator<Item = crate::util::Peek<'peek>>> {
+        self.val().iter()
+    }
+
+    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, crate::util::Peek<'peek>)>> {
+        self.val().iter_kv()
+    }
+
+    fn val(self) -> Option<crate::util::Peek<'peek>> {
+        flexbuffers::Reader::get_root(self.as_ref())
+            .ok()
+            .map(Peek::from)
+    }
+}
+
 impl<'p> PeekRefExtensions<'p> for PeekRef<'p> {
     #[inline]
     fn bool(&self) -> Option<bool> {
@@ -730,7 +785,7 @@ mod peek_path {
                 if self.depth == path.len() {
                     break;
                 }
-                
+
                 let next_ptr = node.link ^ (node.current.addr_of_interned() as usize);
 
                 current = if self.depth.saturating_sub(path.len()) == 1 {
