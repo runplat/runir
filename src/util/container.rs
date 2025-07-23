@@ -8,7 +8,6 @@ use ahash::HashSet;
 use anyhow::anyhow;
 use bytes::{BufMut, Bytes, BytesMut};
 use generic_array::{GenericArray, typenum::U32};
-use parking_lot::RwLock;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracing::{debug, trace};
@@ -85,7 +84,7 @@ enum State {
         /// Record that contains all layers
         record: Record,
         /// Runtime volume that is able to store any layers that require additional space for unpacking
-        vol: Arc<RwLock<RuntimeVolume>>,
+        vol: SharedRuntimeVolume,
     },
 }
 
@@ -411,21 +410,11 @@ impl<P: Packer> MultiRoot<P> {
                     }
 
                     if desc.is_packed() {
-                        if !vol.read().is_obj_unpacked(layer) {
+                        if !vol.vol().is_obj_unpacked(layer) {
                             self.unpack(layer, desc)?;
                         }
 
-                        // SAFETY:
-                        // - `vol` is backed by a stable memory region (mmap), and `.as_ptr()`
-                        //   returns a valid pointer to the underlying RuntimeVolume.
-                        // - We ensure that any mutable borrow (e.g., `encode_packed_obj`) occurs
-                        //   strictly *before* this call, and is fully dropped prior to dereferencing.
-                        // - This block is only reached if the layer is already unpacked (or has just
-                        //   been unpacked), so the pointer is valid and point
-                        let obj =
-                            unsafe { vol.data_ptr().as_ref().expect("should be a runtime volume") }
-                                .view_obj(layer)?;
-
+                        let obj = vol.view().view_obj(layer)?;
                         Ok(obj)
                     } else {
                         if let Some(inline) = record.layer(layer) {
@@ -666,7 +655,7 @@ impl<P: Packer> MultiRoot<P> {
                 Ok(Self {
                     state: State::Run {
                         record,
-                        vol: Arc::new(RwLock::new(objects)),
+                        vol: objects.into(),
                     },
                     _p: PhantomData,
                 })
@@ -729,7 +718,7 @@ impl<P: Packer> MultiRoot<P> {
                         .into());
                     }
 
-                    vol.write().encode_packed_obj::<P>(layer, packed)?;
+                    vol.vol_mut().encode_packed_obj::<P>(layer, packed)?;
                     Ok(())
                 } else {
                     return Err(anyhow!("Record does not have packed layer data").into());
@@ -1009,16 +998,16 @@ impl IRecord for Layer {
     fn to_record(&self) -> Record {
         let (k, data, ns_chk, ts, opts) = self.container.to_record().into_parts();
 
-        if let Some(data) = data
-            .find_view(self.bytes())
-            .or_else(|| match &self.container.state {
-                State::Run { vol, .. } => {
-                    let backing: crate::Data = SharedVolume(vol.clone()).into();
+        if let Some((_, data)) =
+            data.find_view(self.bytes())
+                .or_else(|| match &self.container.state {
+                    State::Run { vol, .. } => {
+                        let backing: crate::Data = vol.clone().into();
 
-                    backing.find_view(self.bytes())
-                }
-                _ => None,
-            })
+                        backing.find_view(self.bytes())
+                    }
+                    _ => None,
+                })
         {
             Record::from_parts((self.uuid(), data, self.ns_chk(), ts, self.opts))
         } else {
@@ -1438,6 +1427,9 @@ impl<P> IRecord for MultiRoot<P> {
         }
     }
 }
+
+/// Type-alias for a shared "Runtime" volume
+type SharedRuntimeVolume = SharedVolume<MemoryMappedTarget, ObjectEncoder>;
 
 /// Type-alias for a "Runtime" volume
 type RuntimeVolume = Volume<MemoryMappedTarget, ObjectEncoder>;

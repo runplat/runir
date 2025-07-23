@@ -30,11 +30,11 @@ impl Data {
 
     /// Finds a view within Data and returns a new Data
     #[inline]
-    pub fn find_view(&self, view: &[u8]) -> Option<Data> {
+    pub fn find_view(&self, view: &[u8]) -> Option<(u64, Data)> {
         self.windows(view.len())
             .enumerate()
             .find(|(_, v)| *v == view)
-            .map(|(offset, _)| self.view(offset, view.len()))
+            .map(|(offset, _)| (offset as u64, self.view(offset, view.len())))
     }
 
     /// Returns a reference to the inner Bytes

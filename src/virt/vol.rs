@@ -1,7 +1,8 @@
 use crate::{
+    Data,
     archive::{Entry, TapeEncoder},
     store::ArchiveMember,
-    util::Packer, Data,
+    util::Packer,
 };
 use anyhow::anyhow;
 use asynchronous_codec::{FramedWrite, FramedWriteParts};
@@ -9,7 +10,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{AsyncRead, AsyncSeek, AsyncWrite, SinkExt};
 use generic_array::{GenericArray, typenum::U32};
 use memmap2::MmapMut;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use pin_project_lite::pin_project;
 use std::{
     io::{Read, Write},
@@ -155,12 +156,55 @@ impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc> Deref for Volume<T, Enc> {
 /// Allows conversion into Data
 pub struct SharedVolume<T, Enc>(pub(crate) Arc<RwLock<Volume<T, Enc>>>);
 
+impl<T, Enc> Clone for SharedVolume<T, Enc> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T, Enc> SharedVolume<T, Enc> {
+    /// Returns a read lock guard for the vol
+    #[inline]
+    pub fn vol(&self) -> RwLockReadGuard<Volume<T, Enc>> {
+        self.0.read()
+    }
+
+    /// Returns a write lock guard for the vol
+    #[inline]
+    pub fn vol_mut(&self) -> RwLockWriteGuard<Volume<T, Enc>> {
+        self.0.write()
+    }
+
+    /// Returns a reference to the inner volume that bypasses the lock
+    #[inline]
+    pub fn view(&self) -> &Volume<T, Enc> {
+        // SAFETY:
+        // - The inner volume is backed by a stable memory region (mmap), and `.as_ptr()`
+        //   returns a valid pointer to the underlying Volume.
+        unsafe {
+            self.0
+                .data_ptr()
+                .as_ref()
+                .expect("should be a runtime volume")
+        }
+    }
+}
+
+impl<T, Enc> From<Volume<T, Enc>> for SharedVolume<T, Enc> {
+    fn from(value: Volume<T, Enc>) -> Self {
+        Self(Arc::new(RwLock::new(value)))
+    }
+}
+
 impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc: Send + Sync + 'static> Deref
     for SharedVolume<T, Enc>
 {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
+        // SAFETY:
+        // - The inner volume is backed by a stable memory region (mmap), and `.as_ptr()`
+        //   returns a valid pointer to the underlying Volume.
         match unsafe { self.0.data_ptr().as_ref() } {
             Some(data) => data.deref(),
             None => &[],
