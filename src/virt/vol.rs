@@ -63,9 +63,7 @@ pub type InMemoryTarget = CursorTarget<BytesMut>;
 
 /// Creates a new volume target backed by a memory-mapped file
 ///
-/// Returns an error if the file could not be opened
-///
-/// Note: If the file previously existed, this will end up truncating that file due to MmapMut semantics
+/// Returns an error if the file could not be opened or created (if it didn't previously exist)
 #[inline]
 pub fn new_mmap_target(
     path: impl Into<PathBuf>,
@@ -135,7 +133,9 @@ pub fn new_memory_target(path: impl Into<PathBuf>, capacity: usize) -> InMemoryT
     CursorTarget::new(path, bytes)
 }
 
-/// Volume enables archiving batches of records to a single storage target
+/// Volume stores a "target" which can read/write bytes
+/// 
+/// And an "encoder" which manages state/mapping/decoding
 pub struct Volume<T, Enc> {
     /// Inner target
     target: T,
@@ -179,7 +179,7 @@ impl<T, Enc> SharedVolume<T, Enc> {
     #[inline]
     pub fn view(&self) -> &Volume<T, Enc> {
         // SAFETY:
-        // - The inner volume is backed by a stable memory region (mmap), and `.as_ptr()`
+        // - The inner volume is backed by a stable memory region, and `.as_ptr()`
         //   returns a valid pointer to the underlying Volume.
         unsafe {
             self.0
