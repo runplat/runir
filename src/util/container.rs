@@ -152,6 +152,45 @@ impl<P: Packer> MultiRoot<P> {
         Ok(building)
     }
 
+    /// Tries to clone the container state
+    /// 
+    /// Returns an error if the Container is in an uncloneable state
+    #[inline]
+    pub fn try_clone(&self) -> crate::Result<Self> {
+        match &self.state {
+            State::Build { root, builder } => {
+                if !builder.ser.view().is_empty() || !builder.buffer.is_empty() {
+                    return Err(anyhow!("Container build state has pending data").into());
+                }
+
+                Ok(Self {
+                    state: State::Build {
+                        root: root.clone(),
+                        builder: Builder {
+                            ser: flexbuffers::FlexbufferSerializer::new(),
+                            buffer: BytesMut::new(),
+                            layers: builder.layers.clone(),
+                        },
+                    },
+                    _p: PhantomData,
+                })
+            }
+            State::Read { record } => Ok(Self {
+                state: State::Read {
+                    record: record.clone(),
+                },
+                _p: PhantomData,
+            }),
+            State::Run { record, vol } => Ok(Self {
+                state: State::Run {
+                    record: record.clone(),
+                    vol: vol.clone(),
+                },
+                _p: PhantomData,
+            }),
+        }
+    }
+
     /// Pushes a content based layer
     ///
     /// Returns an error if the container is read-only
@@ -172,27 +211,6 @@ impl<P: Packer> MultiRoot<P> {
         self._push_content(content, Some(labels))
     }
 
-    #[inline]
-    fn _push_content(
-        &mut self,
-        content: &[u8],
-        labels: Option<impl Serialize>,
-    ) -> crate::Result<()> {
-        let mut digest = Sha256::new();
-        digest.update(content);
-        match &mut self.state {
-            State::Build {
-                builder: Builder { buffer, .. },
-                ..
-            } => {
-                P::pack_bytes(content, buffer)?;
-            }
-            _ => {}
-        }
-
-        self.push(content.len(), digest.finalize().into(), labels, false)
-    }
-
     /// Pushes an object based layer
     ///
     /// Returns an error if the container is read-only
@@ -211,38 +229,6 @@ impl<P: Packer> MultiRoot<P> {
         labels: impl Serialize,
     ) -> crate::Result<()> {
         self._push_object(obj, Some(labels))
-    }
-
-    /// Pushes an object based layer optionally w/ labels
-    ///
-    /// Returns an error if the container is read-only
-    #[inline]
-    fn _push_object<T: Serialize>(
-        &mut self,
-        obj: &T,
-        labels: Option<impl Serialize>,
-    ) -> crate::Result<()> {
-        let mut content = Sha256::new();
-        let content_len;
-        match &mut self.state {
-            State::Build {
-                builder: Builder { buffer, ser, .. },
-                ..
-            } => {
-                ser.reset();
-
-                P::pack_object(obj, ser, buffer)?;
-
-                content.update(ser.view());
-
-                content_len = ser.view().len();
-            }
-            State::Read { .. } | State::Run { .. } => {
-                return Err(anyhow!("Cannot push content to a read-only container").into());
-            }
-        }
-
-        self.push(content_len, content.finalize().into(), labels, true)
     }
 
     /// Fetches layer content and puts it into buf
@@ -726,6 +712,56 @@ impl<P: Packer> MultiRoot<P> {
             }
             _ => Err(anyhow!("Can only unpack layers in Run mode").into()),
         }
+    }
+
+    #[inline]
+    fn _push_content(
+        &mut self,
+        content: &[u8],
+        labels: Option<impl Serialize>,
+    ) -> crate::Result<()> {
+        let mut digest = Sha256::new();
+        digest.update(content);
+        match &mut self.state {
+            State::Build {
+                builder: Builder { buffer, .. },
+                ..
+            } => {
+                P::pack_bytes(content, buffer)?;
+            }
+            _ => {}
+        }
+
+        self.push(content.len(), digest.finalize().into(), labels, false)
+    }
+
+    #[inline]
+    fn _push_object<T: Serialize>(
+        &mut self,
+        obj: &T,
+        labels: Option<impl Serialize>,
+    ) -> crate::Result<()> {
+        let mut content = Sha256::new();
+        let content_len;
+        match &mut self.state {
+            State::Build {
+                builder: Builder { buffer, ser, .. },
+                ..
+            } => {
+                ser.reset();
+
+                P::pack_object(obj, ser, buffer)?;
+
+                content.update(ser.view());
+
+                content_len = ser.view().len();
+            }
+            State::Read { .. } | State::Run { .. } => {
+                return Err(anyhow!("Cannot push content to a read-only container").into());
+            }
+        }
+
+        self.push(content_len, content.finalize().into(), labels, true)
     }
 
     fn push(
