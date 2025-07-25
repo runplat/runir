@@ -191,6 +191,22 @@ impl<P: Packer> MultiRoot<P> {
         }
     }
 
+    /// Swaps the current root record of the container
+    /// 
+    /// Returns an error if the Container is not in build mode
+    #[inline]
+    pub fn swap_root(&mut self, replacement: Record) -> crate::Result<()> {
+        match &mut self.state {
+            State::Build { root, .. } => {
+                *root = replacement;
+                Ok(())
+            },
+            _ => {
+                Err(anyhow!("Cannot swap the root when the container is read only").into())
+            }
+        }
+    }
+
     /// Pushes a content based layer
     ///
     /// Returns an error if the container is read-only
