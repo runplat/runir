@@ -195,11 +195,10 @@ impl<P: Packer> MultiRoot<P> {
     /// 
     /// Returns an error if the Container is not in build mode
     #[inline]
-    pub fn swap_root(&mut self, replacement: Record) -> crate::Result<()> {
+    pub fn swap_root(&mut self, replacement: Record) -> crate::Result<Record> {
         match &mut self.state {
             State::Build { root, .. } => {
-                *root = replacement;
-                Ok(())
+                Ok(std::mem::replace(root, replacement))
             },
             _ => {
                 Err(anyhow!("Cannot swap the root when the container is read only").into())
