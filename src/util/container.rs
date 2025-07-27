@@ -153,7 +153,7 @@ impl<P: Packer> MultiRoot<P> {
     }
 
     /// Tries to clone the container state
-    /// 
+    ///
     /// Returns an error if the Container is in an uncloneable state
     #[inline]
     pub fn try_clone(&self) -> crate::Result<Self> {
@@ -192,17 +192,13 @@ impl<P: Packer> MultiRoot<P> {
     }
 
     /// Swaps the current root record of the container
-    /// 
+    ///
     /// Returns an error if the Container is not in build mode
     #[inline]
     pub fn swap_root(&mut self, replacement: Record) -> crate::Result<Record> {
         match &mut self.state {
-            State::Build { root, .. } => {
-                Ok(std::mem::replace(root, replacement))
-            },
-            _ => {
-                Err(anyhow!("Cannot swap the root when the container is read only").into())
-            }
+            State::Build { root, .. } => Ok(std::mem::replace(root, replacement)),
+            _ => Err(anyhow!("Cannot swap the root when the container is read only").into()),
         }
     }
 
@@ -556,6 +552,18 @@ impl<P: Packer> MultiRoot<P> {
                 .map(|p| p.0)
                 .collect(),
         })
+    }
+
+    /// Returns all layers stored in this vector
+    /// 
+    /// Note: This will not include the root and system layers
+    #[inline]
+    pub fn layers(&self) -> crate::Result<Vec<Layer>> {
+        Ok(self.try_clone()?
+            .to_index(vec![])?
+            .storage()
+            .to_vec()
+        )
     }
 
     /// Returns true if this container is a super set of the other container
@@ -1013,6 +1021,74 @@ pub struct Layer {
     container: Arc<Container>,
     opts: Opts,
     layer: usize,
+}
+
+impl Layer {
+    /// Returns the layer index this layer is accessing
+    #[inline]
+    pub fn idx(&self) -> usize {
+        self.layer
+    }
+}
+
+impl ILayerDescriptor for Layer {
+    fn runtime_size(&self) -> u64 {
+        self.container
+            .system_layer()
+            .ok()
+            .and_then(|s| s.desc(self.layer).map(|l| l.runtime_size()))
+            .unwrap_or_default()
+    }
+
+    fn distribution(&self) -> GenericArray<u8, U32> {
+        self.container
+            .system_layer()
+            .ok()
+            .and_then(|s| s.desc(self.layer).map(|l| l.distribution()))
+            .unwrap_or_default()
+    }
+
+    fn content(&self) -> GenericArray<u8, U32> {
+        self.container
+            .system_layer()
+            .ok()
+            .and_then(|s| s.desc(self.layer).map(|l| l.content()))
+            .unwrap_or_default()
+    }
+
+    fn is_packed(&self) -> bool {
+        self.container
+            .system_layer()
+            .ok()
+            .and_then(|s| s.desc(self.layer).map(|l| l.is_packed()))
+            .unwrap_or_default()
+    }
+
+    fn is_object(&self) -> bool {
+        self.container
+            .system_layer()
+            .ok()
+            .and_then(|s| s.desc(self.layer).map(|l| l.is_object()))
+            .unwrap_or_default()
+    }
+
+    fn labels(&self) -> Option<Peek<'_>> {
+        // To conform to borrow rules,
+        // must access bytes directly
+        match &self.container.state {
+            State::Build { builder, .. } => builder
+                .layers
+                .get(self.layer.saturating_sub(2))
+                .and_then(|l| l.0.labels()),
+            State::Read { record } | State::Run { record, .. } => record
+                .system()
+                .ok()
+                .and_then(|s| {
+                    flexbuffers::Reader::get_root(s.as_vector().idx(self.layer).as_blob().0).ok()
+                })
+                .map(Into::into),
+        }
+    }
 }
 
 impl IRecord for Layer {
