@@ -1560,6 +1560,32 @@ impl<P> IRecord for MultiRoot<P> {
     }
 }
 
+impl<'b, P> IRecord for &'b MultiRoot<P> {
+    fn ns_chk(&self) -> u64 {
+        MultiRoot::ns_chk(*self)
+    }
+
+    fn uuid(&self) -> uuid::Uuid {
+        MultiRoot::uuid(*self)
+    }
+
+    fn opts(&self) -> &crate::Opts {
+        MultiRoot::opts(*self)
+    }
+
+    fn bytes(&self) -> &[u8] {
+        MultiRoot::bytes(*self)
+    }
+
+    fn to_record(&self) -> Record {
+        MultiRoot::to_record(*self)
+    }
+
+    fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
+        None
+    }
+}
+
 /// Type-alias for a shared "Runtime" volume
 type SharedRuntimeVolume = SharedVolume<MemoryMappedTarget, ObjectEncoder>;
 
