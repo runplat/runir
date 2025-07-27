@@ -555,15 +555,11 @@ impl<P: Packer> MultiRoot<P> {
     }
 
     /// Returns all layers stored in this vector
-    /// 
+    ///
     /// Note: This will not include the root and system layers
     #[inline]
     pub fn layers(&self) -> crate::Result<Vec<Layer>> {
-        Ok(self.try_clone()?
-            .to_index(vec![])?
-            .storage()
-            .to_vec()
-        )
+        Ok(self.try_clone()?.to_index(vec![])?.storage().to_vec())
     }
 
     /// Returns true if this container is a super set of the other container
@@ -1084,7 +1080,16 @@ impl ILayerDescriptor for Layer {
                 .system()
                 .ok()
                 .and_then(|s| {
-                    flexbuffers::Reader::get_root(s.as_vector().idx(self.layer).as_blob().0).ok()
+                    flexbuffers::Reader::get_root(
+                        s.get_vector()
+                            .ok()?
+                            .idx(self.layer)
+                            .get_map().ok()?
+                            .idx("labels")
+                            .get_blob().ok()?
+                            .0,
+                    )
+                    .ok()
                 })
                 .map(Into::into),
         }
