@@ -10,16 +10,16 @@ use serde::de::DeserializeOwned;
 /// Wraps an IRecord to provide an IRecord interface,
 /// while also providing an "instance" field to allow a mutable view
 pub struct RunCell<T, R> {
-    record: R,
+    source: R,
     instance: OnceLock<T>,
 }
 
 impl<T, R: IRecord> RunCell<T, R> {
-    /// Creates a new run cell
+    /// Creates a new run cell w/ source
     #[inline]
     pub fn new(record: R) -> Self {
         Self {
-            record,
+            source: record,
             instance: OnceLock::new(),
         }
     }
@@ -31,31 +31,37 @@ impl<T, R: IRecord> RunCell<T, R> {
     pub fn reset(&mut self) -> Option<T> {
         self.instance.take()
     }
+
+    /// Returns a reference to the inner source
+    #[inline]
+    pub fn as_source(&self) -> &R {
+        &self.source
+    }
 }
 
 impl<T, R: IRecord> IRecord for RunCell<T, R> {
     fn ns_chk(&self) -> u64 {
-        self.record.ns_chk()
+        self.source.ns_chk()
     }
 
     fn uuid(&self) -> uuid::Uuid {
-        self.record.uuid()
+        self.source.uuid()
     }
 
     fn opts(&self) -> &crate::Opts {
-        self.record.opts()
+        self.source.opts()
     }
 
     fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
-        self.record.opts_mut()
+        self.source.opts_mut()
     }
 
     fn bytes(&self) -> &[u8] {
-        self.record.bytes()
+        self.source.bytes()
     }
 
     fn to_record(&self) -> crate::Record {
-        self.record.to_record()
+        self.source.to_record()
     }
 }
 
@@ -72,7 +78,7 @@ impl<T: DeserializeOwned + Default, R: IRecord> AsMut<T> for RunCell<T, R> {
 impl<T: DeserializeOwned + Default, R: IRecord> AsRef<T> for RunCell<T, R> {
     fn as_ref(&self) -> &T {
         self.instance
-            .get_or_init(|| self.record.peek().to_obj::<T>().unwrap_or_default())
+            .get_or_init(|| self.source.peek().to_obj::<T>().unwrap_or_default())
     }
 }
 
