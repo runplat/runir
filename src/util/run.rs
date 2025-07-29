@@ -65,6 +65,32 @@ impl<T, R: IRecord> IRecord for RunCell<T, R> {
     }
 }
 
+impl<'b, T, R: IRecord> IRecord for &'b RunCell<T, R> {
+    fn ns_chk(&self) -> u64 {
+        <RunCell<T, R> as IRecord>::ns_chk(self)
+    }
+
+    fn uuid(&self) -> uuid::Uuid {
+        <RunCell<T, R> as IRecord>::uuid(self)
+    }
+
+    fn opts(&self) -> &crate::Opts {
+        <RunCell<T, R> as IRecord>::opts(self)
+    }
+
+    fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
+        None
+    }
+
+    fn bytes(&self) -> &[u8] {
+        <RunCell<T, R> as IRecord>::bytes(self)
+    }
+
+    fn to_record(&self) -> crate::Record {
+        <RunCell<T, R> as IRecord>::to_record(self)
+    }
+}
+
 impl<T: DeserializeOwned + Default, R: IRecord> AsMut<T> for RunCell<T, R> {
     fn as_mut(&mut self) -> &mut T {
         self.as_ref();
