@@ -432,6 +432,71 @@ impl<'peek> PeekExtensions<'peek> for Option<Peek<'peek>> {
     }
 }
 
+
+impl<'peek> PeekExtensions<'peek> for &Option<Peek<'peek>> {
+    #[inline]
+    fn at(self, key: &str) -> Option<Peek<'peek>> {
+        self.clone().and_then(|r| r.at(key))
+    }
+
+    #[inline]
+    fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<Peek<'peek>> {
+        self.clone().and_then(|p| p.at_path(keys))
+    }
+
+    #[inline]
+    fn bool(self) -> Option<bool> {
+        self.clone().and_then(|r| r.bool())
+    }
+
+    #[inline]
+    fn str(self) -> Option<&'peek str> {
+        self.clone().and_then(|r| r.str())
+    }
+
+    #[inline]
+    fn u64(self) -> Option<u64> {
+        self.clone().and_then(|r| r.u64())
+    }
+
+    #[inline]
+    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+        self.clone().and_then(|r| r.iter())
+    }
+
+    #[inline]
+    fn in_ref(
+        self,
+    ) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
+        PeekRef(RefCell::new(self.clone()))
+    }
+
+    #[inline]
+    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+        self.clone().and_then(|r| r.iter_kv())
+    }
+
+    #[inline]
+    fn int(self) -> Option<i64> {
+        self.clone().and_then(|r| r.int())
+    }
+
+    #[inline]
+    fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
+        self.clone().and_then(|r| r.at_dot(path))
+    }
+
+    #[inline]
+    fn val(self) -> Option<Peek<'peek>> {
+        self.clone()
+    }
+
+    #[inline]
+    fn blob(self) -> Option<&'peek [u8]> {
+        self.clone().and_then(|r| r.blob())
+    }
+}
+
 impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
     #[inline]
     fn bool(self) -> Option<bool> {

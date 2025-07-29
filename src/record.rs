@@ -85,6 +85,17 @@ pub trait IRecord {
         self.peek().at_dot(path)
     }
 
+    /// Traverse the record w/ a list of statically defined paths
+    /// 
+    /// Returns a vector of accessors for each path
+    #[inline]
+    fn fields<'peek>(&'peek self, paths: &[&'peek str]) -> Vec<Option<Peek<'peek>>> {
+        paths.iter().fold(vec![], |mut a, p| {
+            a.push(self.field(p).val());
+            a
+        })
+    }
+
     /// Returns the content digest buffer for the data stored
     #[inline]
     fn content(&self) -> Sha256Digest {
@@ -505,7 +516,7 @@ pub fn record_crc(bytes: &[u8], ts: u64) -> u64 {
 #[cfg(test)]
 mod test {
     use super::Record;
-    use crate::{IRecord, Opts, RecordableExtensions, record::Namespace};
+    use crate::{record::Namespace, util::PeekExtensions, IRecord, Opts, RecordableExtensions};
     use bytes::Bytes;
     use serde::{Deserialize, Serialize};
     use std::{collections::BTreeMap, time::Duration};
@@ -638,6 +649,37 @@ mod test {
         assert_eq!(true, loaded.field_b);
         assert_eq!("world", loaded.field_map["hello"]);
         assert_eq!("goodbye", loaded.field_map["world"]);
+    }
+    
+    #[test]
+    fn test_fields() {
+        let mut field_map = BTreeMap::new();
+        field_map.insert("hello", "world");
+        field_map.insert("world", "goodbye");
+
+        let test = TestObj {
+            name: "my-test-obj",
+            field_a: 123456,
+            field_b: true,
+            field_map,
+        };
+
+        let ns = Namespace::ephemeral();
+
+        let record = ns.store("my-test-obj", &test);
+
+        let fields = record.fields(&["name", "field_a", "field_b", "field_map"]);
+        
+        if let [name, field_a, field_b, field_map, ..] = fields.as_slice() {
+            assert_eq!("my-test-obj", name.str().unwrap());
+            assert_eq!(123456, field_a.int().unwrap());
+            assert!(field_b.bool().unwrap_or_default());
+
+            assert_eq!("world", field_map.at("hello").str().unwrap());
+            assert_eq!("goodbye", field_map.at("world").str().unwrap());
+        } else {
+            assert!(false, "expecting at least 4 values");
+        }
     }
 
     #[test]
