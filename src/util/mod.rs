@@ -17,7 +17,11 @@ pub use peek::PeekRefExtensions;
 mod executor;
 pub use executor::Executor;
 
+mod run;
+pub use run::RunCell;
+
 pub mod fs;
+
 
 use futures::future::RemoteHandle;
 
