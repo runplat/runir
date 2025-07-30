@@ -2,13 +2,10 @@ use crate::{
     Data,
     archive::{Entry, TapeEncoder},
     store::ArchiveMember,
-    util::Packer,
 };
-use anyhow::anyhow;
 use asynchronous_codec::{FramedWrite, FramedWriteParts};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{AsyncRead, AsyncSeek, AsyncWrite, SinkExt};
-use generic_array::{GenericArray, typenum::U32};
 use memmap2::MmapMut;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use pin_project_lite::pin_project;
@@ -22,8 +19,7 @@ use std::{
     sync::Arc,
 };
 use tracing::trace;
-
-use super::{ObjectEncoder, Virtual};
+use super::Virtual;
 
 pub const KIB: usize = 2usize.pow(10);
 pub const MIB: usize = 2usize.pow(20);
@@ -167,6 +163,18 @@ impl<T, Enc> Volume<T, Enc> {
     pub fn encoder(&self) -> &Enc {
         &self.encoder
     }
+
+    /// Returns a mutable reference to the inner parts
+    #[inline]
+    pub fn parts_mut(&mut self) -> (&mut T, &mut Enc) {
+       (&mut self.target, &mut self.encoder)
+    }
+
+    /// Returns a reference to the inner parts
+    #[inline]
+    pub fn parts(&self) -> (&T, &Enc) {
+        (&self.target, &self.encoder)
+    }
 }
 
 impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc> Deref for Volume<T, Enc> {
@@ -174,6 +182,12 @@ impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc> Deref for Volume<T, Enc> {
 
     fn deref(&self) -> &Self::Target {
         self.target.as_ref()
+    }
+}
+
+impl<T, Enc> From<(T, Enc)> for Volume<T, Enc> {
+    fn from((target, encoder): (T, Enc)) -> Self {
+        Self { target, encoder }
     }
 }
 
@@ -251,73 +265,6 @@ impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc: Send + Sync + 'static> From<Sh
 {
     fn from(value: SharedVolume<T, Enc>) -> Self {
         Data::from(Bytes::from_owner(value))
-    }
-}
-
-impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
-    /// Returns a volume for storing object bytes
-    #[inline]
-    pub fn objects(target: T) -> Self {
-        Self {
-            target,
-            encoder: ObjectEncoder::default(),
-        }
-    }
-
-    /// "Pre-" encode an inline-object
-    ///
-    /// Returns the index for the inline-object
-    ///
-    /// Note: This ensures that both sides are in sync and can return useful errors
-    #[inline]
-    pub fn pre_encode_object_inline(&mut self) -> usize {
-        self.encoder.pre_encode_next_inline()
-    }
-
-    /// "Pre-" encodes an object
-    ///
-    /// Returns an error if the target does not have enough capacity for this object;
-    ///
-    /// Otherwise, returns the index of the object
-    #[inline]
-    pub fn pre_encode_object(
-        &mut self,
-        expected: GenericArray<u8, U32>,
-        expected_len: u32,
-    ) -> crate::Result<usize> {
-        let _size_check = self.encoder.total_runtime_size() as u64 + expected_len as u64;
-        if _size_check > self.target.remaining() {
-            Err(anyhow!("Not enough space to pre-encode object").into())
-        } else {
-            self.target.advance(expected_len as usize)?;
-            Ok(self.encoder.pre_encode_object(expected, expected_len))
-        }
-    }
-
-    /// Encodes a packed object
-    ///
-    /// Returns an error if the unpacked object did not match the expected pre-encoded digest, or if the idx returned an inline object
-    #[inline]
-    pub fn encode_packed_obj<P: Packer>(&mut self, idx: usize, packed: &[u8]) -> crate::Result<()> {
-        self.encoder
-            .encode_packed_object::<P>(idx, packed, self.target.as_mut())
-    }
-
-    /// Returns true if the obj at idx has been marked as unpacked
-    #[inline]
-    pub fn is_obj_unpacked(&self, idx: usize) -> bool {
-        self.encoder.is_unpacked(idx)
-    }
-
-    /// View bytes for an object
-    #[inline]
-    pub fn view_obj(&self, idx: usize) -> crate::Result<&[u8]> {
-        match self.encoder.object(idx) {
-            Some((offset, len)) => {
-                Ok(&self.target.view()[offset as usize..offset as usize + len as usize])
-            }
-            None => Err(anyhow!("Object {idx} not found").into()),
-        }
     }
 }
 

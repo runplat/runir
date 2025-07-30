@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 
 use crate::util::Packer;
 
+use super::vol::{Volume, VolumeTarget};
+
 /// Object encoder tracks a list of inline or stored objects
 #[derive(Default)]
 pub struct ObjectEncoder {
@@ -120,5 +122,70 @@ impl ObjectEncoder {
             Stored::Inline => None,
             Stored::Object { offset, len, .. } => Some((*offset, *len)),
         })
+    }
+}
+
+impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
+    /// Returns a volume for storing object bytes
+    #[inline]
+    pub fn objects(target: T) -> Self {
+        Self::from((target, ObjectEncoder::default()))
+    }
+
+    /// "Pre-" encode an inline-object
+    ///
+    /// Returns the index for the inline-object
+    ///
+    /// Note: This ensures that both sides are in sync and can return useful errors
+    #[inline]
+    pub fn pre_encode_object_inline(&mut self) -> usize {
+        self.encoder_mut().pre_encode_next_inline()
+    }
+
+    /// "Pre-" encodes an object
+    ///
+    /// Returns an error if the target does not have enough capacity for this object;
+    ///
+    /// Otherwise, returns the index of the object
+    #[inline]
+    pub fn pre_encode_object(
+        &mut self,
+        expected: GenericArray<u8, U32>,
+        expected_len: u32,
+    ) -> crate::Result<usize> {
+        let _size_check = self.encoder().total_runtime_size() as u64 + expected_len as u64;
+        if _size_check > self.target().remaining() {
+            Err(anyhow!("Not enough space to pre-encode object").into())
+        } else {
+            self.target_mut().advance(expected_len as usize)?;
+            Ok(self.encoder_mut().pre_encode_object(expected, expected_len))
+        }
+    }
+
+    /// Encodes a packed object
+    ///
+    /// Returns an error if the unpacked object did not match the expected pre-encoded digest, or if the idx returned an inline object
+    #[inline]
+    pub fn encode_packed_obj<P: Packer>(&mut self, idx: usize, packed: &[u8]) -> crate::Result<()> {
+        let (target, encoder) = self.parts_mut();
+       encoder
+            .encode_packed_object::<P>(idx, packed, target.as_mut())
+    }
+
+    /// Returns true if the obj at idx has been marked as unpacked
+    #[inline]
+    pub fn is_obj_unpacked(&self, idx: usize) -> bool {
+        self.encoder().is_unpacked(idx)
+    }
+
+    /// View bytes for an object
+    #[inline]
+    pub fn view_obj(&self, idx: usize) -> crate::Result<&[u8]> {
+        match self.encoder().object(idx) {
+            Some((offset, len)) => {
+                Ok(&self.target().view()[offset as usize..offset as usize + len as usize])
+            }
+            None => Err(anyhow!("Object {idx} not found").into()),
+        }
     }
 }
