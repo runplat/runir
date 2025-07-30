@@ -143,6 +143,32 @@ pub struct Volume<T, Enc> {
     encoder: Enc,
 }
 
+impl<T, Enc> Volume<T, Enc> {
+    /// Returns a mutable reference to the inner target
+    #[inline]
+    pub fn target_mut(&mut self) -> &mut T {
+        &mut self.target
+    }
+
+    /// Returns a reference to the inner target
+    #[inline]
+    pub fn target(&self) -> &T {
+        &self.target
+    }
+
+    /// Returns a mutable reference to the inner encoder
+    #[inline]
+    pub fn encoder_mut(&mut self) -> &mut Enc {
+        &mut self.encoder
+    }
+
+    /// Returns a reference to the inner encoder
+    #[inline]
+    pub fn encoder(&self) -> &Enc {
+        &self.encoder
+    }
+}
+
 impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc> Deref for Volume<T, Enc> {
     type Target = [u8];
 
