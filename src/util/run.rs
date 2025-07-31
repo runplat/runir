@@ -4,64 +4,63 @@ use std::{
 };
 
 use super::PeekExtensions;
-use crate::IRecord;
+use crate::{IRecord, vol::Volume};
 use serde::de::DeserializeOwned;
 
-/// Wraps an IRecord to provide an IRecord interface,
-/// while also providing an "instance" field to allow a mutable view
-pub struct RunCell<T, R> {
-    source: R,
-    instance: OnceLock<T>,
-}
+/// Wraps an IRecord to provide an IRecord interface w/ a mutable interface w/ the stored object
+pub struct RunCell<T, R>(Volume<OnceLock<T>, R>);
 
 impl<T, R: IRecord> RunCell<T, R> {
     /// Creates a new run cell w/ source
     #[inline]
     pub fn new(record: R) -> Self {
-        Self {
-            source: record,
-            instance: OnceLock::new(),
-        }
+        Self((OnceLock::new(), record).into())
     }
 
     /// Resets the inner state
-    /// 
+    ///
     /// Returns the existing value of T if a value was set
     #[inline]
     pub fn reset(&mut self) -> Option<T> {
-        self.instance.take()
+        self.0.target_mut().take()
     }
 
     /// Returns a reference to the inner source
     #[inline]
     pub fn as_source(&self) -> &R {
-        &self.source
+        &self.0.encoder()
+    }
+
+    /// Returns a mutable reference to the inner source
+    #[inline]
+    pub fn as_source_mut(&mut self) -> &mut R {
+        self.0.encoder_mut()
     }
 }
 
 impl<T, R: IRecord> IRecord for RunCell<T, R> {
     fn ns_chk(&self) -> u64 {
-        self.source.ns_chk()
+        self.0.encoder().ns_chk()
     }
 
     fn uuid(&self) -> uuid::Uuid {
-        self.source.uuid()
+        self.0.encoder().uuid()
     }
 
     fn opts(&self) -> &crate::Opts {
-        self.source.opts()
+        self.0.encoder().opts()
     }
 
     fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
-        self.source.opts_mut()
+        self.0.encoder_mut().opts_mut()
     }
 
     fn bytes(&self) -> &[u8] {
-        self.source.bytes()
+        self.0.encoder().bytes()
     }
 
     fn to_record(&self) -> crate::Record {
-        self.source.to_record()
+        self.0.encoder().to_record()
     }
 }
 
@@ -95,7 +94,7 @@ impl<T: DeserializeOwned + Default, R: IRecord> AsMut<T> for RunCell<T, R> {
     fn as_mut(&mut self) -> &mut T {
         self.as_ref();
 
-        self.instance
+        self.0.target_mut()
             .get_mut()
             .expect("should exist just initialized")
     }
@@ -103,8 +102,8 @@ impl<T: DeserializeOwned + Default, R: IRecord> AsMut<T> for RunCell<T, R> {
 
 impl<T: DeserializeOwned + Default, R: IRecord> AsRef<T> for RunCell<T, R> {
     fn as_ref(&self) -> &T {
-        self.instance
-            .get_or_init(|| self.source.peek().to_obj::<T>().unwrap_or_default())
+        self.0.target()
+            .get_or_init(|| self.0.encoder().peek().to_obj::<T>().unwrap_or_default())
     }
 }
 
@@ -119,6 +118,12 @@ impl<T: DeserializeOwned + Default, R: IRecord> Deref for RunCell<T, R> {
 impl<T: DeserializeOwned + Default, R: IRecord> DerefMut for RunCell<T, R> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.as_mut()
+    }
+}
+
+impl<T, R: Clone> Clone for RunCell<T, R> {
+    fn clone(&self) -> Self {
+        Self((OnceLock::new(), self.0.encoder().clone()).into())
     }
 }
 
