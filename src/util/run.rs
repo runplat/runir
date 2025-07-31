@@ -17,9 +17,9 @@ impl<T, R: IRecord> RunCell<T, R> {
         Self((OnceLock::new(), record).into())
     }
 
-    /// Resets the mutated state
-    ///
-    /// Returns the previously mutated state, or None if no mutations occured
+    /// Resets the previous state
+    /// 
+    /// Returns None if the inner state was not accessed
     #[inline]
     pub fn reset(&mut self) -> Option<T> {
         self.0.target_mut().take()
