@@ -176,6 +176,22 @@ impl<R, const INITIAL_CAPACITY: usize> Queue<R, INITIAL_CAPACITY> {
         })
     }
 
+    /// Starts a worker thread
+    ///
+    /// Note: Shortcut for worker_thread_fold((), ..)
+    #[inline]
+    pub fn worker_thread(
+        &self,
+        work: impl Fn(&Self) -> std::io::Result<()> + Send + 'static,
+    ) -> JoinHandle<std::io::Result<()>>
+    where
+        R: Send + 'static,
+    {
+        self.worker_thread_fold((), move |d, _| {
+            work(d)
+        })
+    }
+
     /// Closes the queue, signaling that no new pushers will be created.
     ///
     /// This does **not** immediately stop any worker threads.
