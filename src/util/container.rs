@@ -1025,6 +1025,12 @@ impl Layer {
     pub fn idx(&self) -> usize {
         self.layer
     }
+
+    /// Returns a reference to the container that owns this layer
+    #[inline]
+    pub fn owner(&self) -> &Container {
+        &self.container
+    }
 }
 
 impl ILayerDescriptor for Layer {
