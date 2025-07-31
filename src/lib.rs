@@ -65,6 +65,7 @@ pub use frontend::kv;
 
 mod queue;
 pub use queue::Queue;
+pub use queue::Pusher;
 
 /// Provides extensions for configuring a type before it is committed as a record
 pub trait RecordableExtensions {
