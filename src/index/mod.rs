@@ -141,12 +141,20 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
         }
     }
 
-    /// Get a record from the index w/ a key returned from Index::index
+    /// Borrow a record from the index w/ a key returned from Index::index
     ///
     /// Returns None if a record w/ this key could not be found or if the record was deleted
     #[inline]
     pub fn get(&self, key: u64) -> Option<S::Borrow<'_>> {
         self.storage.record(key).filter(|r| !r.opts().is_deleted())
+    }
+
+    /// Borrow a record mutablely from the index w/ a key returned from Index::index
+    ///
+    /// Returns None if a record w/ this key could not be found or if the record was deleted
+    #[inline]
+    pub fn get_mut(&mut self, key: u64) -> Option<S::BorrowMut<'_>> {
+        self.storage.record_mut(key).filter(|r| !r.opts().is_deleted())
     }
 
     /// Lookup a record by a ns / label pair
@@ -175,6 +183,40 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
         let ns = ns.into();
         let index_key = ns.key(label) ^ ns.chk();
         self.reverse.get(&index_key).and_then(|k| self.get(*k))
+    }
+
+    /// Lookup a record by a ns / label pair
+    ///
+    /// If a record was stored with a non-default namespace, that EXACT same
+    /// namespace MUST be used in this function in order for the lookup to succeed
+    /// 
+    /// Returns a mutable reference
+    /// 
+    /// Example:
+    ///
+    /// ```rs
+    /// let mut index = HashMapIndex::default();
+    /// let rec = Namespace::from("hello").store("world", ..);
+    /// index.index(rec);
+    /// assert!(index.lookup_mut("hello", "world").is_some()) // This is Okay
+    ///
+    /// let ns = Namespace::from("hello")... // You set some flags on the namespace
+    /// let rec = ns.store("world", ..);
+    /// index.index(rec);
+    /// assert!(!index.lookup_mut("hello", "world").is_some())
+    /// // This will not find anything,
+    /// // because by changing the options on the namespace,
+    /// // makes it a different namespace
+    /// ```
+    #[inline]
+    pub fn lookup_mut(&mut self, ns: impl Into<crate::Namespace>, label: &str) -> Option<S::BorrowMut<'_>> {
+        let ns = ns.into();
+        let index_key = ns.key(label) ^ ns.chk();
+        if let Some(k) = self.reverse.get(&index_key) {
+            self.get_mut(*k)
+        } else {
+            None
+        }
     }
 
     /// Marks a record for deletion
