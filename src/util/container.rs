@@ -1191,7 +1191,7 @@ impl IRecord for Layer {
 
     #[inline]
     fn bytes(&self) -> &[u8] {
-        self.container.try_content(self.layer).unwrap_or_default()
+        self.container.layer_bytes(self.layer).unwrap_or_default()
     }
 
     #[inline]
