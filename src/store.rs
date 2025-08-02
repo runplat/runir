@@ -1,5 +1,5 @@
 use crate::{
-    archive::{Entry, FileEntryReference, Manifest}, queue::Pusher, util::Intern, IRecord, Namespace, Queue, Record, VecIndex, Virtual, Worker
+    archive::{Entry, FileEntryReference, Manifest}, queue::Pusher, util::Intern, IRecord, Index, Namespace, Queue, Record, Storage, VecIndex, Virtual, Worker
 };
 use ahash::{HashSet, HashSetExt};
 use anyhow::anyhow;
@@ -8,6 +8,21 @@ use sha2::{Digest, Sha256};
 use std::{io::Error, path::{Path, PathBuf}
 };
 use tracing::{debug, error};
+
+pub trait ToArchiveMember {
+    fn to_archive_member(self, path: impl Into<PathBuf>) -> ArchiveMember;
+}
+
+impl<R: IRecord, S: Storage<Record = R>> ToArchiveMember for Index<R, S> {
+    fn to_archive_member(self, path: impl Into<PathBuf>) -> ArchiveMember {
+        let mut index = VecIndex::default();
+
+        for r in self.storage().iter_records() {
+            index.index(r.to_record());
+        }
+        ArchiveMember::Index { path: path.into(), index }
+    }
+}
 
 /// Store settings contains options for workers to use during
 /// their operations
@@ -21,9 +36,6 @@ pub struct StoreSettings {
     work_dir: PathBuf,
     /// Queue for pushing ArchiveMembers for packing
     packer: Pusher<ArchiveMember>,
-    // TODO:
-    // /// Indexer to use when writing records to any type of local index
-    // indexer: Indexer
 }
 
 impl StoreSettings {

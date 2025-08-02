@@ -54,6 +54,7 @@ pub use query::Query;
 
 mod store;
 pub use store::Store;
+pub use store::ToArchiveMember;
 
 mod virt;
 pub use virt::vol;

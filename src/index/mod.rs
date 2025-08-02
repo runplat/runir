@@ -1,7 +1,7 @@
 pub mod search;
 mod storage;
 
-use crate::{IRecord, opts::Branch, util::Container};
+use crate::{opts::Branch, util::Container, IRecord};
 use anyhow::anyhow;
 pub use storage::Storage;
 use tracing::{debug, error};
