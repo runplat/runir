@@ -10,7 +10,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use generic_array::{GenericArray, typenum::U32};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
 use crate::{
     Data, IRecord, Index, Opts, Record, Storage,
@@ -86,6 +86,40 @@ enum State {
         /// Runtime volume that is able to store any layers that require additional space for unpacking
         vol: SharedRuntimeVolume,
     },
+}
+
+impl Clone for Container {
+    fn clone(&self) -> Self {
+        match &self.state {
+            State::Build { root, builder } => {
+                debug_assert!(builder.ser.view().is_empty() && builder.buffer.is_empty(), "Builder must not be in a partial state");
+                Self {
+                    state: State::Build {
+                        root: root.clone(),
+                        builder: Builder {
+                            ser: flexbuffers::FlexbufferSerializer::new(),
+                            buffer: BytesMut::new(),
+                            layers: builder.layers.clone(),
+                        },
+                    },
+                    _p: PhantomData,
+                }
+            }
+            State::Read { record } => Self {
+                state: State::Read {
+                    record: record.clone(),
+                },
+                _p: PhantomData,
+            },
+            State::Run { record, vol } => Self {
+                state: State::Run {
+                    record: record.clone(),
+                    vol: vol.clone(),
+                },
+                _p: PhantomData,
+            }
+        }
+    }
 }
 
 impl<P: Packer> MultiRoot<P> {
