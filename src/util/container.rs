@@ -10,7 +10,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use generic_array::{GenericArray, typenum::U32};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tracing::{debug, error, trace};
+use tracing::{debug, trace};
 
 use crate::{
     Data, IRecord, Index, Opts, Record, Storage,
