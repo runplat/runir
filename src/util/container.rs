@@ -92,7 +92,10 @@ impl Clone for Container {
     fn clone(&self) -> Self {
         match &self.state {
             State::Build { root, builder } => {
-                debug_assert!(builder.ser.view().is_empty() && builder.buffer.is_empty(), "Builder must not be in a partial state");
+                debug_assert!(
+                    builder.ser.view().is_empty() && builder.buffer.is_empty(),
+                    "Builder must not be in a partial state"
+                );
                 Self {
                     state: State::Build {
                         root: root.clone(),
@@ -117,7 +120,7 @@ impl Clone for Container {
                     vol: vol.clone(),
                 },
                 _p: PhantomData,
-            }
+            },
         }
     }
 }
@@ -1011,6 +1014,29 @@ impl<P: Packer> MultiRoot<P> {
             _ => Err(anyhow!("System layer is only available in read or run state").into()),
         }
     }
+
+    /// Returns the root layer as a record
+    #[inline]
+    pub fn root_layer(&self) -> Record {
+        match &self.state {
+            State::Build { root, .. } => root.clone(),
+            _ => {
+                let (uuid, data, ns_chk, ts, opts) = self.to_record().into_parts();
+
+                let data = data
+                    .find_view(self.bytes())
+                    .expect("should be able to find it because self.byytes() is always from data")
+                    .1;
+
+                let (hi, _) = uuid.as_u64_pair();
+                let uuid = uuid::Uuid::from_u64_pair(
+                    hi,
+                    record_crc(self.bytes(), ts),
+                );
+                Record::from_parts((uuid, data, ns_chk, ts, opts))
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1124,9 +1150,11 @@ impl ILayerDescriptor for Layer {
                         s.get_vector()
                             .ok()?
                             .idx(self.layer)
-                            .get_map().ok()?
+                            .get_map()
+                            .ok()?
                             .idx("labels")
-                            .get_blob().ok()?
+                            .get_blob()
+                            .ok()?
                             .0,
                     )
                     .ok()
