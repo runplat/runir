@@ -73,6 +73,8 @@ enum State {
         root: Record,
         /// Layer builder
         builder: Builder,
+        /// True if append mode is enabled
+        append_mode: bool
     },
     /// Read-only state collapses all layers into a single record for read-only
     Read {
@@ -91,7 +93,7 @@ enum State {
 impl Clone for Container {
     fn clone(&self) -> Self {
         match &self.state {
-            State::Build { root, builder } => {
+            State::Build { root, builder, append_mode } => {
                 debug_assert!(
                     builder.ser.view().is_empty() && builder.buffer.is_empty(),
                     "Builder must not be in a partial state"
@@ -104,6 +106,7 @@ impl Clone for Container {
                             buffer: BytesMut::new(),
                             layers: builder.layers.clone(),
                         },
+                        append_mode: *append_mode
                     },
                     _p: PhantomData,
                 }
@@ -154,6 +157,7 @@ impl<P: Packer> MultiRoot<P> {
                     buffer: BytesMut::new(),
                     layers: vec![],
                 },
+                append_mode: false,
             },
             _p: PhantomData::default(),
         };
@@ -172,7 +176,10 @@ impl<P: Packer> MultiRoot<P> {
             State::Build {
                 root,
                 builder: Builder { layers, .. },
+                append_mode
             } => {
+                *append_mode = true;
+
                 for (idx, _) in root.iter_layer_desc()?.enumerate().skip(2) {
                     layers.push((
                         BuildDescriptor::Existing {
@@ -195,7 +202,7 @@ impl<P: Packer> MultiRoot<P> {
     #[inline]
     pub fn try_clone(&self) -> crate::Result<Self> {
         match &self.state {
-            State::Build { root, builder } => {
+            State::Build { root, builder, append_mode } => {
                 if !builder.ser.view().is_empty() || !builder.buffer.is_empty() {
                     return Err(anyhow!("Container build state has pending data").into());
                 }
@@ -208,6 +215,7 @@ impl<P: Packer> MultiRoot<P> {
                             buffer: BytesMut::new(),
                             layers: builder.layers.clone(),
                         },
+                        append_mode: *append_mode
                     },
                     _p: PhantomData,
                 })
@@ -469,7 +477,7 @@ impl<P: Packer> MultiRoot<P> {
             State::Build {
                 root,
                 builder: Builder { layers, .. },
-                ..
+                append_mode
             } => {
                 // 1) Build system layer
                 let mut builder = flexbuffers::Builder::default();
@@ -498,7 +506,7 @@ impl<P: Packer> MultiRoot<P> {
                 let system_layer = builder.take_buffer();
 
                 let mut multi_root = builder.start_vector();
-                if root.opts().is_multi() {
+                if root.opts().is_multi() && append_mode {
                     debug!("Detected 'append' mode");
                     multi_root.push(flexbuffers::Blob(root.layer(0).unwrap_or_default()));
                     multi_root.push(flexbuffers::Blob(system_layer.as_slice()));
