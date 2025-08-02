@@ -439,10 +439,6 @@ impl<P: Packer> MultiRoot<P> {
                 .and_then(|obj| Ok(obj.0))?),
             State::Run { record, vol } => {
                 if let Some(desc) = self.layer_desc(layer) {
-                    if !desc.is_object() {
-                        return Err(anyhow!("Layer is not an object").into());
-                    }
-
                     if desc.is_packed() {
                         if !vol.vol().is_obj_unpacked(layer) {
                             self.unpack(layer, desc)?;
@@ -684,7 +680,7 @@ impl<P: Packer> MultiRoot<P> {
                         return Err(anyhow!("Record data is incomplete, cannot").into());
                     }
 
-                    if desc.is_packed() && desc.is_object() {
+                    if desc.is_packed() {
                         let _idx = objects
                             .pre_encode_object(desc.content(), desc.runtime_size() as u32)?;
                         debug_assert_eq!(idx, _idx);
@@ -725,7 +721,7 @@ impl<P: Packer> MultiRoot<P> {
                         continue;
                     }
 
-                    if desc.is_packed() && desc.is_object() {
+                    if desc.is_packed() {
                         self.unpack(idx, desc)?;
                     }
                 }
@@ -1191,7 +1187,7 @@ impl IRecord for Layer {
 
     #[inline]
     fn bytes(&self) -> &[u8] {
-        self.container.layer_bytes(self.layer).unwrap_or_default()
+        self.container.try_content(self.layer).unwrap_or_default()
     }
 
     #[inline]
@@ -2017,6 +2013,15 @@ mod test {
 
         let index = container.to_index(vec![]).unwrap();
         assert_eq!(3, index.search(field("name").starts_with("hello")).count());
+
+        eprintln!("{}", index.storage().len());
+
+        for r in crate::Storage::iter_records(index.storage()) {
+            eprintln!("{} {:?}", r.peek().val().unwrap(), index.reverse_lookup(r));
+        }
+
+        // let layer = index.get(3).unwrap();
+        // eprintln!("{} {}", index.storage().len(), layer.peek().val().unwrap());
 
         let rec = index
             .search(field("name").starts_with("goodbye"))
