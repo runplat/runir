@@ -2,6 +2,7 @@ use crate::{
     archive::{Entry, FileEntryReference, Manifest}, queue::Pusher, util::Intern, IRecord, Namespace, Queue, Record, VecIndex, Virtual, Worker
 };
 use ahash::{HashSet, HashSetExt};
+use anyhow::anyhow;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use std::{io::Error, path::{Path, PathBuf}
@@ -88,6 +89,18 @@ impl Store {
             work_dir: self.work_dir.clone(),
             packer: self.packer.pusher().unwrap(),
         })
+    }
+
+    /// Pushes an archive member to the store
+    #[inline]
+    pub fn pack(&self, member: ArchiveMember) -> crate::Result<()> {
+        match self.packer.pusher() {
+            Some(push) => {
+                push.ensure_push(member);
+                Ok(())
+            },
+            None => Err(anyhow!("Store is closed").into()),
+        }
     }
 
     /// Flushes all archive members and returns a StoreArchive
