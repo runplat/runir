@@ -4,12 +4,12 @@ use bytes::Bytes;
 use bytes::BytesMut;
 use serde::Serialize;
 
-use crate::symbol::Symbol;
 use crate::ComputedSymbol;
 use crate::IRecord;
 use crate::Opts;
 use crate::RawRecordable;
 use crate::Record;
+use crate::symbol::Symbol;
 use std::hash::Hash;
 use std::sync::OnceLock;
 
@@ -114,6 +114,31 @@ impl Namespace {
         // Lock-in a hash state early so that Namespace can be cloned
         ns.hash_state();
         ns
+    }
+
+    /// Returns a "linked" namespace
+    /// 
+    /// Note: The link is non-directional, for example
+    /// 
+    /// ```rs norun
+    /// assert_eq!(
+    ///     Namespace::from("parent").link("child").chk(), 
+    ///     Namespace::from("child").link("parent").chk()
+    /// )
+    /// ```
+    #[inline]
+    pub fn link(&self, to: impl Symbol) -> Self {
+        let to = Namespace::new(to);
+
+        Self::const_new(
+            [
+                self.k1 ^ to.k1,
+                self.k2 ^ to.k2,
+                self.k3 ^ to.k3,
+                self.k4 ^ to.k4,
+            ],
+            self.opts,
+        )
     }
 
     /// Returns a new empty record under this namespace
@@ -354,5 +379,13 @@ mod test {
             ns.encoded_string()
         );
         assert!(ns.is_canonical())
+    }
+
+    #[test]
+    fn test_link() {
+        let parent = Namespace::from("parent");
+        let child = parent.link("child");
+
+        assert_eq!(Namespace::from("child").link("parent").chk(), child.chk())
     }
 }
