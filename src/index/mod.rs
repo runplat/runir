@@ -140,7 +140,13 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
     /// Reverse lookup a record and return it's key within the index
     #[inline]
     pub fn reverse_lookup(&self, record: &R) -> Option<u64> {
-        self.reverse.get(&record.index_key()).copied()
+        self.reverse_lookup_by_index_key(record.index_key())
+    }
+
+    /// Reverse lookup a record by index and return it's key within the index
+    #[inline]
+    pub fn reverse_lookup_by_index_key(&self, key: u64) -> Option<u64> {
+        self.reverse.get(&key).copied()
     }
 
     /// Index the record without checking lifecycle state
