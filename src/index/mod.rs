@@ -89,6 +89,9 @@ where
     R: crate::IRecord,
     S: Storage<Record = R>,
 {
+    /// Name of the index
+    name: String,
+
     /// Record storage implementation
     storage: S,
 
@@ -99,6 +102,18 @@ where
 }
 
 impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
+    /// Returns the current name of this index
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Sets the name of this index
+    #[inline]
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+
     /// Inserts an IRecord based record into the index
     ///
     /// Returns the key that can be used to lookup the record
@@ -402,6 +417,7 @@ impl<R: crate::IRecord, S: Storage<Record = R>> AsRef<S> for Index<R, S> {
 impl<R: crate::IRecord, S: Storage<Record = R>> Default for Index<R, S> {
     fn default() -> Self {
         Self {
+            name: Default::default(),
             storage: Default::default(),
             reverse: ahash::HashMap::default(),
         }
@@ -412,6 +428,7 @@ impl<R: crate::IRecord, S: Storage<Record = R>> From<S> for Index<R, S> {
     fn from(storage: S) -> Self {
         let reverse = storage.reverse_map();
         Self {
+            name: Default::default(),
             storage,
             reverse,
         }
@@ -421,6 +438,7 @@ impl<R: crate::IRecord, S: Storage<Record = R>> From<S> for Index<R, S> {
 impl<R: crate::IRecord, S: Storage<Record = R> + Clone> Clone for Index<R, S> {
     fn clone(&self) -> Self {
         Self {
+            name: self.name.clone(),
             storage: self.storage.clone(),
             reverse: self.reverse.clone(),
         }
