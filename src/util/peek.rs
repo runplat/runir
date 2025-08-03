@@ -958,3 +958,107 @@ mod peek_path {
         );
     }
 }
+
+pub mod peek_ser {
+    use serde::Serialize;
+
+    use super::{Peek, PeekExtensions};
+
+    impl<'peek> Serialize for Peek<'peek> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer
+        {
+            if let Some(map) = self.iter_kv() {
+                serializer.collect_map(map)
+            } else if let Some(arr) = self.iter() {
+                serializer.collect_seq(arr)
+            } else {
+                match self.flexbuffer_type() {
+                    flexbuffers::FlexBufferType::Null => {
+                        serializer.serialize_none()
+                    },
+                    flexbuffers::FlexBufferType::Int => {
+                        match self.bitwidth() {
+                            flexbuffers::BitWidth::W8 => {
+                                serializer.serialize_i8(self.as_i8())
+                            },
+                            flexbuffers::BitWidth::W16 => {
+                                serializer.serialize_i16(self.as_i16())
+                            },
+                            flexbuffers::BitWidth::W32 => {
+                                serializer.serialize_i32(self.as_i32())
+                            },
+                            flexbuffers::BitWidth::W64 => {
+                                serializer.serialize_i64(self.as_i64())
+                            }
+                        }
+                    },
+                    flexbuffers::FlexBufferType::UInt => {
+                        match self.bitwidth() {
+                            flexbuffers::BitWidth::W8 => {
+                                serializer.serialize_u8(self.as_u8())
+                            },
+                            flexbuffers::BitWidth::W16 => {
+                                serializer.serialize_u16(self.as_u16())
+                            },
+                            flexbuffers::BitWidth::W32 => {
+                                serializer.serialize_u32(self.as_u32())
+                            },
+                            flexbuffers::BitWidth::W64 => {
+                                serializer.serialize_u64(self.as_u64())
+                            },
+                        }
+                    },
+                    flexbuffers::FlexBufferType::Float => {
+                        match self.bitwidth() {
+                            flexbuffers::BitWidth::W32 => {
+                                serializer.serialize_f32(self.as_f32())
+                            },
+                            flexbuffers::BitWidth::W64 => {
+                                serializer.serialize_f64(self.as_f64())
+                            },
+                            _ => {
+                                unreachable!()
+                            }
+                        }
+                    },
+                    flexbuffers::FlexBufferType::Bool => {
+                        serializer.serialize_bool(self.as_bool())
+                    },
+                    flexbuffers::FlexBufferType::String => {
+                        serializer.serialize_str(self.as_str())
+                    },
+                    flexbuffers::FlexBufferType::Blob => {
+                        serializer.serialize_bytes(self.as_blob().0)
+                    }
+                    _ => {
+                        serializer.serialize_none()
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_serialize() {
+        use toml::toml;
+        use crate::{IRecord, Namespace};
+
+        let rec = Namespace::ephemeral().store("test", &toml! {
+            [test]
+            value = "hello world"
+
+            [test2]
+            value = 3.14
+
+            [test3]
+            value = 100
+        });
+
+        let val = rec.peek().val().unwrap();
+
+        let val = toml::to_string(&val).unwrap();
+        eprintln!("{val}");
+    }
+}

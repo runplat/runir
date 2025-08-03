@@ -9,6 +9,7 @@ pub use interner::Intern;
 pub(crate) use interner::impl_interner;
 
 mod peek;
+pub use peek::peek_ser;
 pub use peek::Peek;
 pub use peek::PeekPath;
 pub use peek::PeekExtensions;
