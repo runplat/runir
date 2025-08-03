@@ -1,15 +1,15 @@
-use parking_lot::RwLock;
-use tracing::debug;
 use crate::{
     IRecord, Record, Storage, Store, VecIndex,
     store::{ArchiveMember, StoreArchive},
 };
+use parking_lot::RwLock;
 use std::{
     ops::Deref,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
 };
+use tracing::debug;
 
 use super::Frontend;
 
@@ -115,7 +115,10 @@ impl State {
         let mut soft_deleted = self.update_or_create_snapshot(Snapshot::SoftDeleted);
 
         for (idx, (_, i)) in indexes.iter().enumerate() {
-            debug!("====== Processing member {idx}, count: {} ======", i.storage().len());
+            debug!(
+                "====== Processing member {idx}, count: {} ======",
+                i.storage().len()
+            );
             for r in i.storage().iter_records() {
                 match next_snapshot.index(r.clone()) {
                     crate::index::IndexResult::Inserted(k) => {
@@ -133,31 +136,47 @@ impl State {
                         }
                     }
                     crate::index::IndexResult::Exists(k, skipped) => {
-                        debug!("Exists {} @ {k} staging: {}", skipped.uuid(), skipped.opts().is_staging());
+                        debug!(
+                            "Exists {} @ {k} staging: {}",
+                            skipped.uuid(),
+                            skipped.opts().is_staging()
+                        );
                     }
                     crate::index::IndexResult::CannotPromote(staging) => {
                         let uuid = staging.uuid();
-                        let key = next_snapshot.reverse_lookup(&staging).expect("should return a key since cannot promote was returned");
-                        let existing = next_snapshot.get(key).expect("should return since cannot promoted returned");
+                        let key = next_snapshot
+                            .reverse_lookup(&staging)
+                            .expect("should return a key since cannot promote was returned");
+                        let existing = next_snapshot
+                            .get(key)
+                            .expect("should return since cannot promoted returned");
 
                         if existing.content() == staging.content() {
-                            debug!("Attempted to insert duplicate content {uuid} @ {key}, skipping");
+                            debug!(
+                                "Attempted to insert duplicate content {uuid} @ {key}, skipping"
+                            );
                         } else {
                             match staging_index.index_unchecked(staging) {
                                 crate::index::IndexResult::Inserted(k) => {
                                     debug!("Staging {uuid} @ {k}")
-                                },
-                                crate::index::IndexResult::Exists(k, skipping) => {
-                                    debug!("Staging already occupied @ {k}, skipping {}", skipping.uuid())
-                                },
-                                _ => {
-    
                                 }
+                                crate::index::IndexResult::Exists(k, skipping) => {
+                                    debug!(
+                                        "Staging already occupied @ {k}, skipping {}",
+                                        skipping.uuid()
+                                    )
+                                }
+                                _ => {}
                             }
                         }
                     }
                     crate::index::IndexResult::CannotInsertDeletedRecord(deleting) => {
-                        debug!(soft_delete = deleting.opts().is_soft_deleted(), "Skipping Deleted Record {} in {}", deleting.uuid(), idx);
+                        debug!(
+                            soft_delete = deleting.opts().is_soft_deleted(),
+                            "Skipping Deleted Record {} in {}",
+                            deleting.uuid(),
+                            idx
+                        );
                         if deleting.opts().is_soft_deleted() {
                             soft_deleted.index_unchecked(deleting);
                         }
@@ -247,6 +266,14 @@ impl State {
                 imported.index(r.clone());
             }
         }
+
+        imported.set_name(
+            store_tar
+                .as_ref()
+                .file_stem()
+                .and_then(|f| f.to_str())
+                .unwrap_or_default(),
+        );
 
         self.snapshots.insert(
             Snapshot::Imported(store_tar.as_ref().to_path_buf()),
