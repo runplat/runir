@@ -15,7 +15,7 @@ use tracing::{debug, trace};
 use crate::{
     Data, IRecord, Index, Opts, Record, Storage,
     record::record_crc,
-    virt::ObjectEncoder,
+    virt::AtlasEncoder,
     vol::{MemoryMappedTarget, SharedVolume, Volume, new_mmap_anon_target},
 };
 
@@ -448,11 +448,11 @@ impl<P: Packer> MultiRoot<P> {
             State::Run { record, vol } => {
                 if let Some(desc) = self.layer_desc(layer) {
                     if desc.is_packed() {
-                        if !vol.vol().is_obj_unpacked(layer) {
+                        if !vol.vol().is_object_unpacked(layer) {
                             self.unpack(layer, desc)?;
                         }
 
-                        let obj = vol.view().view_obj(layer)?;
+                        let obj = vol.view().view_object(layer)?;
                         Ok(obj)
                     } else {
                         if let Some(inline) = record.layer(layer) {
@@ -666,11 +666,11 @@ impl<P: Packer> MultiRoot<P> {
                     required_size as usize,
                 )?;
 
-                let mut objects = RuntimeVolume::objects(target);
+                let mut objects = RuntimeVolume::new_atlas(target);
 
                 for (idx, desc) in record.iter_layer_desc()?.enumerate() {
                     if idx == 0 || idx == 1 {
-                        objects.pre_encode_object_inline();
+                        objects.pre_encode_inline();
                         continue;
                     }
 
@@ -690,10 +690,10 @@ impl<P: Packer> MultiRoot<P> {
 
                     if desc.is_packed() {
                         let _idx = objects
-                            .pre_encode_object(desc.content(), desc.runtime_size() as u32)?;
+                            .pre_encode(desc.content(), desc.runtime_size() as u32)?;
                         debug_assert_eq!(idx, _idx);
                     } else {
-                        let _idx = objects.pre_encode_object_inline();
+                        let _idx = objects.pre_encode_inline();
                         debug_assert_eq!(idx, _idx);
                     }
                 }
@@ -764,7 +764,7 @@ impl<P: Packer> MultiRoot<P> {
                         .into());
                     }
 
-                    vol.vol_mut().encode_packed_obj::<P>(layer, packed)?;
+                    vol.vol_mut().encode_object::<P>(layer, packed)?;
                     Ok(())
                 } else {
                     return Err(anyhow!("Record does not have packed layer data").into());
@@ -1659,10 +1659,10 @@ impl<'b, P> IRecord for &'b MultiRoot<P> {
 }
 
 /// Type-alias for a shared "Runtime" volume
-type SharedRuntimeVolume = SharedVolume<MemoryMappedTarget, ObjectEncoder>;
+type SharedRuntimeVolume = SharedVolume<MemoryMappedTarget, AtlasEncoder>;
 
 /// Type-alias for a "Runtime" volume
-type RuntimeVolume = Volume<MemoryMappedTarget, ObjectEncoder>;
+type RuntimeVolume = Volume<MemoryMappedTarget, AtlasEncoder>;
 
 #[cfg(test)]
 mod test {

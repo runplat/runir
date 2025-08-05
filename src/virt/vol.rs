@@ -271,7 +271,7 @@ impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc: Send + Sync + 'static> From<Sh
 impl<T: VolumeTarget> Volume<T, TapeEncoder> {
     /// Creates a new volume w/ target for archiving
     #[inline]
-    pub fn archiver(target: T) -> Self {
+    pub fn new_archive(target: T) -> Self {
         Self {
             target,
             encoder: TapeEncoder::default(),
@@ -279,6 +279,7 @@ impl<T: VolumeTarget> Volume<T, TapeEncoder> {
     }
 
     /// Encodes a series of Records using [TapeEncoder] and writes them sequentially into the underlying target
+    #[inline]
     pub async fn archive_batch(self, batch: Vec<Entry>) -> std::io::Result<Self> {
         let mut writer = FramedWrite::new(self.target, self.encoder);
 
@@ -613,7 +614,7 @@ mod test {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_volume_swap_and_snapshot_in_memory() {
-        let volume = Volume::archiver(new_memory_target("<inline>", MIB));
+        let volume = Volume::new_archive(new_memory_target("<inline>", MIB));
 
         let ns = ().to_namespace();
 
@@ -699,7 +700,7 @@ mod test {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_volume_swap_and_snapshot_mmap() {
-        let volume = Volume::archiver(
+        let volume = Volume::new_archive(
             new_mmap_target("test_volume_swap_and_snapshot_mmap.0.bin", MIB as u64).unwrap(),
         );
 
@@ -789,7 +790,7 @@ mod test {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_volume_swap_and_snapshot_mmap_anon() {
-        let volume = Volume::archiver(new_mmap_anon_target("<inline>", MIB).unwrap());
+        let volume = Volume::new_archive(new_mmap_anon_target("<inline>", MIB).unwrap());
 
         let ns = ().to_namespace();
 

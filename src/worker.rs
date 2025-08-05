@@ -111,7 +111,7 @@ impl Worker {
                        that can be plugged-in below, and specified in StoreSettings
                     */
                     debug!(total_size, "Creating new archive_member for {archive_path:?}");
-                    let output = Volume::archiver(new_memory_target(archive_path, total_size));
+                    let output = Volume::new_archive(new_memory_target(archive_path, total_size));
                     let mut member = output.archive_batch(entries).await?.to_archive()?;
                     let backoff = Backoff::new();
                     while let Some(retry) = packer.push(member) {
@@ -212,7 +212,7 @@ mod test {
             b
         })));
 
-        let archive_file = Volume::archiver(new_memory_target("<inline>", MIB));
+        let archive_file = Volume::new_archive(new_memory_target("<inline>", MIB));
         archive_file
             .archive_batch(worker.flush().collect())
             .await

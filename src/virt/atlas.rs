@@ -7,9 +7,15 @@ use crate::util::Packer;
 
 use super::vol::{Volume, VolumeTarget};
 
-/// Object encoder tracks a list of inline or stored objects
+/// AtlasEncoder enables storing objects that require un-packing at runtime, by "pre-encoding" stored objects
+/// 
+/// Given a list of objects that belong to some container system, each object is "pre-encoded" to the atlas and assigned an index.
+/// 
+/// If an object requires additional memory to be used, the index for that object reserves future memory, otherwise it is considered "inline".
+/// 
+/// At runtime, the atlas can be used along side the data storage medium to unpack objects on demand into the atlas
 #[derive(Default)]
-pub struct ObjectEncoder {
+pub struct AtlasEncoder {
     objects: Vec<Stored>,
     unpacked: HashSet<usize>,
 }
@@ -23,7 +29,7 @@ enum Stored {
         len: u32,
     },
 }
-impl ObjectEncoder {
+impl AtlasEncoder {
     /// Returns the total runtime size
     #[inline]
     pub fn total_runtime_size(&self) -> u32 {
@@ -125,11 +131,11 @@ impl ObjectEncoder {
     }
 }
 
-impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
-    /// Returns a volume for storing object bytes
+impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, AtlasEncoder> {
+    /// Returns an "Atlas" volume for storing object bytes
     #[inline]
-    pub fn objects(target: T) -> Self {
-        Self::from((target, ObjectEncoder::default()))
+    pub fn new_atlas(target: T) -> Self {
+        Self::from((target, AtlasEncoder::default()))
     }
 
     /// "Pre-" encode an inline-object
@@ -138,7 +144,7 @@ impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
     ///
     /// Note: This ensures that both sides are in sync and can return useful errors
     #[inline]
-    pub fn pre_encode_object_inline(&mut self) -> usize {
+    pub fn pre_encode_inline(&mut self) -> usize {
         self.encoder_mut().pre_encode_next_inline()
     }
 
@@ -148,7 +154,7 @@ impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
     ///
     /// Otherwise, returns the index of the object
     #[inline]
-    pub fn pre_encode_object(
+    pub fn pre_encode(
         &mut self,
         expected: GenericArray<u8, U32>,
         expected_len: u32,
@@ -162,11 +168,11 @@ impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
         }
     }
 
-    /// Encodes a packed object
+    /// Encodes an object
     ///
     /// Returns an error if the unpacked object did not match the expected pre-encoded digest, or if the idx returned an inline object
     #[inline]
-    pub fn encode_packed_obj<P: Packer>(&mut self, idx: usize, packed: &[u8]) -> crate::Result<()> {
+    pub fn encode_object<P: Packer>(&mut self, idx: usize, packed: &[u8]) -> crate::Result<()> {
         let (target, encoder) = self.parts_mut();
        encoder
             .encode_packed_object::<P>(idx, packed, target.as_mut())
@@ -174,13 +180,13 @@ impl<T: VolumeTarget + AsMut<[u8]>> Volume<T, ObjectEncoder> {
 
     /// Returns true if the obj at idx has been marked as unpacked
     #[inline]
-    pub fn is_obj_unpacked(&self, idx: usize) -> bool {
+    pub fn is_object_unpacked(&self, idx: usize) -> bool {
         self.encoder().is_unpacked(idx)
     }
 
     /// View bytes for an object
     #[inline]
-    pub fn view_obj(&self, idx: usize) -> crate::Result<&[u8]> {
+    pub fn view_object(&self, idx: usize) -> crate::Result<&[u8]> {
         match self.encoder().object(idx) {
             Some((offset, len)) => {
                 Ok(&self.target().view()[offset as usize..offset as usize + len as usize])

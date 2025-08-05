@@ -6,5 +6,5 @@ pub use data::Virtual;
 
 pub mod vol;
 
-mod object;
-pub use object::ObjectEncoder;
+mod atlas;
+pub use atlas::AtlasEncoder;
