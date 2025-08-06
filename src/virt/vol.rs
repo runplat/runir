@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
 };
 use tracing::trace;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::Zeroize;
 
 pub const KIB: usize = 2usize.pow(10);
 pub const MIB: usize = 2usize.pow(20);
