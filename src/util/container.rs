@@ -3,21 +3,20 @@ use std::{
     marker::PhantomData,
     sync::Arc,
 };
-
+use crate::{
+    Data, IRecord, Index, Opts, Record, Storage,
+    record::record_crc,
+    util::{Packer, packer::GenericPacker},
+    virt::AtlasEncoder,
+    vol::{MemoryMappedTarget, SharedVolume, Volume, new_mmap_anon_target},
+};
 use ahash::HashSet;
 use anyhow::anyhow;
 use bytes::{BufMut, Bytes, BytesMut};
 use generic_array::{GenericArray, typenum::U32};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tracing::{debug, trace};
-
-use crate::{
-    Data, IRecord, Index, Opts, Record, Storage,
-    record::record_crc,
-    virt::AtlasEncoder,
-    vol::{MemoryMappedTarget, SharedVolume, Volume, new_mmap_anon_target},
-};
+use tracing::debug;
 
 use super::{Peek, PeekExtensions};
 
@@ -74,7 +73,7 @@ enum State {
         /// Layer builder
         builder: Builder,
         /// True if append mode is enabled
-        append_mode: bool
+        append_mode: bool,
     },
     /// Read-only state collapses all layers into a single record for read-only
     Read {
@@ -93,7 +92,11 @@ enum State {
 impl Clone for Container {
     fn clone(&self) -> Self {
         match &self.state {
-            State::Build { root, builder, append_mode } => {
+            State::Build {
+                root,
+                builder,
+                append_mode,
+            } => {
                 debug_assert!(
                     builder.ser.view().is_empty() && builder.buffer.is_empty(),
                     "Builder must not be in a partial state"
@@ -106,7 +109,7 @@ impl Clone for Container {
                             buffer: BytesMut::new(),
                             layers: builder.layers.clone(),
                         },
-                        append_mode: *append_mode
+                        append_mode: *append_mode,
                     },
                     _p: PhantomData,
                 }
@@ -176,7 +179,7 @@ impl<P: Packer> MultiRoot<P> {
             State::Build {
                 root,
                 builder: Builder { layers, .. },
-                append_mode
+                append_mode,
             } => {
                 *append_mode = true;
 
@@ -202,7 +205,11 @@ impl<P: Packer> MultiRoot<P> {
     #[inline]
     pub fn try_clone(&self) -> crate::Result<Self> {
         match &self.state {
-            State::Build { root, builder, append_mode } => {
+            State::Build {
+                root,
+                builder,
+                append_mode,
+            } => {
                 if !builder.ser.view().is_empty() || !builder.buffer.is_empty() {
                     return Err(anyhow!("Container build state has pending data").into());
                 }
@@ -215,7 +222,7 @@ impl<P: Packer> MultiRoot<P> {
                             buffer: BytesMut::new(),
                             layers: builder.layers.clone(),
                         },
-                        append_mode: *append_mode
+                        append_mode: *append_mode,
                     },
                     _p: PhantomData,
                 })
@@ -477,7 +484,7 @@ impl<P: Packer> MultiRoot<P> {
             State::Build {
                 root,
                 builder: Builder { layers, .. },
-                append_mode
+                append_mode,
             } => {
                 // 1) Build system layer
                 let mut builder = flexbuffers::Builder::default();
@@ -689,8 +696,8 @@ impl<P: Packer> MultiRoot<P> {
                     }
 
                     if desc.is_packed() {
-                        let _idx = objects
-                            .pre_encode(desc.content(), desc.runtime_size() as u32)?;
+                        let _idx =
+                            objects.pre_encode(desc.content(), desc.runtime_size() as u32)?;
                         debug_assert_eq!(idx, _idx);
                     } else {
                         let _idx = objects.pre_encode_inline();
@@ -1033,10 +1040,7 @@ impl<P: Packer> MultiRoot<P> {
                     .1;
 
                 let (hi, _) = uuid.as_u64_pair();
-                let uuid = uuid::Uuid::from_u64_pair(
-                    hi,
-                    record_crc(self.bytes(), ts),
-                );
+                let uuid = uuid::Uuid::from_u64_pair(hi, record_crc(self.bytes(), ts));
                 Record::from_parts((uuid, data, ns_chk, ts, opts))
             }
         }
@@ -1249,75 +1253,6 @@ impl<'a> IRecord for &'a Layer {
     #[inline]
     fn to_record(&self) -> Record {
         <Layer as IRecord>::to_record(self)
-    }
-}
-
-/// Generic Packer trait implementation
-pub struct GenericPacker<const SIZE_THRESHOLD: usize, const COMPRESSION_LEVEL: i32>;
-
-impl<const SIZE_THRESHOLD: usize, const COMPRESSION_LEVEL: i32> Packer
-    for GenericPacker<SIZE_THRESHOLD, COMPRESSION_LEVEL>
-{
-    fn pack_bytes(bytes: &[u8], buffer: &mut BytesMut) -> crate::Result<()> {
-        if bytes.len() < SIZE_THRESHOLD {
-            buffer.reserve(bytes.len());
-            buffer.put(bytes);
-            Ok(())
-        } else {
-            let _bytes = zstd::encode_all(bytes, COMPRESSION_LEVEL)?;
-            buffer.reserve(_bytes.len());
-            buffer.put(_bytes.as_slice());
-            trace!(unpacked = bytes.len(), packed = buffer.len(), "pack_bytes");
-            Ok(())
-        }
-    }
-
-    fn unpack<'u>(from: &[u8], to: &'u mut [u8]) -> crate::Result<()> {
-        if from.len() == to.len() {
-            to.copy_from_slice(from);
-            Ok(())
-        } else {
-            let decoded = zstd::decode_all(from)?;
-            to.copy_from_slice(&decoded);
-            Ok(())
-        }
-    }
-
-    fn decoder(from: &[u8]) -> crate::Result<impl Read> {
-        Ok(zstd::Decoder::new(std::io::Cursor::new(from))?)
-    }
-}
-
-/// Packer handles packing and unpacking bytes
-pub trait Packer: private::Sealed {
-    /// Pack bytes into a layer
-    fn pack_bytes(bytes: &[u8], buffer: &mut BytesMut) -> crate::Result<()>;
-
-    /// Unpack bytes from a layer
-    fn unpack<'u>(from: &[u8], to: &'u mut [u8]) -> crate::Result<()>;
-
-    /// Returns a decoder for bytes
-    fn decoder(from: &[u8]) -> crate::Result<impl Read>;
-
-    /// Pack an object into a layer
-    fn pack_object<T: Serialize>(
-        obj: &T,
-        ser: &mut flexbuffers::FlexbufferSerializer,
-        buffer: &mut BytesMut,
-    ) -> crate::Result<()> {
-        obj.serialize(&mut *ser)?;
-        Self::pack_bytes(ser.view(), buffer)
-    }
-}
-
-mod private {
-    use super::GenericPacker;
-
-    pub trait Sealed {}
-
-    impl<const COMPRESSION_THRESHOLD: usize, const COMPRESSION_LEVEL: i32> Sealed
-        for GenericPacker<COMPRESSION_THRESHOLD, COMPRESSION_LEVEL>
-    {
     }
 }
 
@@ -1668,13 +1603,14 @@ type RuntimeVolume = Volume<MemoryMappedTarget, AtlasEncoder>;
 mod test {
     use std::io::Read;
 
-    use super::{Container, GenericPacker};
+    use super::Container;
     use crate::{
         IRecord, Namespace, VecIndex, field, namespace,
         search::iter::Search,
         util::{
             PeekExtensions,
             container::{ILayerDescriptor, MultiRoot},
+            packer::GenericPacker,
         },
     };
     use bytes::{BufMut, BytesMut};

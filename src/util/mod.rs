@@ -2,7 +2,9 @@ mod container;
 pub use container::Layer;
 pub use container::Container;
 pub use container::ILayerDescriptor;
-pub(crate) use container::Packer;
+
+mod packer;
+pub(crate) use packer::Packer;
 
 mod interner;
 pub use interner::Intern;
