@@ -1,7 +1,6 @@
+use super::Virtual;
 use crate::{
-    Data,
-    archive::{Entry, TapeEncoder},
-    store::ArchiveMember,
+    archive::{Entry, TapeEncoder}, store::ArchiveMember, Data
 };
 use asynchronous_codec::{FramedWrite, FramedWriteParts};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -19,7 +18,7 @@ use std::{
     sync::Arc,
 };
 use tracing::trace;
-use super::Virtual;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const KIB: usize = 2usize.pow(10);
 pub const MIB: usize = 2usize.pow(20);
@@ -130,7 +129,7 @@ pub fn new_memory_target(path: impl Into<PathBuf>, capacity: usize) -> InMemoryT
 }
 
 /// Volume stores a "target" which can read/write bytes
-/// 
+///
 /// And an "encoder" which manages state/mapping/decoding
 pub struct Volume<T, Enc> {
     /// Inner target
@@ -167,7 +166,7 @@ impl<T, Enc> Volume<T, Enc> {
     /// Returns a mutable reference to the inner parts
     #[inline]
     pub fn parts_mut(&mut self) -> (&mut T, &mut Enc) {
-       (&mut self.target, &mut self.encoder)
+        (&mut self.target, &mut self.encoder)
     }
 
     /// Returns a reference to the inner parts
@@ -230,6 +229,7 @@ impl<T, Enc> SharedVolume<T, Enc> {
     }
 }
 
+
 impl<T, Enc> From<Volume<T, Enc>> for SharedVolume<T, Enc> {
     fn from(value: Volume<T, Enc>) -> Self {
         Self(Arc::new(RwLock::new(value)))
@@ -265,6 +265,12 @@ impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc: Send + Sync + 'static> From<Sh
 {
     fn from(value: SharedVolume<T, Enc>) -> Self {
         Data::from(Bytes::from_owner(value))
+    }
+}
+
+impl<T: AsMut<[u8]>, Enc> Zeroize for SharedVolume<T, Enc> {
+    fn zeroize(&mut self) {
+        self.0.write().target_mut().as_mut().zeroize();
     }
 }
 
@@ -458,6 +464,18 @@ impl VolumeTarget for InMemoryTarget {
     fn advance(&mut self, count: usize) -> std::io::Result<()> {
         self.pos += count;
         Ok(())
+    }
+}
+
+impl<T: AsMut<[u8]>> Zeroize for CursorTarget<T> {
+    fn zeroize(&mut self) {
+        self.as_mut().zeroize();
+    }
+}
+
+impl<T: AsMut<[u8]>, Enc> Zeroize for Volume<T, Enc> {
+    fn zeroize(&mut self) {
+        self.target_mut().as_mut().zeroize()
     }
 }
 
