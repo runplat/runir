@@ -2,7 +2,7 @@ pub mod archive;
 pub mod util;
 
 mod symbol;
-pub use symbol::ComputedSymbol;
+pub use symbol::Computed;
 pub use symbol::Symbol;
 
 mod error;

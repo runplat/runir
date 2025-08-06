@@ -17,11 +17,11 @@ impl Symbol for &str {
 
 /// Provides functions for computing a symbol
 #[derive(Hash)]
-pub struct ComputedSymbol {
+pub struct Computed {
     computed: &'static str,
 }
 
-impl ComputedSymbol {
+impl Computed {
     /// Computes a symbol from a mustache based template and serializable data
     ///
     /// Returns an error if the template could not be compiled or if the symbol could not be rendered
@@ -70,7 +70,7 @@ impl ComputedSymbol {
     }
 }
 
-impl Symbol for ComputedSymbol {
+impl Symbol for Computed {
     #[inline]
     fn symbol(&self) -> &impl Hash {
         &self.computed
@@ -79,13 +79,13 @@ impl Symbol for ComputedSymbol {
 
 #[cfg(test)]
 mod test {
-    use super::ComputedSymbol;
-    use crate::util::Intern;
+    use super::Computed;
+    use crate::{util::{Intern, PeekExtensions}, IRecord, Namespace};
     use toml::toml;
 
     #[test]
     fn test_computed_symbol() {
-        let s = ComputedSymbol::mustache("{{name}}-test", &toml! {name = "hello world"}).unwrap();
+        let s = Computed::mustache("{{name}}-test", &toml! {name = "hello world"}).unwrap();
         assert_eq!("hello world-test", s.computed());
         assert_eq!(
             "hello world-test".addr_of_interned(),
@@ -93,18 +93,23 @@ mod test {
         );
 
         let t = mustache::compile_str("{{name}}-test").unwrap();
-        let s = ComputedSymbol::with_mustache(&t, &toml! {name = "hello world 2"}).unwrap();
+        let s = Computed::with_mustache(&t, &toml! {name = "hello world 2"}).unwrap();
         assert_eq!("hello world 2-test", s.computed());
         assert_eq!(
             "hello world 2-test".addr_of_interned(),
             s.computed().addr_of_interned()
         );
 
-        let s = ComputedSymbol::compute(|| String::from("hello world"));
+        let s = Computed::compute(|| String::from("hello world"));
         assert_eq!("hello world", s.computed());
         assert_eq!(
             "hello world".addr_of_interned(),
             s.computed().addr_of_interned()
         );
+
+        let rec = Namespace::ephemeral().store("ex", &toml! { name = "test"});
+
+        let s = Computed::mustache("{{name}}-test", &rec.peek().val().unwrap()).unwrap();
+        assert_eq!("test-test", s.computed());
     }
 }
