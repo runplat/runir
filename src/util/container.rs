@@ -850,20 +850,21 @@ impl<P: Packer> MultiRoot<P> {
             } => {
                 let next = buffer.split();
 
+                let mut packed = Sha256::new();
+                packed.update(next.as_ref());
+                let packed: [u8; 32] = packed.finalize().into();
+
                 ser.reset();
                 if let Some(labels) = labels {
                     labels.serialize(&mut *ser)?;
                 }
 
-                if next.len() != len {
-                    let mut packed = Sha256::new();
-                    packed.update(next.as_ref());
-
+                if packed != digest {
                     layers.push((
                         BuildDescriptor::New {
                             content: digest,
                             packed: Some(Packed {
-                                digest: packed.finalize().into(),
+                                digest: packed,
                                 unpacked: len as u64,
                             }),
                             len: next.len() as u64,
