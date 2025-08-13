@@ -120,7 +120,7 @@ impl Namespace {
     /// 
     /// Note: The link is non-directional, for example
     /// 
-    /// ```rs norun
+    /// ```rs no_run
     /// assert_eq!(
     ///     Namespace::from("parent").link("child").chk(), 
     ///     Namespace::from("child").link("parent").chk()

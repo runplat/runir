@@ -9,4 +9,6 @@ pub mod vol;
 mod atlas;
 pub use atlas::AtlasEncoder;
 
+mod archive;
+
 mod secure;

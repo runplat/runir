@@ -1,10 +1,6 @@
-use super::Virtual;
-use crate::{
-    archive::{Entry, TapeEncoder}, store::ArchiveMember, Data
-};
-use asynchronous_codec::{FramedWrite, FramedWriteParts};
+use crate::Data;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::{AsyncRead, AsyncSeek, AsyncWrite, SinkExt};
+use futures::{AsyncRead, AsyncSeek, AsyncWrite};
 use memmap2::MmapMut;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use pin_project_lite::pin_project;
@@ -174,6 +170,18 @@ impl<T, Enc> Volume<T, Enc> {
     pub fn parts(&self) -> (&T, &Enc) {
         (&self.target, &self.encoder)
     }
+
+    /// Consumes the volume and returns the parts
+    #[inline]
+    pub fn into_parts(self) -> (T, Enc) {
+        (self.target, self.encoder)
+    }
+
+    /// Restores a volumes from parts
+    #[inline]
+    pub fn from_parts(parts: (T, Enc)) -> Self {
+        parts.into()
+    }
 }
 
 impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc> Deref for Volume<T, Enc> {
@@ -271,92 +279,6 @@ impl<T: AsRef<[u8]> + Sync + Send + 'static, Enc: Send + Sync + 'static> From<Sh
 impl<T: AsMut<[u8]>, Enc> Zeroize for SharedVolume<T, Enc> {
     fn zeroize(&mut self) {
         self.0.write().target_mut().as_mut().zeroize();
-    }
-}
-
-impl<T: VolumeTarget> Volume<T, TapeEncoder> {
-    /// Creates a new volume w/ target for archiving
-    #[inline]
-    pub fn new_archive(target: T) -> Self {
-        Self {
-            target,
-            encoder: TapeEncoder::default(),
-        }
-    }
-
-    /// Encodes a series of Records using [TapeEncoder] and writes them sequentially into the underlying target
-    #[inline]
-    pub async fn archive_batch(self, batch: Vec<Entry>) -> std::io::Result<Self> {
-        let mut writer = FramedWrite::new(self.target, self.encoder);
-
-        for r in batch {
-            writer.feed(r).await?;
-        }
-
-        writer.close().await?;
-
-        let FramedWriteParts {
-            io,
-            encoder,
-            buffer,
-            ..
-        } = writer.into_parts();
-
-        if !buffer.is_empty() {
-            unreachable!("This means that close() did not finish flushing")
-        }
-        Ok(Self {
-            target: io,
-            encoder,
-        })
-    }
-
-    /// Returns the number of entries that have been encoded into this volume
-    #[inline]
-    pub fn count(&self) -> usize {
-        self.encoder.len()
-    }
-
-    /// Swaps the inner target and snapshots the state into an index
-    #[inline]
-    pub fn swap_and_archive(&mut self, next: T) -> std::io::Result<ArchiveMember> {
-        let target = std::mem::replace(&mut self.target, next);
-        let encoder = std::mem::replace(&mut self.encoder, TapeEncoder::default());
-
-        let to_archive = Self { target, encoder };
-        to_archive.to_archive()
-    }
-
-    /// Consumes the volume and returns an archive member
-    #[inline]
-    pub fn to_archive(mut self) -> std::io::Result<ArchiveMember> {
-        let target = self.target;
-        let path = target.path().as_ref().to_path_buf();
-
-        let target = target.freeze()?;
-        let manifest = self.encoder.stamp_manifest();
-
-        let mut records = vec![];
-        let entries = manifest.journal_entries()?;
-        let count = entries.len();
-        for e in entries {
-            let data = Virtual::new(e, target.clone())?;
-            if let Some(record) = data.materialize() {
-                records.push(record);
-            }
-        }
-
-        if count != records.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Would have returned partial data",
-            ));
-        }
-        Ok(ArchiveMember::Volume {
-            path,
-            manifest,
-            records,
-        })
     }
 }
 
@@ -580,8 +502,7 @@ impl<T: AsMut<[u8]>> AsMut<[u8]> for CursorTarget<T> {
 #[cfg(test)]
 mod test {
     use crate::{
-        IRecord, ToNamespace, VecIndex,
-        util::{PeekExtensions, PeekRefExtensions},
+        archive::Entry, util::{PeekExtensions, PeekRefExtensions}, IRecord, ToNamespace, VecIndex
     };
 
     use super::*;
