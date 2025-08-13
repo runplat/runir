@@ -12,7 +12,7 @@ impl<T: VolumeTarget> Volume<T, TapeEncoder> {
 
     /// Encodes a series of Records using [TapeEncoder] and writes them sequentially into the underlying target
     #[inline]
-    pub async fn archive_batch(self, batch: Vec<Entry>) -> std::io::Result<Self> {
+    pub async fn archive(self, batch: Vec<Entry>) -> std::io::Result<Self> {
         let (target, encoder) = self.into_parts();
         let mut writer = FramedWrite::new(target, encoder);
 
@@ -47,12 +47,12 @@ impl<T: VolumeTarget> Volume<T, TapeEncoder> {
         let encoder = std::mem::replace(encoder, TapeEncoder::default());
 
         let to_archive = Self::from_parts((target, encoder));
-        to_archive.to_archive()
+        to_archive.to_archive_member()
     }
 
     /// Consumes the volume and returns an archive member
     #[inline]
-    pub fn to_archive(self) -> std::io::Result<ArchiveMember> {
+    pub fn to_archive_member(self) -> std::io::Result<ArchiveMember> {
         let (target, mut encoder) = self.into_parts();
         let path = target.path().as_ref().to_path_buf();
 

@@ -595,7 +595,7 @@ mod test {
         ));
 
         let mut volume = volume
-            .archive_batch(records.drain(..).map(|r| Entry::Record(r)).collect())
+            .archive(records.drain(..).map(|r| Entry::Record(r)).collect())
             .await
             .unwrap();
 
@@ -683,7 +683,7 @@ mod test {
         ));
 
         let mut volume = volume
-            .archive_batch(records.drain(..).map(|r| Entry::Record(r)).collect())
+            .archive(records.drain(..).map(|r| Entry::Record(r)).collect())
             .await
             .unwrap();
 
@@ -771,7 +771,7 @@ mod test {
         ));
 
         let mut volume = volume
-            .archive_batch(records.drain(..).map(|r| Entry::Record(r)).collect())
+            .archive(records.drain(..).map(|r| Entry::Record(r)).collect())
             .await
             .unwrap();
 

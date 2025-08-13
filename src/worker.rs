@@ -112,7 +112,7 @@ impl Worker {
                     */
                     debug!(total_size, "Creating new archive_member for {archive_path:?}");
                     let output = Volume::new_archive(new_memory_target(archive_path, total_size));
-                    let mut member = output.archive_batch(entries).await?.to_archive()?;
+                    let mut member = output.archive(entries).await?.to_archive_member()?;
                     let backoff = Backoff::new();
                     while let Some(retry) = packer.push(member) {
                         member = retry;
@@ -214,10 +214,10 @@ mod test {
 
         let archive_file = Volume::new_archive(new_memory_target("<inline>", MIB));
         archive_file
-            .archive_batch(worker.flush().collect())
+            .archive(worker.flush().collect())
             .await
             .unwrap()
-            .to_archive()
+            .to_archive_member()
             .unwrap();
     }
 }
