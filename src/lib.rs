@@ -58,6 +58,7 @@ pub use store::ToArchiveMember;
 
 mod virt;
 pub use virt::vol;
+pub use virt::SharedVolume;
 pub use virt::RecordExtent;
 pub use virt::Virtual;
 

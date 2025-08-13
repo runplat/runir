@@ -1,6 +1,8 @@
 use std::ops::{Deref, DerefMut};
 use zeroize::Zeroizing;
-use crate::vol::{SharedVolume, Volume};
+use crate::vol::Volume;
+
+use super::SharedVolume;
 
 /// Wrapper for a volume which zeroizes the inner target on drop
 pub struct Secure<T, Enc>

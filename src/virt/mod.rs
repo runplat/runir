@@ -9,6 +9,8 @@ pub mod vol;
 mod atlas;
 pub use atlas::AtlasEncoder;
 
-mod archive;
+mod shared;
+pub use shared::SharedVolume;
 
+mod archive;
 mod secure;

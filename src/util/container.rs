@@ -1,14 +1,9 @@
-use std::{
-    io::{Cursor, Read},
-    marker::PhantomData,
-    sync::Arc,
-};
 use crate::{
     Data, IRecord, Index, Opts, Record, Storage,
     record::record_crc,
     util::{Packer, packer::GenericPacker},
-    virt::AtlasEncoder,
-    vol::{MemoryMappedTarget, SharedVolume, Volume, new_mmap_anon_target},
+    virt::{AtlasEncoder, SharedVolume},
+    vol::{MemoryMappedTarget, Volume, new_mmap_anon_target},
 };
 use ahash::HashSet;
 use anyhow::anyhow;
@@ -16,6 +11,11 @@ use bytes::{BufMut, Bytes, BytesMut};
 use generic_array::{GenericArray, typenum::U32};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::{
+    io::{Cursor, Read},
+    marker::PhantomData,
+    sync::Arc,
+};
 use tracing::debug;
 
 use super::{Peek, PeekExtensions};
@@ -708,7 +708,7 @@ impl<P: Packer> MultiRoot<P> {
                 Ok(Self {
                     state: State::Run {
                         record,
-                        vol: objects.into(),
+                        vol: objects.to_shared(),
                     },
                     _p: PhantomData,
                 })
