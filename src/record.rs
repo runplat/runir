@@ -6,7 +6,7 @@ use crate::{
 };
 use ascii::AsAsciiStr;
 use crc::{CRC_64_MS, Crc, Digest};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::{
     fmt::Debug,
@@ -513,12 +513,26 @@ pub fn record_crc(bytes: &[u8], ts: u64) -> u64 {
     crc.finalize()
 }
 
+impl Serialize for Record {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer
+    {
+        if let Some(peek) = self.peek().val() {
+            peek.serialize(serializer)
+        } else {
+            Err(<S::Error as serde::ser::Error>::custom("Record does not store an object-type"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::Record;
-    use crate::{record::Namespace, util::PeekExtensions, IRecord, Opts, RecordableExtensions};
+    use crate::{record::Namespace, util::PeekExtensions, Computed, IRecord, Opts, RecordableExtensions};
     use bytes::Bytes;
     use serde::{Deserialize, Serialize};
+    use toml::toml;
     use std::{collections::BTreeMap, time::Duration};
     use uuid::Uuid;
 
@@ -750,5 +764,20 @@ mod test {
         let staged = staged.stage(Bytes::from_static(b"hello world")).unwrap();
         assert!(staged.is_valid());
         assert!(staged.opts().is_staging());
+    }
+
+    #[test]
+    fn test_ser() {
+        let namespace = Namespace::ephemeral();
+
+        let data = toml! {
+            value = "hello world"
+        };
+
+        let rec = namespace.store("ser-rec", &data);
+        assert_eq!("hello world", Computed::mustache("{{value}}", &rec).unwrap().computed());
+
+        let rec = namespace.commit("nonser-rec", b"hello world");
+        assert!(Computed::mustache("{{value}}", &rec).is_err());
     }
 }
