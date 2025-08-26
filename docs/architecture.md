@@ -4,8 +4,6 @@ Modern data systems are increasingly composed of loosely coupled pipelines: ephe
 
 Most systems either bake in too many assumptions — like schemas, query languages, or storage backends — or push the burden of lifecycle management, deduplication, and auditability onto the user. This project was born out of a desire to **standardize the storage and mutation of structured data at the level of records**, without committing to any one view of how that data is interpreted or retrieved.
 
----
-
 ## Record System
 
 runir approaches this problem by treating **records** as the atomic unit of truth: immutable, content-addressed, and explicitly annotated with lifecycle and behavioral metadata.
@@ -13,8 +11,6 @@ runir approaches this problem by treating **records** as the atomic unit of trut
 Instead of modeling application data directly, runir models how data moves — how it gets written, mutated, archived, and indexed. Each record carries enough embedded context to describe how it should be handled by downstream systems without requiring coordination or global state.
 
 The goal is not to replace databases, file formats, or message queues — but to provide a **common substrate** that can safely power all of them, one durable, self-describing record at a time.
-
----
 
 ## Porcelain vs. Plumbing
 
@@ -31,8 +27,6 @@ Because of this design, runir provides:
 - Configurable runtime behavior to support indexing, archival, and ingestion flows
 
 Higher-level systems — indexing layers, object stores, event pipelines — can be built on top of this model without redefining core concepts like mutation, deduplication, or archival. runir provides a consistent substrate that remains agnostic to how records are interpreted or queried.
-
----
 
 ## Data Model
 

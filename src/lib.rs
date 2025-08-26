@@ -217,6 +217,14 @@ impl<'a, const REF_GUARD: bool, T: serde::Serialize> serde::Serialize
     }
 }
 
+pub mod prelude {
+    pub use crate::Namespace;
+    pub use crate::Record;
+    pub use crate::RecordableExtensions;
+    pub use crate::util::PeekExtensions;
+    pub use crate::util::PeekRefExtensions;
+}
+
 #[cfg(test)]
 mod test {
     use crate::*;

@@ -1,7 +1,10 @@
 [package]
 name = "runir"
-version = "0.1.0"
+description = "Data framework for building runtime intermediate representations"
+authors = ["runplat"]
+version = "0.1.0-alpha1"
 edition = "2024"
+license-file = "LICENSE"
 
 [features]
 default = ["tokio"]
