@@ -217,6 +217,28 @@ pub trait PeekExtensions<'peek> {
         self.val()
             .and_then(|v| flexbuffers::from_slice(v.buffer()).ok())
     }
+
+    /// Converts the current Peek into a Graph
+    /// 
+    /// Returns None if the the current position is empty
+    #[inline]
+    fn to_graph(self) -> Option<Graph<'peek>> 
+    where
+        Self: Sized
+    {
+        self.val().map(|p| p.into())
+    }
+
+    /// Converts the current Peek into a Graph
+    /// 
+    /// Returns None if the the current position is empty
+    #[inline]
+    fn to_node(self) -> Option<Node<'peek>>
+    where
+        Self: Sized
+    {
+        self.val().map(|p| p.into())
+    }
 }
 
 impl<'peek> PeekExtensions<'peek> for &'peek Peek<'peek> {
@@ -650,6 +672,8 @@ impl<'p> PeekRefExtensions<'p> for PeekRef<'p> {
 
 pub use peek_path::PeekPath;
 use serde::Deserialize;
+
+use crate::util::{Graph, Node};
 
 impl From<&str> for PeekPath {
     fn from(value: &str) -> Self {
