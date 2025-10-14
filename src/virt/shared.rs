@@ -17,13 +17,13 @@ pub struct SharedVolume<T, Enc>(Arc<RwLock<Volume<T, Enc>>>);
 impl<T, Enc> SharedVolume<T, Enc> {
     /// Returns a read lock guard for the vol
     #[inline]
-    pub fn vol(&self) -> RwLockReadGuard<Volume<T, Enc>> {
+    pub fn vol(&self) -> RwLockReadGuard<'_, Volume<T, Enc>> {
         self.0.read()
     }
 
     /// Returns a write lock guard for the vol
     #[inline]
-    pub fn vol_mut(&self) -> RwLockWriteGuard<Volume<T, Enc>> {
+    pub fn vol_mut(&self) -> RwLockWriteGuard<'_, Volume<T, Enc>> {
         self.0.write()
     }
 

@@ -607,11 +607,16 @@ impl HeaderAdapter {
         }
     }
 
+    /// Returns a range of bytes as a &str
+    /// 
+    /// Returns an empty string if the range is not valid ascii
+    #[inline]
     fn as_str(&self, range: impl std::ops::RangeBounds<usize>) -> &str {
         self.as_ascii(range).map(|a| a.as_str()).unwrap_or("")
     }
 
-    /// Returns a range of bytes,
+    /// Returns a range of bytes
+    #[inline]
     fn as_bytes(&self, range: impl std::ops::RangeBounds<usize>) -> Bytes {
         self.0.slice(range)
     }

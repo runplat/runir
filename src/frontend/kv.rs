@@ -392,7 +392,7 @@ impl KeySerdeValue {
     ///
     /// Allows getting data from the object without deserializing it into a full type
     #[inline]
-    pub fn peek(&self, key: &str) -> impl PeekExtensions {
+    pub fn peek(&self, key: &str) -> impl PeekExtensions<'_> {
         self.get_raw(key).and_then(|r| r.peek().val())
     }
 

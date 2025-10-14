@@ -408,7 +408,7 @@ impl<P: Packer> MultiRoot<P> {
     ///
     /// Note: This only supports inline, non-packed objects
     #[inline]
-    pub fn object(&self, layer: usize) -> impl PeekExtensions {
+    pub fn object(&self, layer: usize) -> impl PeekExtensions<'_> {
         self.try_object(layer).ok()
     }
 
@@ -418,7 +418,7 @@ impl<P: Packer> MultiRoot<P> {
     ///
     /// Note: This only supports inline, non-packed objects
     #[inline]
-    pub fn try_object(&self, layer: usize) -> crate::Result<Peek> {
+    pub fn try_object(&self, layer: usize) -> crate::Result<Peek<'_>> {
         self.try_content(layer)
             .and_then(|b| Ok(Peek::from(flexbuffers::Reader::get_root(b)?)))
     }
