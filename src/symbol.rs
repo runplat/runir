@@ -40,9 +40,7 @@ impl Computed {
         template: &mustache::Template,
         data: &impl Serialize,
     ) -> crate::Result<Self> {
-        Self::try_compute(|| {
-            Ok(template.render_to_string(data)?)
-        })
+        Self::try_compute(|| Ok(template.render_to_string(data)?))
     }
 
     /// Computes a symbol w/ closure
@@ -54,7 +52,7 @@ impl Computed {
     }
 
     /// Computes a symbole w/ closure
-    /// 
+    ///
     /// Returns an error if the closure returns an error
     #[inline]
     pub fn try_compute(c: impl FnOnce() -> crate::Result<String>) -> crate::Result<Self> {
@@ -80,7 +78,10 @@ impl Symbol for Computed {
 #[cfg(test)]
 mod test {
     use super::Computed;
-    use crate::{util::{Intern, PeekExtensions}, IRecord, Namespace};
+    use crate::{
+        IRecord, Namespace,
+        util::{Intern, PeekExtensions},
+    };
     use toml::toml;
 
     #[test]
@@ -111,5 +112,22 @@ mod test {
 
         let s = Computed::mustache("{{name}}-test", &rec.peek().val().unwrap()).unwrap();
         assert_eq!("test-test", s.computed());
+
+        let rec = Namespace::ephemeral().store(
+            "ex",
+            &toml! {
+            name = "test"
+            obj = { name = "test-obj" }
+            [obj2.test.table]
+            name = "nested"
+            },
+        );
+
+        let s = Computed::mustache(
+            "{{name}}-{{obj.name}}/{{obj2.test.table.name}}",
+            &rec.peek().val().unwrap(),
+        )
+        .unwrap();
+        assert_eq!("test-test-obj/nested", s.computed());
     }
 }
