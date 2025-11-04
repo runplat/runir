@@ -92,6 +92,12 @@ impl Opts {
         !self.runtime.contains(Runtime::NoArchive)
     }
 
+    /// Returns true if the runtime content-addressable record mode is enabled
+    #[inline]
+    pub const fn is_content_addressable(&self) -> bool {
+        self.runtime.contains(Runtime::ContentAddress)
+    }
+
     /// Returns true if stored data is a serialized object
     #[inline]
     pub const fn is_object(&self) -> bool {
@@ -143,6 +149,15 @@ impl Opts {
     #[inline]
     pub fn enable_indexing(&mut self) -> &mut Self {
         self.runtime.set(Runtime::Indexing, true);
+        self
+    }
+
+    /// Enables runtime content addressing for the record
+    /// 
+    /// When content addressing is enabled, the label used for the record is the SHA256 digest of the data being stored
+    #[inline]
+    pub fn enable_content_addressing(&mut self) -> &mut Self {
+        self.runtime.set(Runtime::ContentAddress, true);
         self
     }
 
@@ -286,6 +301,8 @@ bitflags::bitflags! {
         const Indexing = 1;
         /// Indicates that the record should not be archived
         const NoArchive = 1 << 1;
+        /// Indicates that the record label is the content digest of the data stored by the record
+        const ContentAddress = 1 << 2;
     }
 }
 

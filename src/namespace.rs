@@ -3,8 +3,10 @@ use bytes::BufMut;
 use bytes::Bytes;
 use bytes::BytesMut;
 use serde::Serialize;
+use sha2::Digest;
 
 use crate::Computed;
+use crate::Data;
 use crate::IRecord;
 use crate::Opts;
 use crate::RawRecordable;
@@ -117,12 +119,12 @@ impl Namespace {
     }
 
     /// Returns a "linked" namespace
-    /// 
+    ///
     /// Note: The link is non-directional, for example
-    /// 
+    ///
     /// ```rs no_run
     /// assert_eq!(
-    ///     Namespace::from("parent").link("child").chk(), 
+    ///     Namespace::from("parent").link("child").chk(),
     ///     Namespace::from("child").link("parent").chk()
     /// )
     /// ```
@@ -143,14 +145,14 @@ impl Namespace {
 
     /// Returns a new empty record under this namespace
     #[inline]
-    pub fn record(&self, label: &str) -> Record {
+    pub fn record(&self, label: impl Symbol) -> Record {
         Record::create(label, self.clone()).with_opts(self.opts)
     }
 
     /// Returns the key value for a label under this namespace
     #[inline]
-    pub fn key(&self, label: &str) -> u64 {
-        self.hash_state().hash_one(label)
+    pub fn key(&self, label: impl Symbol) -> u64 {
+        self.hash_state().hash_one(label.symbol())
     }
 
     /// Returns the checksum value for the namespace
@@ -228,7 +230,7 @@ impl Namespace {
     #[inline]
     pub fn store<'a, T: Serialize + 'a>(
         &self,
-        label: &str,
+        label: impl Symbol,
         recordable: impl Into<RawRecordable<'a, T>>,
     ) -> Record {
         let recordable = recordable.into();
@@ -253,7 +255,7 @@ impl Namespace {
     #[inline]
     pub fn author(
         &self,
-        label: &str,
+        label: impl Symbol,
         author: impl Fn(flexbuffers::Builder) -> flexbuffers::Builder,
     ) -> Record {
         let mut record = self.record(label).commit(Bytes::from(
@@ -269,9 +271,52 @@ impl Namespace {
 
     /// Authors a flexbuffer root that will become the committed value of the record
     #[inline]
-    pub fn commit(&self, label: &str, commit: impl AsRef<[u8]> + Send + 'static) -> Record {
+    pub fn commit(&self, label: impl Symbol, commit: impl AsRef<[u8]> + Send + 'static) -> Record {
         let record = self.record(label).commit(Bytes::from_owner(commit));
         record
+    }
+
+    /// Authors a content-addressable record
+    ///
+    /// Content based records use the digest of the data being stored as the label for the record
+    #[inline]
+    pub fn content(&self, commit: impl AsRef<[u8]> + Send + 'static) -> Record {
+        let data: Data = Bytes::from_owner(commit).into();
+
+        let digest = data.digest().finalize();
+
+        let mut record = self.record(digest.as_slice());
+        record
+            .opts_mut()
+            .expect("should always be able to mutate options from a full record")
+            .enable_content_addressing();
+        record.commit(data)
+    }
+
+    /// Authors a content-addressable record
+    ///
+    /// Content based records use the digest of the data being stored as the label for the record
+    #[inline]
+    pub fn store_content<'a, T: Serialize + 'a>(
+        &self,
+        recordable: impl Into<RawRecordable<'a, T>>,
+    ) -> std::io::Result<Record> {
+        let recordable = recordable.into();
+        let mut ser = flexbuffers::FlexbufferSerializer::new();
+
+        if let Ok(()) = recordable.serialize(&mut ser) {
+            let mut record = self.content(ser.take_buffer());
+            record
+                .opts_mut()
+                .expect("should always be able to mutate options from a full record")
+                .set_object_storage(true);
+            Ok(record)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Content could not be serialized into a flexbuffer root",
+            ))
+        }
     }
 
     /// Materialized the hash_state for this namespace
@@ -339,6 +384,8 @@ impl std::fmt::Debug for Namespace {
 
 #[cfg(test)]
 mod test {
+    use toml::toml;
+
     use super::*;
     #[test]
     fn test_namespace_clone() {
@@ -387,5 +434,20 @@ mod test {
         let child = parent.link("child");
 
         assert_eq!(Namespace::from("child").link("parent").chk(), child.chk())
+    }
+
+    #[test]
+    fn test_content_record() {
+        let ns = Namespace::from("parent");
+        let rec = ns.content(b"hello content world");
+        assert_eq!(5375960761030796443, rec.index_key());
+    }
+
+    #[test]
+    fn test_content_store_record() {
+        let ns = Namespace::from("parent");
+        let obj = toml! { value = "hello world" }; 
+        let rec = ns.store_content(&obj).unwrap();
+        assert_eq!(11186984600710252212, rec.index_key());
     }
 }

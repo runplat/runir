@@ -1,8 +1,5 @@
 use crate::{
-    Data, Namespace, Opts,
-    archive::{self, Entry, HeaderBuilder, Sha256Digest},
-    opts::Branch,
-    util::{Peek, PeekExtensions},
+    Data, Namespace, Opts, Symbol, archive::{self, Entry, HeaderBuilder, Sha256Digest}, opts::Branch, util::{Peek, PeekExtensions}
 };
 use ascii::AsAsciiStr;
 use crc::{CRC_64_MS, Crc, Digest};
@@ -225,7 +222,7 @@ pub struct Record {
 impl Record {
     /// Creates a new record
     #[inline]
-    pub fn create(label: &str, ns: impl Into<Namespace>) -> Record {
+    pub fn create(label: impl Symbol, ns: impl Into<Namespace>) -> Record {
         let ns = ns.into();
         let key = ns.key(label);
         let opts = ns.opts();

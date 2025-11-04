@@ -75,6 +75,12 @@ impl Symbol for Computed {
     }
 }
 
+impl Symbol for &[u8] {
+    fn symbol(&self) -> &impl Hash {
+        self
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::Computed;
