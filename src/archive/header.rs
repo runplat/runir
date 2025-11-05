@@ -4,7 +4,7 @@ use std::{fmt::Display, io::Error, os::unix::fs::MetadataExt, path::Path};
 use tracing::{trace, warn};
 
 /// 65534 is a symbolic value for NO_OWNER/NO_GROUP
-/// 
+///
 /// Reference: https://en.wikipedia.org/wiki/User_identifier#Special_values
 const NO_OWNER_NO_GROUP: u16 = u16::MAX - 1;
 
@@ -236,17 +236,51 @@ impl HeaderBuilder {
         let gnu = bytes.slice_ref(&bytes[..257]);
         let gnu = GNUHeader(HeaderAdapter(gnu));
 
-        let ustar = bytes.slice_ref(&bytes[257..]);
-        let ustar = HeaderAdapter(ustar);
+        let ext = bytes.slice_ref(&bytes[257..]);
+        let ext = Extension::parse_from_ext_bytes(ext);
         Ok(Header {
             bytes,
             gnu,
-            ustar: if ustar.as_str(0..6) == "ustar\0" {
-                Some(UStarHeader(ustar))
-            } else {
-                None
-            },
+            ext,
         })
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+enum Extension {
+    #[default]
+    None,
+    Ustar(UStarHeader),
+    Runir(RunirHeader),
+}
+
+impl Extension {
+    #[inline]
+    fn parse_from_ext_bytes(ext: Bytes) -> Extension {
+        let adapter = HeaderAdapter(ext);
+        match adapter.as_str(0..6) {
+            "ustar\0" => Extension::Ustar(UStarHeader(adapter)),
+            "runir\0" => Extension::Runir(RunirHeader(adapter)),
+            _ => Extension::None,
+        }
+    }
+
+    /// Returns a reference as a ustar header, otherwise None if the current extension is not a ustar header
+    #[inline]
+    fn as_ustar(&self) -> Option<&UStarHeader> {
+        match self {
+            Extension::Ustar(ustar) => Some(&ustar),
+            _ => None
+        }
+    }
+
+    /// Returns a reference as a runir header, otherwise None if the current extension is not a runir header
+    #[inline]
+    fn as_runir(&self) -> Option<&RunirHeader> {
+        match self {
+            Extension::Runir(runir) => Some(&runir),
+            _ => None
+        }
     }
 }
 
@@ -259,14 +293,14 @@ pub struct Header {
     /// GNU-part of the header, this should be the same across all formats.
     gnu: GNUHeader,
     /// If set, it means that the "ustar" indicator was present
-    ustar: Option<UStarHeader>,
+    ext: Extension,
 }
 
 /// Empty Entry Header,
 pub static EMPTY_HEADER: Header = Header {
     bytes: Bytes::new(),
     gnu: GNUHeader(HeaderAdapter::new()),
-    ustar: None,
+    ext: Extension::None,
 };
 
 impl Header {
@@ -355,37 +389,43 @@ impl Header {
     /// UStar version
     #[inline]
     pub fn version(&self) -> Option<&str> {
-        self.ustar.as_ref().map(|u| u.version())
+        self.ext.as_ustar().map(|u| u.version())
     }
 
     /// UStar owner name
     #[inline]
     pub fn owner_name(&self) -> Option<&str> {
-        self.ustar.as_ref().map(|u| u.owner_name())
+        self.ext.as_ustar().map(|u| u.owner_name())
     }
 
     /// UStar group name
     #[inline]
     pub fn group_name(&self) -> Option<&str> {
-        self.ustar.as_ref().map(|u| u.group_name())
+        self.ext.as_ustar().map(|u| u.group_name())
     }
 
     /// UStar device major no
     #[inline]
     pub fn device_major_no(&self) -> Option<&str> {
-        self.ustar.as_ref().map(|u| u.device_major_no())
+        self.ext.as_ustar().map(|u| u.device_major_no())
     }
 
     /// UStar device minor no
     #[inline]
     pub fn device_minor_no(&self) -> Option<&str> {
-        self.ustar.as_ref().map(|u| u.device_minor_no())
+        self.ext.as_ustar().map(|u| u.device_minor_no())
     }
 
     /// UStar filename prefix
     #[inline]
     pub fn filename_prefix(&self) -> Option<&str> {
-        self.ustar.as_ref().map(|u| u.filename_prefix())
+        self.ext.as_ustar().map(|u| u.filename_prefix())
+    }
+
+    /// Runir version
+    #[inline]
+    pub fn runir_version(&self) -> Option<&str> {
+        self.ext.as_runir().map(|r| r.version())
     }
 }
 
@@ -560,6 +600,19 @@ impl UStarHeader {
     }
 }
 
+/// 
+/// 
+#[derive(Debug, Clone)]
+struct RunirHeader(HeaderAdapter);
+
+impl RunirHeader {
+    /// Returns the runir header ext version
+    #[inline]
+    fn version(&self) -> &str {
+        self.0.as_str(6..6 + 2)
+    }
+}
+
 /// Adapter that provides common fn's for working with the bytes of an archive entry header,
 #[derive(Clone, Debug, Default)]
 struct HeaderAdapter(Bytes);
@@ -608,7 +661,7 @@ impl HeaderAdapter {
     }
 
     /// Returns a range of bytes as a &str
-    /// 
+    ///
     /// Returns an empty string if the range is not valid ascii
     #[inline]
     fn as_str(&self, range: impl std::ops::RangeBounds<usize>) -> &str {
@@ -657,17 +710,13 @@ impl From<&[u8]> for Header {
             let gnu = bytes.slice_ref(&bytes[..257]);
             let gnu = GNUHeader(HeaderAdapter(gnu));
 
-            let ustar = bytes.slice_ref(&bytes[257..]);
-            let ustar = HeaderAdapter(ustar);
+            let ext = bytes.slice_ref(&bytes[257..]);
+            let ext = Extension::parse_from_ext_bytes(ext);
 
             Header {
                 bytes,
                 gnu,
-                ustar: if ustar.as_str(0..6) == "ustar\0" {
-                    Some(UStarHeader(ustar))
-                } else {
-                    None
-                },
+                ext,
             }
         }
     }
@@ -707,7 +756,7 @@ impl Display for UStarHeader {
 impl Display for Header {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.gnu)?;
-        self.ustar.as_ref().map(|u| write!(f, "{u}"));
+        self.ext.as_ustar().map(|u| write!(f, "{u}"));
         Ok(())
     }
 }
