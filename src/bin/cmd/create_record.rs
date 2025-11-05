@@ -45,7 +45,7 @@ impl CreateRecord {
                 content
             };
 
-            let record = ns.commit(&label, content);
+            let record = ns.commit(label.as_str(), content);
             let mut container = Container::build(record);
 
             let content_digest = hex::encode(container.content());
@@ -112,19 +112,19 @@ impl CreateRecord {
                     let yaml = serde_yaml::from_str::<serde_yaml::Value>(&content)
                         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-                    Ok(ns.store(&label, &yaml))
+                    Ok(ns.store(label.as_str(), &yaml))
                 }
                 ObjectFormat::Json => {
                     let json = serde_json::from_str::<serde_json::Value>(&content)
                         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-                    Ok(ns.store(&label, &json))
+                    Ok(ns.store(label.as_str(), &json))
                 }
                 ObjectFormat::Toml => {
                     let toml = toml::from_str::<toml::Value>(&content)
                         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-                    Ok(ns.store(&label, &toml))
+                    Ok(ns.store(label.as_str(), &toml))
                 }
             }
         } else {
@@ -144,7 +144,7 @@ impl CreateRecord {
             };
 
             debug!("Storing content as raw binary data");
-            Ok(ns.commit(&label, bytes))
+            Ok(ns.commit(label.as_str(), bytes))
         }
     }
 }
