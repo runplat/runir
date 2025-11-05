@@ -194,15 +194,7 @@ impl Namespace {
     pub fn decode(encoded: [uuid::Uuid; 3]) -> Option<Self> {
         let [(k1, k2), (k3, k4), (ns_chk, opts)] = encoded.map(|g| g.as_u64_pair());
 
-        let ns = Self {
-            k1,
-            k2,
-            k3,
-            k4,
-            opts: Opts::decode(opts),
-            random_state: OnceLock::new(),
-        };
-
+        let ns = Self::const_new([k1, k2, k3, k4], Opts::decode(opts));
         Some(ns).filter(|n| n.chk() == ns_chk)
     }
 
@@ -284,8 +276,8 @@ impl Namespace {
         let data: Data = Bytes::from_owner(commit).into();
 
         let digest = data.digest().finalize();
-
-        let mut record = self.record(digest.as_slice());
+        let content_digest = digest.as_slice();
+        let mut record = self.record(content_digest);
         record
             .opts_mut()
             .expect("should always be able to mutate options from a full record")
@@ -319,14 +311,22 @@ impl Namespace {
         }
     }
 
-    /// Materialized the hash_state for this namespace
-    fn hash_state(&self) -> &RandomState {
-        if self.k1 == 0 && self.k2 == 0 && self.k3 == 0 && self.k4 == 0 {
-            self.random_state.get_or_init(RandomState::new)
-        } else {
-            self.random_state
-                .get_or_init(|| RandomState::with_seeds(self.k1, self.k2, self.k3, self.k4))
+    /// Transfer a record into this namespace
+    ///
+    /// Returns an error if the record is not content-addressable
+    #[inline]
+    pub fn transfer(&self, record: impl IRecord) -> std::io::Result<Record> {
+        if !record.opts().is_content_addressable() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Record must be content-addressable to transfer namespaces",
+            ));
         }
+
+        Ok(self
+            .record(record.content().as_slice())
+            .with_opts(record.opts().clone())
+            .commit(record.bytes()))
     }
 
     /// Returns an encoded string of the namespace
@@ -340,6 +340,16 @@ impl Namespace {
 
         let keys = &buf.as_ref()[..32];
         format!("{}_{}", hex::encode(keys), self.ns_uuid().simple())
+    }
+
+    /// Materialized the hash_state for this namespace
+    fn hash_state(&self) -> &RandomState {
+        if self.k1 == 0 && self.k2 == 0 && self.k3 == 0 && self.k4 == 0 {
+            self.random_state.get_or_init(RandomState::new)
+        } else {
+            self.random_state
+                .get_or_init(|| RandomState::with_seeds(self.k1, self.k2, self.k3, self.k4))
+        }
     }
 }
 
@@ -446,8 +456,24 @@ mod test {
     #[test]
     fn test_content_store_record() {
         let ns = Namespace::from("parent");
-        let obj = toml! { value = "hello world" }; 
+        let obj = toml! { value = "hello world" };
         let rec = ns.store_content(&obj).unwrap();
         assert_eq!(11186984600710252212, rec.index_key());
+    }
+
+    #[test]
+    fn test_transfer_record() {
+        let ns1 = Namespace::from("ns1");
+        let ns2 = Namespace::from("ns2");
+
+        let rec = ns1.content(b"hello world");
+        let transferred = ns2.transfer(&rec).unwrap();
+        assert_eq!(transferred.bytes(), b"hello world");
+        assert_ne!(rec.index_key(), transferred.index_key());
+        assert_ne!(rec.ns_chk(), transferred.ns_chk());
+        assert_eq!(rec.content(), transferred.content());
+
+        let non_addr = ns1.commit("non-transferrable", b"hello non-transfer");
+        assert!(ns2.transfer(non_addr).is_err())
     }
 }
