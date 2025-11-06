@@ -271,9 +271,8 @@ impl<R: IRecord> From<R> for Unit<R> {
 mod tests {
     use crate::{
         IRecord, Namespace,
-        wire::{ContentAddress, Unit, unit_namespace},
+        wire::{Unit, unit_namespace},
     };
-    use std::u64;
     use toml::toml;
     use uuid::Uuid;
 
@@ -283,8 +282,8 @@ mod tests {
             name = "test"
             fields = [
                 { name = "control", type = "u8"},
+                { name = "ts", type = "u64" },
                 { name = "registry", type = "uuid" },
-                { name = "ts", type = "u64" }
             ]
         };
 
