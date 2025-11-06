@@ -140,6 +140,12 @@ impl Opts {
         self.is_deleted() && !self.is_staging()
     }
 
+    /// Returns true if the record is a wire unit
+    #[inline]
+    pub fn is_wire_unit(&self) -> bool {
+        self.runtime.contains(Runtime::WireUnit)
+    }
+
     /// Enables runtime indexing behavior for the record.
     ///
     /// This does **not** guarantee the record will appear in an index,
@@ -158,6 +164,22 @@ impl Opts {
     #[inline]
     pub fn enable_content_addressing(&mut self) -> &mut Self {
         self.runtime.set(Runtime::ContentAddress, true);
+        self
+    }
+
+    /// Enables runtime wire unit mode for the record
+    /// 
+    /// When wire unit mode is enabled, the record data will be a structured "unit" object.
+    /// A "unit" object is a reflection of a record, which effectively shares the same
+    /// index_key, w/ a fixed-sized object that can be used to perform wire "functions" against a stable
+    /// address
+    /// 
+    /// Note: This option requires that object-storage is enabled, if object-storage is not enabled this is a No-op
+    #[inline]
+    pub fn enable_wire_unit(&mut self) -> &mut Self {
+        if self.is_object() {
+            self.runtime.set(Runtime::WireUnit, true);
+        }
         self
     }
 
@@ -303,6 +325,8 @@ bitflags::bitflags! {
         const NoArchive = 1 << 1;
         /// Indicates that the record label is the content digest of the data stored by the record
         const ContentAddress = 1 << 2;
+        /// Indicates that a record is a wire "Unit" record
+        const WireUnit = 1 << 3;
     }
 }
 
