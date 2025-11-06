@@ -68,16 +68,16 @@ impl Namespace {
         let namespace = namespace.symbol();
 
         let init_hash = ahash::RandomState::with_seeds(1, 0, 0, 0);
-        let k1 = init_hash.hash_one(namespace);
+        let k1 = init_hash.hash_one(&namespace);
 
         let init_hash = ahash::RandomState::with_seeds(0, 1, 0, 0);
-        let k2 = init_hash.hash_one(namespace);
+        let k2 = init_hash.hash_one(&namespace);
 
         let init_hash = ahash::RandomState::with_seeds(0, 0, 1, 0);
-        let k3 = init_hash.hash_one(namespace);
+        let k3 = init_hash.hash_one(&namespace);
 
         let init_hash = ahash::RandomState::with_seeds(0, 0, 0, 1);
-        let k4 = init_hash.hash_one(namespace);
+        let k4 = init_hash.hash_one(&namespace);
 
         Namespace {
             k1,

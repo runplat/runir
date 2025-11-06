@@ -5,12 +5,12 @@ use std::hash::Hash;
 /// Super-trait for "symbols" which are used for deriving the keyform of namespaces and record labels
 pub trait Symbol: Sized {
     /// Returns a the canonical hash reference of the symbol
-    fn symbol(&self) -> &impl Hash;
+    fn symbol(&self) -> impl Hash;
 }
 
 impl Symbol for &str {
     #[inline]
-    fn symbol(&self) -> &impl Hash {
+    fn symbol(&self) -> impl Hash {
         self
     }
 }
@@ -70,13 +70,13 @@ impl Computed {
 
 impl Symbol for Computed {
     #[inline]
-    fn symbol(&self) -> &impl Hash {
+    fn symbol(&self) -> impl Hash {
         &self.computed
     }
 }
 
 impl Symbol for &[u8] {
-    fn symbol(&self) -> &impl Hash {
+    fn symbol(&self) -> impl Hash {
         self
     }
 }

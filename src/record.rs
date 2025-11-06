@@ -777,4 +777,11 @@ mod test {
         let rec = namespace.commit("nonser-rec", b"hello world");
         assert!(Computed::mustache("{{value}}", &rec).is_err());
     }
+
+    #[test]
+    fn test_empty_record_index_key_matches() {
+        let ns = Namespace::new("test");
+        let rec = ns.commit("example", b"hello world");
+        assert_eq!(rec.index_key(), ns.record("example").index_key());
+    }
 }
