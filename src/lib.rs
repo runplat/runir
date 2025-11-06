@@ -69,6 +69,9 @@ mod queue;
 pub use queue::Queue;
 pub use queue::Pusher;
 
+pub mod wire;
+pub mod env;
+
 /// Provides extensions for configuring a type before it is committed as a record
 pub trait RecordableExtensions {
     /// Enables the record to be indexed
