@@ -209,6 +209,8 @@ pub trait PeekExtensions<'peek> {
     fn val(self) -> Option<Peek<'peek>>;
 
     /// Deserializes the current buffer as some object
+    /// 
+    /// Note: This will deserialize the entire object, not just the bytes at the current portion of the buffer
     #[inline]
     fn to_obj<T: Deserialize<'peek>>(self) -> Option<T>
     where
