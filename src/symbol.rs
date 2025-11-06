@@ -8,13 +8,6 @@ pub trait Symbol: Sized {
     fn symbol(&self) -> impl Hash;
 }
 
-impl Symbol for &str {
-    #[inline]
-    fn symbol(&self) -> impl Hash {
-        self
-    }
-}
-
 /// Provides functions for computing a symbol
 #[derive(Hash)]
 pub struct Computed {
@@ -76,6 +69,14 @@ impl Symbol for Computed {
 }
 
 impl Symbol for &[u8] {
+    #[inline]
+    fn symbol(&self) -> impl Hash {
+        self
+    }
+}
+
+impl Symbol for &str {
+    #[inline]
     fn symbol(&self) -> impl Hash {
         self
     }
