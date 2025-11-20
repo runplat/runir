@@ -13,7 +13,6 @@ pub(crate) use interner::impl_interner;
 mod graph;
 pub use graph::Graph;
 pub use graph::GraphExtensions;
-pub use graph::Component;
 pub use graph::Node;
 
 mod peek;

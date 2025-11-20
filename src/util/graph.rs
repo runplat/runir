@@ -169,8 +169,6 @@
 //! Last stage is being able to do this across a wide range of peek situations.
 //!
 
-use serde::Deserialize;
-
 use crate::util::{Intern, Peek, PeekExtensions};
 use std::sync::Arc;
 
@@ -250,49 +248,24 @@ impl<'peek> Clone for Graph<'peek> {
     }
 }
 
-/// Trait for types that can project from a Peek
-pub trait Component<'peek>: Deserialize<'peek> + Sized {
-    const SYMBOL: &'static str;
-}
-
 /// API for working with graph model
 pub trait GraphExtensions<'peek> {
-    /// Returns a component from the graph
-    fn of<C: Component<'peek>>(&self) -> Option<C> {
-        self.of_ty(C::SYMBOL)
-            .and_then(|c| c.val().and_then(|v| v.to_obj::<C>()))
-    }
-
-    /// Returns a component from the graph as type `C`
-    fn of_as<C: Component<'peek>>(&self, name: &str) -> Option<C> {
-        self.of_ty(name).and_then(|v| v.to_obj::<C>())
-    }
-
     /// Returns a component from the graph by name
-    fn of_ty(&self, name: &str) -> Option<Node<'peek>>;
+    fn of(&self, name: &str) -> Option<Node<'peek>>;
 }
 
 impl<'peek> GraphExtensions<'peek> for Graph<'peek> {
-    fn of_ty(&self, name: &str) -> Option<Node<'peek>> {
+    fn of(&self, name: &str) -> Option<Node<'peek>> {
         self.map.get(name).map(|v| v.clone())
     }
 }
 
 impl<'peek> GraphExtensions<'peek> for Node<'peek> {
-    fn of_ty(&self, name: &str) -> Option<Node<'peek>> {
+    fn of(&self, name: &str) -> Option<Node<'peek>> {
         match self {
             Node::Single(..) => None,
-            Node::Composite(graph) => graph.of_ty(name),
+            Node::Composite(graph) => graph.of(name),
         }
-    }
-}
-
-impl<'peek> GraphExtensions<'peek> for Option<Node<'peek>> {
-    fn of_ty(&self, name: &str) -> Option<Node<'peek>> {
-        self.as_ref().and_then(|v| match v {
-            Node::Single(..) => None,
-            Node::Composite(graph) => graph.of_ty(name),
-        })
     }
 }
 
@@ -446,11 +419,9 @@ impl<'peek> PeekExtensions<'peek> for Option<Node<'peek>> {
 
 #[cfg(test)]
 mod tests {
-    use serde::Deserialize;
-
     use crate::{
         IRecord, Namespace,
-        util::{Graph, GraphExtensions, PeekExtensions, graph::Component},
+        util::{Graph, GraphExtensions, PeekExtensions},
     };
 
     #[test]
@@ -474,21 +445,15 @@ mod tests {
         graph.insert("component1", component.peek().val().unwrap().into());
         graph.insert("component2", component2.peek().val().unwrap().into());
 
-        assert_eq!(graph.of::<Component1>().unwrap().value, "cool component");
         assert_eq!(
-            graph.of_ty("component1").at("value").str().unwrap(),
+            graph.of("component1").at("value").str().unwrap(),
             "cool component"
         );
 
-        // Try duck-typing
-        assert_eq!(
-            graph.of_as::<Component1>("component2").unwrap().value,
-            "cool component"
-        );
         assert_eq!(
             graph
                 .to_node()
-                .of_ty("component1")
+                .of("component2")
                 .at("value")
                 .str()
                 .unwrap(),
@@ -517,34 +482,18 @@ mod tests {
         graph.insert("component1", component.peek().to_node().unwrap());
         graph.insert("component2", component2.peek().to_node().unwrap());
 
-        assert_eq!(graph.of::<Component1>().unwrap().value, "cool component");
         assert_eq!(
-            graph.of_ty("component1").at("value").str().unwrap(),
-            "cool component"
-        );
-
-        // Try duck-typing
-        assert_eq!(
-            graph.of_as::<Component1>("component2").unwrap().value,
+            graph.of("component1").at("value").str().unwrap(),
             "cool component"
         );
         assert_eq!(
             graph
                 .to_node()
-                .of_ty("component1")
+                .of("component2")
                 .at("value")
                 .str()
                 .unwrap(),
             "cool component"
         );
-    }
-
-    #[derive(Deserialize)]
-    struct Component1<'peek> {
-        value: &'peek str,
-    }
-
-    impl<'peek> Component<'peek> for Component1<'peek> {
-        const SYMBOL: &'static str = "component1";
     }
 }
