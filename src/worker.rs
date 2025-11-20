@@ -2,7 +2,7 @@ use crate::{
     IRecord, Index, Record, Storage,
     archive::Entry,
     store::StoreSettings,
-    vol::{Volume, new_memory_target},
+    vol::{Volume, new_mmap_anon_target},
 };
 use crossbeam::utils::Backoff;
 use futures::future::RemoteHandle;
@@ -105,13 +105,18 @@ impl Worker {
                 if !entries.is_empty() {
                     /*
                        TODO:
-                       For now this uses an in-memory volume to store entries before pushing the member to the store
 
                        Ideally, some pipeline exists that manages going from Vec<Records> -> Volume -> ArchiveMember,
                        that can be plugged-in below, and specified in StoreSettings
                     */
                     debug!(total_size, "Creating new archive_member for {archive_path:?}");
-                    let output = Volume::new_archive(new_memory_target(archive_path, total_size));
+
+                    /*
+                        TODO:
+
+                        Handle mmap_anon error case (probably an edge case)
+                     */
+                    let output = Volume::new_archive(new_mmap_anon_target(archive_path, total_size)?);
                     let mut member = output.archive(entries).await?.to_archive_member()?;
                     let backoff = Backoff::new();
                     while let Some(retry) = packer.push(member) {
