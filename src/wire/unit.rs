@@ -39,17 +39,18 @@ pub fn unit_namespace() -> Namespace {
 
 #[derive(Debug)]
 pub enum Type {
-    /// Field is an unsigned 8-bit integer
-    U8,
-    /// Field is an unsigned 64-bit integer
-    U64,
-    /// Field is a UUID struct
-    UUID,
+    /// Field is a bitfield-flag 8-bit unsigned integer
+    Flag,
+    /// Field is a number stored in a 64-bit unsigned integer
+    Number,
+    /// Field is a struct stored w/ UUID semantics
+    Struct,
 }
 
 /// Defines and extrapolates settings of a wire "unit"
 pub struct Unit<R> {
-    definition: R,
+    /// Lifecycle driving the unit implementation
+    lifecycle: R,
 }
 
 impl<R> Unit<R>
@@ -59,13 +60,13 @@ where
     /// Returns the name of the unit definition
     #[inline]
     pub fn name(&self) -> &str {
-        self.definition.field("name").str().unwrap_or_default()
+        self.lifecycle.field("name").str().unwrap_or_default()
     }
 
     /// Returns an iterator over all fields defined in the unit
     #[inline]
     pub fn fields(&self) -> Option<impl Iterator<Item = Field<'_>>> {
-        self.definition.field("fields").iter().map(|f| {
+        self.lifecycle.field("fields").iter().map(|f| {
             f.filter_map(|fd| {
                 let name = fd.clone().at("name").str();
                 let ty = fd.clone().at("type").str();
@@ -74,9 +75,9 @@ where
                     Some(Field {
                         name: n,
                         ty: match t {
-                            "u8" => Type::U8,
-                            "u64" => Type::U64,
-                            "uuid" => Type::UUID,
+                            "u8" => Type::Flag,
+                            "u64" => Type::Number,
+                            "uuid" => Type::Struct,
                             _ => {
                                 debug!(field = n, "Field `type` uses an unknown type `{t}`");
                                 return None;
@@ -104,7 +105,6 @@ where
         */
 
         let fields = rec.fields(&["unit", "len", "content", "object"]);
-
         if let [unit, len, content, object, ..] = fields.as_slice() {
             let unit_name = self.name();
             if unit.str() != Some(unit_name) {
@@ -130,20 +130,20 @@ where
                 for Field { name, ty } in fields {
                     if let Some(field) = object.at(name) {
                         match ty {
-                            Type::U8 => {
+                            Type::Flag => {
                                 let is_u8 = field.flexbuffer_type().is_uint()
                                     && field.bitwidth() == BitWidth::W8;
                                 if !is_u8 {
                                     return Err(anyhow!("Record is not a valid Unit Record of unit `{unit_name}`, expected field `{name}` to be a u8").into());
                                 }
                             }
-                            Type::U64 => {
+                            Type::Number => {
                                 let is_u64 = field.get_u64().is_ok();
                                 if !is_u64 {
                                     return Err(anyhow!("Record is not a valid Unit Record of unit `{unit_name}`, expected field `{name}` to be a u64").into());
                                 }
                             }
-                            Type::UUID => {
+                            Type::Struct => {
                                 let is_uuid = field.as_blob().0.len() == 16;
                                 if !is_uuid {
                                     return Err(anyhow!("Record is not a valid Unit Record of unit `{unit_name}`, expected field `{name}` to be a uuid").into());
@@ -263,7 +263,7 @@ impl Namespace {
 
 impl<R: IRecord> From<R> for Unit<R> {
     fn from(value: R) -> Self {
-        Unit { definition: value }
+        Unit { lifecycle: value }
     }
 }
 
@@ -289,7 +289,7 @@ mod tests {
 
         let unit = unit_namespace().store("test", &def);
 
-        let unit = Unit { definition: unit };
+        let unit = Unit { lifecycle: unit };
         assert_eq!(unit.name(), "test");
 
         let fields = unit.fields().unwrap().collect::<Vec<_>>();
@@ -331,7 +331,7 @@ mod tests {
             fb
         });
 
-        let unit = Unit { definition: unit };
+        let unit = Unit { lifecycle: unit };
         assert_eq!(unit.name(), "test");
 
         let fields = unit.fields().unwrap().collect::<Vec<_>>();
