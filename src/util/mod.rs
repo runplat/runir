@@ -28,6 +28,9 @@ pub use executor::Executor;
 mod run;
 pub use run::RunCell;
 
+pub mod fbext;
+pub mod annotate;
+
 pub mod fs;
 
 
