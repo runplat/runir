@@ -12,13 +12,16 @@ use object_store::Result;
 use object_store::Error;
 use object_store::path::Path as ObjectPath;
 
-#[derive(Debug)]
-struct RunirStore {}
+use crate::Namespace;
 
-impl Display for RunirStore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
-    }
+/// Implements `object-store` using runir systems
+/// 
+/// TODO:
+/// This is essentially the same implementation as what `runir kv` does.
+/// So port that logic here, and then the cli can use this as it's implementation instead.
+#[derive(Debug)]
+struct RunirStore {
+    todo: String,
 }
 
 #[async_trait]
@@ -29,6 +32,16 @@ impl ObjectStore for RunirStore {
         payload: PutPayload,
         opts: PutOptions,
     ) -> Result<PutResult> {
+        /*
+            TODO:
+            let record = Namespace::record(location);
+            let record = record.commit(Wire(payload));
+            let build = self.next.build();
+            build.push_object_with(record, opts.into());
+
+            let e_tag = record.index_key();
+        */
+
         // let mut storage = self.storage.write();
         // let etag = storage.next_etag;
         // let entry = Entry::new(payload.into(), Utc::now(), etag, opts.attributes);
@@ -299,5 +312,11 @@ impl MultipartStore for RunirStore {
         // self.storage.write().remove_upload(id)?;
         // Ok(())
         todo!()
+    }
+}
+
+impl Display for RunirStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Ok(())
     }
 }
