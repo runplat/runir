@@ -1,9 +1,16 @@
 //! # `unit` module
 //!
-//! Unit module enables fixed-sized records that can be used to represent operations over a content
-//! addressed record
-//!
-//!
+//! Unit module enables small-page* sized records that act as a pointer
+//! and transport medium for a CAS-enabled record.
+//! 
+//! ---
+//! >
+//! > **small-page**: 1-10 (orders of magnitude) 512-byte blocks used to serialize the record
+//! >
+//! > Since runir is built around the TAR format 512 is the smallest block unit used.
+//! >
+//! ---
+//! 
 
 use std::{collections::BTreeMap, sync::OnceLock};
 

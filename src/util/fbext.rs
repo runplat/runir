@@ -9,6 +9,9 @@ use sha2::Digest;
 use time::UtcDateTime;
 use zstd::zstd_safe::WriteBuf;
 
+/// This is used to distinguish the runir object reader format/version
+pub const RUNIR_OBJECT_READER_VERSION: &str = "runir";
+
 /// Trait for embedding an object into a receiver
 pub trait Object {
     /// Packages a serializable object into this type
@@ -38,14 +41,14 @@ impl<'a> Object for flexbuffers::MapBuilder<'a> {
     #[inline]
     fn object<T: Serialize + Annotate>(mut self, obj: &T) -> Self {
         let mut ser = flexbuffers::FlexbufferSerializer::new();
-        self.push("version", "runir");
+        self.push("version", RUNIR_OBJECT_READER_VERSION);
         self.push("ts", UtcDateTime::now().unix_timestamp());
         self.push("type_name", T::type_name());
         match obj.serialize(&mut ser) {
             Ok(()) => {
                 let bytes = ser.view();
                 self.push("size", bytes.len() as u64);
-                if let Some("sha256") = T::value("cas") {
+                if let Some("sha256") = T::config("cas") {
                     let digest = sha2::Sha256::digest(bytes);
                     self.push("sha256", Blob(digest.as_slice()));
                 }
@@ -106,7 +109,7 @@ where
             .idx("version")
             .get_str()
             .ok()
-            .filter(|v| v.as_ref() == "runir")
+            .filter(|v| v.as_ref() == RUNIR_OBJECT_READER_VERSION)
             .and(
                 self.as_map()
                     .idx("type_name")
