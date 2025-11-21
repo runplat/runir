@@ -1,24 +1,26 @@
 use crate::util::annotate::Annotate;
+use anyhow::anyhow;
 use flexbuffers::{Blob, Buffer};
 use serde::Serialize;
 use sha2::Digest;
 use time::UtcDateTime;
 
+/// Trait for embedding an object into a receiver
 pub trait Object {
-    /// Enables pushing an object into a builder as an annotated blob
-    ///
-    /// Returns the builder
+    /// Packages a serializable object into this type
     fn object<T: Serialize + Annotate>(self, obj: &T) -> Self;
 }
 
+/// Trait for pushing an object into a receiver
 pub trait PushObject<'a> {
     /// Enables pushing an object into a builder as an annotated blob
     fn push_object<T: Serialize + Annotate>(&mut self, name: &str, obj: &T) -> &mut Self;
 }
 
+/// Trait for recovering an object from a receiver
 pub trait GetObject<B> {
     /// Enables pushing an object into a builder as an annotated blob
-    fn get_object<'a, T: Annotate + 'a>(&self) -> Option<flexbuffers::Reader<B>>;
+    fn get_object<'a, T: Annotate + 'a>(&self) -> crate::Result<flexbuffers::Reader<B>>;
 }
 
 impl<'a> Object for flexbuffers::MapBuilder<'a> {
@@ -68,8 +70,8 @@ where
     B: Buffer,
     B::BufferString: AsRef<str>,
 {
-    fn get_object<'a, T: Annotate + 'a>(&self) -> Option<flexbuffers::Reader<B>> {
-        if let Some(Blob(object)) = self
+    fn get_object<'a, T: Annotate + 'a>(&self) -> crate::Result<flexbuffers::Reader<B>> {
+        if let Some(type_name) = self
             .as_map()
             .idx("version")
             .get_str()
@@ -82,11 +84,24 @@ where
                     .ok()
                     .filter(|t| t.as_ref() == T::type_name()),
             )
-            .and(self.as_map().idx("object").get_blob().ok())
         {
-            flexbuffers::Reader::get_root(object).ok()
+            let span = tracing::trace_span!(
+                "get_object",
+                type_name = type_name.as_ref(),
+                size = self.as_map().idx("size").as_u64(),
+                created = self.as_map().idx("ts").as_u64()
+            );
+            span.in_scope(|| {
+                if let Some(Blob(object)) = self.as_map().idx("object").get_blob().ok() {
+                    Ok(flexbuffers::Reader::get_root(object)?)
+                } else if let Some(error) = self.as_map().idx("error").get_str().ok() {
+                    Err(anyhow!(error.to_string()).into())
+                } else {
+                    Err(anyhow!("Invalid object map").into())
+                }
+            })
         } else {
-            None
+            Err(anyhow!("Does not have version set").into())
         }
     }
 }
