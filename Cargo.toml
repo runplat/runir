@@ -51,6 +51,9 @@ serde_json = { version = "1.0.140", optional = true }
 serde_yaml = { version = "0.9.34", optional = true }
 mustache = "0.9.0"
 zeroize = { version = "1.8.1", features = ["derive"] }
+object_store = "0.12.4"
+statig = { version = "0.4.1", features = ["async", "serde"] }
+async-trait = "0.1.89"
 
 [[bin]]
 name = "runir"

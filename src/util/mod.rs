@@ -29,9 +29,8 @@ mod run;
 pub use run::RunCell;
 
 pub mod fbext;
-pub mod annotate;
-
 pub mod fs;
+pub mod object_store;
 
 
 use futures::future::RemoteHandle;

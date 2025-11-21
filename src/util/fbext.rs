@@ -1,4 +1,4 @@
-use crate::{util::annotate::Annotate, wire::ContentAddress};
+use crate::wire::{Annotate, ContentAddress};
 
 use std::{marker::PhantomData, ops::Deref};
 
@@ -10,6 +10,27 @@ use time::UtcDateTime;
 use zstd::zstd_safe::WriteBuf;
 
 /// This is used to distinguish the runir object reader format/version
+/// 
+/// **Description of Object Format**
+/// ```toml
+/// version: runir
+/// ts: <TS>
+/// type_name: <Type Name>
+/// ```
+/// If serializing was successful, append:
+/// ```toml
+/// size: <Size in Bytes>
+/// object: <Blob>
+/// ```
+/// if not successful, append:
+/// ```toml
+/// error: <Error message>
+/// ```
+/// if `Annotate::config("cas") == Some("sha256")`, append:
+/// ```toml
+/// sha256: <Blob>
+/// ```
+/// 
 pub const RUNIR_OBJECT_READER_VERSION: &str = "runir";
 
 /// Trait for embedding an object into a receiver
