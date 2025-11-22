@@ -1,37 +1,14 @@
-use crate::wire::{Annotate, ContentAddress};
+use crate::wire::Annotate;
 
 use std::{marker::PhantomData, ops::Deref};
 
 use anyhow::anyhow;
-use flexbuffers::{Blob, Buffer};
+use flexbuffers::{Blob, Buffer, MapBuilder};
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 use time::UtcDateTime;
-use zstd::zstd_safe::WriteBuf;
 
-/// This is used to distinguish the runir object reader format/version
-/// 
-/// **Description of Object Format**
-/// ```toml
-/// version: runir
-/// ts: <TS>
-/// type_name: <Type Name>
-/// ```
-/// If serializing was successful, append:
-/// ```toml
-/// size: <Size in Bytes>
-/// object: <Blob>
-/// ```
-/// if not successful, append:
-/// ```toml
-/// error: <Error message>
-/// ```
-/// if `Annotate::config("cas") == Some("sha256")`, append:
-/// ```toml
-/// sha256: <Blob>
-/// ```
-/// 
-pub const RUNIR_OBJECT_READER_VERSION: &str = "runir";
+/// Type-alias for an object format function
+pub type ObjectFormat<T> = for<'a> fn(&T, &mut MapBuilder<'a>);
 
 /// Trait for embedding an object into a receiver
 pub trait Object {
@@ -61,24 +38,7 @@ pub trait AsObject<B> {
 impl<'a> Object for flexbuffers::MapBuilder<'a> {
     #[inline]
     fn object<T: Serialize + Annotate>(mut self, obj: &T) -> Self {
-        let mut ser = flexbuffers::FlexbufferSerializer::new();
-        self.push("version", RUNIR_OBJECT_READER_VERSION);
-        self.push("ts", UtcDateTime::now().unix_timestamp());
-        self.push("type_name", T::type_name());
-        match obj.serialize(&mut ser) {
-            Ok(()) => {
-                let bytes = ser.view();
-                self.push("size", bytes.len() as u64);
-                if let Some("sha256") = T::config("cas") {
-                    let digest = sha2::Sha256::digest(bytes);
-                    self.push("sha256", Blob(digest.as_slice()));
-                }
-                self.push("object", Blob(bytes));
-            }
-            Err(err) => {
-                self.push("err", err.to_string().as_str());
-            }
-        }
+        T::object_format()(obj, &mut self);
         self
     }
 }
@@ -127,17 +87,12 @@ where
 {
     fn as_object<T: Annotate>(&self) -> Option<ObjectReader<B, T>> {
         self.as_map()
-            .idx("version")
+            .idx(".runir")
+            .as_map()
+            .idx("type_name")
             .get_str()
             .ok()
-            .filter(|v| v.as_ref() == RUNIR_OBJECT_READER_VERSION)
-            .and(
-                self.as_map()
-                    .idx("type_name")
-                    .get_str()
-                    .ok()
-                    .filter(|t| t.as_ref() == T::type_name()),
-            )
+            .filter(|t| t.as_ref() == T::type_name())
             .map(|_| ObjectReader {
                 reader: self.clone(),
                 _t: Default::default(),
@@ -194,18 +149,8 @@ where
         }
     }
 
-    /// Returns Some(valid) if sha256 CAS is enabled
-    /// 
-    /// Otherwise; returns None
-    #[inline]
-    pub fn check_sha256(&self, matches: ContentAddress) -> Option<bool> {
-        self.idx("sha256").get_blob().ok().map(|b| {
-            b.0.as_slice() == matches.digest
-        })
-    }
-
     fn idx(&self, key: &str) -> flexbuffers::Reader<B> {
-        self.as_map().idx(key)
+        self.as_map().idx(".runir").as_map().idx(key)
     }
 }
 
@@ -261,7 +206,16 @@ mod tests {
 
         // Test the object extension function returns the same view of the object
         let object = flexbuffers::Reader::get_root(object.view()).unwrap();
-        assert_eq!(obj.buffer(), object.as_map().idx("object").as_blob().0);
+        assert_eq!(
+            obj.buffer(),
+            object
+                .as_map()
+                .idx(".runir")
+                .as_map()
+                .idx("object")
+                .as_blob()
+                .0
+        );
 
         // Test the flow beween object() -> get_object()
         assert_eq!(

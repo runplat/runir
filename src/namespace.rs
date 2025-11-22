@@ -312,8 +312,13 @@ impl Namespace {
     }
 
     /// Transfer a record into this namespace
-    ///
+    /// 
     /// Returns an error if the record is not content-addressable
+    /// 
+    /// **NOTE**: Preserves record option state. For example:
+    /// 
+    /// If record was created Namespace::ephemeral(..), it will have `Runtime::NoArchive` enabled.
+    /// In this case, before calling Namespace::transfer(..), consider calling `Opts::enable_archiving(..)`
     #[inline]
     pub fn transfer(&self, record: impl IRecord) -> std::io::Result<Record> {
         if !record.opts().is_content_addressable() {
@@ -325,7 +330,7 @@ impl Namespace {
 
         Ok(self
             .record(record.content().as_slice())
-            .with_opts(record.opts().clone())
+            .with_opts( record.opts().clone())
             .commit(record.bytes()))
     }
 

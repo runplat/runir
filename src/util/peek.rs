@@ -1,4 +1,6 @@
 use std::{cell::RefCell, fmt::Display, ops::Deref};
+use crate::util::{Graph, Node};
+use serde::Deserialize;
 
 /// Wrapper over a flexbuffer reader, returned by IRecord::peek(..)
 #[derive(Clone)]
@@ -209,8 +211,10 @@ pub trait PeekExtensions<'peek> {
     fn val(self) -> Option<Peek<'peek>>;
 
     /// Deserializes the current buffer as some object
-    /// 
+    ///
     /// Note: This will deserialize the entire object, not just the bytes at the current portion of the buffer
+    /// 
+    /// TODO: Need to deprecate or require format_ext be enabled
     #[inline]
     fn to_obj<T: Deserialize<'peek>>(self) -> Option<T>
     where
@@ -221,25 +225,38 @@ pub trait PeekExtensions<'peek> {
     }
 
     /// Converts the current Peek into a Graph
-    /// 
+    ///
     /// Returns None if the the current position is empty
     #[inline]
-    fn to_graph(self) -> Option<Graph<'peek>> 
+    fn to_graph(self) -> Option<Graph<'peek>>
     where
-        Self: Sized
+        Self: Sized,
     {
         self.val().map(|p| p.into())
     }
 
     /// Converts the current Peek into a Graph
-    /// 
+    ///
     /// Returns None if the the current position is empty
     #[inline]
     fn to_node(self) -> Option<Node<'peek>>
     where
-        Self: Sized
+        Self: Sized,
     {
         self.val().map(|p| p.into())
+    }
+
+    /// Returns the peek reader at the wire object
+    #[inline]
+    fn to_wire_object(self) -> Option<Peek<'peek>>
+    where
+        Self: Sized,
+    {
+        self.at_path([".runir", "object"]).and_then(|v| {
+            flexbuffers::Reader::get_root(v.as_blob().0)
+                .ok()
+                .map(Peek::from)
+        })
     }
 }
 
@@ -455,7 +472,6 @@ impl<'peek> PeekExtensions<'peek> for Option<Peek<'peek>> {
         self.and_then(|r| r.blob())
     }
 }
-
 
 impl<'peek> PeekExtensions<'peek> for &Option<Peek<'peek>> {
     #[inline]
@@ -673,9 +689,6 @@ impl<'p> PeekRefExtensions<'p> for PeekRef<'p> {
 }
 
 pub use peek_path::PeekPath;
-use serde::Deserialize;
-
-use crate::util::{Graph, Node};
 
 impl From<&str> for PeekPath {
     fn from(value: &str) -> Self {
@@ -993,7 +1006,7 @@ pub mod peek_ser {
     impl<'peek> Serialize for Peek<'peek> {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
-            S: serde::Serializer
+            S: serde::Serializer,
         {
             if let Some(map) = self.iter_kv() {
                 serializer.collect_map(map)
@@ -1001,66 +1014,32 @@ pub mod peek_ser {
                 serializer.collect_seq(arr)
             } else {
                 match self.flexbuffer_type() {
-                    flexbuffers::FlexBufferType::Null => {
-                        serializer.serialize_none()
+                    flexbuffers::FlexBufferType::Null => serializer.serialize_none(),
+                    flexbuffers::FlexBufferType::Int => match self.bitwidth() {
+                        flexbuffers::BitWidth::W8 => serializer.serialize_i8(self.as_i8()),
+                        flexbuffers::BitWidth::W16 => serializer.serialize_i16(self.as_i16()),
+                        flexbuffers::BitWidth::W32 => serializer.serialize_i32(self.as_i32()),
+                        flexbuffers::BitWidth::W64 => serializer.serialize_i64(self.as_i64()),
                     },
-                    flexbuffers::FlexBufferType::Int => {
-                        match self.bitwidth() {
-                            flexbuffers::BitWidth::W8 => {
-                                serializer.serialize_i8(self.as_i8())
-                            },
-                            flexbuffers::BitWidth::W16 => {
-                                serializer.serialize_i16(self.as_i16())
-                            },
-                            flexbuffers::BitWidth::W32 => {
-                                serializer.serialize_i32(self.as_i32())
-                            },
-                            flexbuffers::BitWidth::W64 => {
-                                serializer.serialize_i64(self.as_i64())
-                            }
+                    flexbuffers::FlexBufferType::UInt => match self.bitwidth() {
+                        flexbuffers::BitWidth::W8 => serializer.serialize_u8(self.as_u8()),
+                        flexbuffers::BitWidth::W16 => serializer.serialize_u16(self.as_u16()),
+                        flexbuffers::BitWidth::W32 => serializer.serialize_u32(self.as_u32()),
+                        flexbuffers::BitWidth::W64 => serializer.serialize_u64(self.as_u64()),
+                    },
+                    flexbuffers::FlexBufferType::Float => match self.bitwidth() {
+                        flexbuffers::BitWidth::W32 => serializer.serialize_f32(self.as_f32()),
+                        flexbuffers::BitWidth::W64 => serializer.serialize_f64(self.as_f64()),
+                        _ => {
+                            unreachable!()
                         }
                     },
-                    flexbuffers::FlexBufferType::UInt => {
-                        match self.bitwidth() {
-                            flexbuffers::BitWidth::W8 => {
-                                serializer.serialize_u8(self.as_u8())
-                            },
-                            flexbuffers::BitWidth::W16 => {
-                                serializer.serialize_u16(self.as_u16())
-                            },
-                            flexbuffers::BitWidth::W32 => {
-                                serializer.serialize_u32(self.as_u32())
-                            },
-                            flexbuffers::BitWidth::W64 => {
-                                serializer.serialize_u64(self.as_u64())
-                            },
-                        }
-                    },
-                    flexbuffers::FlexBufferType::Float => {
-                        match self.bitwidth() {
-                            flexbuffers::BitWidth::W32 => {
-                                serializer.serialize_f32(self.as_f32())
-                            },
-                            flexbuffers::BitWidth::W64 => {
-                                serializer.serialize_f64(self.as_f64())
-                            },
-                            _ => {
-                                unreachable!()
-                            }
-                        }
-                    },
-                    flexbuffers::FlexBufferType::Bool => {
-                        serializer.serialize_bool(self.as_bool())
-                    },
-                    flexbuffers::FlexBufferType::String => {
-                        serializer.serialize_str(self.as_str())
-                    },
+                    flexbuffers::FlexBufferType::Bool => serializer.serialize_bool(self.as_bool()),
+                    flexbuffers::FlexBufferType::String => serializer.serialize_str(self.as_str()),
                     flexbuffers::FlexBufferType::Blob => {
                         serializer.serialize_bytes(self.as_blob().0)
                     }
-                    _ => {
-                        serializer.serialize_none()
-                    }
+                    _ => serializer.serialize_none(),
                 }
             }
         }
@@ -1068,19 +1047,22 @@ pub mod peek_ser {
 
     #[test]
     fn test_serialize() {
-        use toml::toml;
         use crate::{IRecord, Namespace};
+        use toml::toml;
 
-        let rec = Namespace::ephemeral().store("test", &toml! {
-            [test]
-            value = "hello world"
+        let rec = Namespace::ephemeral().store(
+            "test",
+            &toml! {
+                [test]
+                value = "hello world"
 
-            [test2]
-            value = 3.14
+                [test2]
+                value = 3.14
 
-            [test3]
-            value = 100
-        });
+                [test3]
+                value = 100
+            },
+        );
 
         let val = rec.peek().val().unwrap();
 

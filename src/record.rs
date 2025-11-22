@@ -1,5 +1,8 @@
 use crate::{
-    Data, Namespace, Opts, Symbol, archive::{self, Entry, HeaderBuilder, Sha256Digest}, opts::Branch, util::{Peek, PeekExtensions}
+    Data, Namespace, Opts, Symbol,
+    archive::{self, Entry, HeaderBuilder, Sha256Digest},
+    opts::Branch,
+    util::{Peek, PeekExtensions, format_ext::AsObject},
 };
 use ascii::AsAsciiStr;
 use crc::{CRC_64_MS, Crc, Digest};
@@ -83,7 +86,7 @@ pub trait IRecord {
     }
 
     /// Traverse the record w/ a list of statically defined paths
-    /// 
+    ///
     /// Returns a vector of accessors for each path
     #[inline]
     fn fields<'peek>(&'peek self, paths: &[&'peek str]) -> Vec<Option<Peek<'peek>>> {
@@ -96,7 +99,29 @@ pub trait IRecord {
     /// Returns the content digest buffer for the data stored
     #[inline]
     fn content(&self) -> Sha256Digest {
-        <Sha256 as sha2::Digest>::digest(self.bytes()).into()
+        if self.opts().is_transport() && self.is_wire_unit_mode_transport() {
+            match self.peek().to_wire_object().at("bytes").blob() {
+                Some(bytes) => <Sha256 as sha2::Digest>::digest(bytes).into(),
+                None => {
+                    <Sha256 as sha2::Digest>::digest(self.bytes()).into()
+                }
+            }
+        } else {
+            <Sha256 as sha2::Digest>::digest(self.bytes()).into()
+        }
+    }
+
+    /// Returns true if the record has enabled wire unit format, and is in transport mode
+    #[inline]
+    fn is_wire_unit_mode_transport(&self) -> bool {
+        use crate::wire::Annotate;
+        self.opts().is_wire_unit()
+            && self
+                .peek()
+                .at_path([".runir", "type_name"])
+                .str()
+                .map(|t| t == crate::wire::Transport::type_name())
+                .unwrap_or_default()
     }
 }
 
@@ -303,7 +328,22 @@ impl Record {
         self.data = data.into();
 
         let mut crc = crc_digest();
-        crc.update(self.bytes());
+
+        // If Namespace::transfer(..) is being used, this needs to be used in-order to preserve the correct checksum
+        if self.opts().is_wire_unit() && self.is_wire_unit_mode_transport() {
+            if let Some(object) = self
+                .peek()
+                .val()
+                .and_then(|v| v.as_object::<crate::wire::Transport>())
+                .and_then(|v| v.to_object().ok())
+            {
+                crc.update(object.bytes());
+            } else {
+                crc.update(&self.data);
+            }
+        } else {
+            crc.update(&self.data);
+        }
         crc.update(&self.ts.to_le_bytes());
 
         let (hi, _) = self.key.as_u64_pair();
@@ -322,7 +362,20 @@ impl Record {
         }
 
         let mut crc = crc_digest();
-        crc.update(&self.data);
+        if self.opts().is_wire_unit() && self.is_wire_unit_mode_transport() {
+            if let Some(object) = self
+                .peek()
+                .val()
+                .and_then(|v| v.as_object::<crate::wire::Transport>())
+                .and_then(|v| v.to_object().ok())
+            {
+                crc.update(object.bytes());
+            } else {
+                return false;
+            }
+        } else {
+            crc.update(&self.data);
+        }
         crc.update(&self.ts.to_le_bytes());
 
         let (_, lo) = self.key.as_u64_pair();
@@ -499,6 +552,25 @@ impl Record {
             .enable_branch(Branch::Deleted);
         deleting
     }
+
+    /// Returns a version of the current record marked for transport.
+    ///
+    /// Enables the `TRANSPORT` branch flag on this record, which indicates
+    /// that the record data is in an intermediate format
+    ///
+    /// Before stores promote this record from TRANSPORT -> HEAD, it can decide
+    /// whether or not to flatten record data
+    ///
+    /// All records in the TRANSPORT branch must be a wire unit enabled record,
+    /// but not all wire unit enabled records must be in the TRANSPORT branch.
+    #[inline]
+    #[must_use = "Calling `.transport()` enables wire-unit format and sets the proper branch bit-flag, however it requires in-take to resolve"]
+    pub fn transport(&self) -> Self {
+        use crate::wire::ToWireUnit;
+        let mut record = self.to_record();
+        record.opts.enable_branch(Branch::Transport);
+        record.to_wire_unit()
+    }
 }
 
 /// Returns the record crc value
@@ -513,12 +585,14 @@ pub fn record_crc(bytes: &[u8], ts: u64) -> u64 {
 impl Serialize for Record {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: serde::Serializer
+        S: serde::Serializer,
     {
         if let Some(peek) = self.peek().val() {
             peek.serialize(serializer)
         } else {
-            Err(<S::Error as serde::ser::Error>::custom("Record does not store an object-type"))
+            Err(<S::Error as serde::ser::Error>::custom(
+                "Record does not store an object-type",
+            ))
         }
     }
 }
@@ -526,11 +600,13 @@ impl Serialize for Record {
 #[cfg(test)]
 mod test {
     use super::Record;
-    use crate::{record::Namespace, util::PeekExtensions, Computed, IRecord, Opts, RecordableExtensions};
+    use crate::{
+        Computed, IRecord, Opts, RecordableExtensions, record::Namespace, util::PeekExtensions,
+    };
     use bytes::Bytes;
     use serde::{Deserialize, Serialize};
-    use toml::toml;
     use std::{collections::BTreeMap, time::Duration};
+    use toml::toml;
     use uuid::Uuid;
 
     #[test]
@@ -661,7 +737,7 @@ mod test {
         assert_eq!("world", loaded.field_map["hello"]);
         assert_eq!("goodbye", loaded.field_map["world"]);
     }
-    
+
     #[test]
     fn test_fields() {
         let mut field_map = BTreeMap::new();
@@ -680,7 +756,7 @@ mod test {
         let record = ns.store("my-test-obj", &test);
 
         let fields = record.fields(&["name", "field_a", "field_b", "field_map"]);
-        
+
         if let [name, field_a, field_b, field_map, ..] = fields.as_slice() {
             assert_eq!("my-test-obj", name.str().unwrap());
             assert_eq!(123456, field_a.int().unwrap());
@@ -772,7 +848,10 @@ mod test {
         };
 
         let rec = namespace.store("ser-rec", &data);
-        assert_eq!("hello world", Computed::mustache("{{value}}", &rec).unwrap().computed());
+        assert_eq!(
+            "hello world",
+            Computed::mustache("{{value}}", &rec).unwrap().computed()
+        );
 
         let rec = namespace.commit("nonser-rec", b"hello world");
         assert!(Computed::mustache("{{value}}", &rec).is_err());

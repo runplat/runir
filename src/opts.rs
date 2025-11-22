@@ -134,13 +134,19 @@ impl Opts {
         self.branch.contains(Branch::Staging)
     }
 
+    /// Returns true if the data stored by the record has been marked for staging
+    #[inline]
+    pub fn is_transport(&self) -> bool {
+        self.branch.contains(Branch::Transport)
+    }
+
     /// Returns true if the data stored by the record is "soft" deleted
     #[inline]
     pub fn is_soft_deleted(&self) -> bool {
         self.is_deleted() && !self.is_staging()
     }
 
-    /// Returns true if the record is a wire unit
+    /// Returns true if the record has wire unit format enabled
     #[inline]
     pub fn is_wire_unit(&self) -> bool {
         self.runtime.contains(Runtime::WireUnit)
@@ -167,19 +173,12 @@ impl Opts {
         self
     }
 
-    /// Enables runtime wire unit mode for the record
+    /// Enables runtime wire unit format mode for the record
     /// 
-    /// When wire unit mode is enabled, the record data will be a structured "unit" object.
-    /// A "unit" object is a reflection of a record, which effectively shares the same
-    /// index_key, w/ a fixed-sized object that can be used to perform wire "functions" against a stable
-    /// address
-    /// 
-    /// Note: This option requires that object-storage is enabled, if object-storage is not enabled this is a No-op
+    /// Wire unit mode means that the record is using a specific flexbuffer-based format
     #[inline]
     pub fn enable_wire_unit(&mut self) -> &mut Self {
-        if self.is_object() {
-            self.runtime.set(Runtime::WireUnit, true);
-        }
+        self.runtime.set(Runtime::WireUnit, true);
         self
     }
 
@@ -325,7 +324,7 @@ bitflags::bitflags! {
         const NoArchive = 1 << 1;
         /// Indicates that the record label is the content digest of the data stored by the record
         const ContentAddress = 1 << 2;
-        /// Indicates that a record is a wire "Unit" record
+        /// Indicates that a record has enabled wire unit format
         const WireUnit = 1 << 3;
     }
 }
@@ -364,16 +363,20 @@ bitflags::bitflags! {
         /// Head branch semantically requires more-strict rules concerning mutation
         /// Records represented as the "HEAD" must follow strict data-handling
         /// procedures
-        const Head     = 0b000000_00;
+        const Head     = 0b00000_000;
 
         /// Staging branch requiers less-strict rules, and allows for more flexible
         /// mutation within isolation
-        const Staging  = 0b000000_01;
+        const Staging  = 0b00000_001;
 
         /// Deleted branch marks a record as being "deleted" or no longer in use or mapped
         /// Multiple records may exist under the same namespace/label inside of the deleted branch,
         /// however only 1 of each content digest will be preserved.
-        const Deleted  = 0b000000_10;
+        const Deleted  = 0b00000_010;
+
+        /// Transport branch marks a record as being "in-flight" or "transporting" which means
+        /// the stored bytes relevant to the record have been wrapped in a Transport struct
+        const Transport = 0b00000_100;
 
         /// "Ephemeral" branch signals a scratch branch whose record should not be persisted
         const Ephemeral = u8::MAX;

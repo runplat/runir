@@ -28,7 +28,7 @@ pub use executor::Executor;
 mod run;
 pub use run::RunCell;
 
-pub mod fbext;
+pub mod format_ext;
 pub mod fs;
 pub mod object_store;
 

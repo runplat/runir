@@ -20,7 +20,7 @@ bytes = "1.10.1"
 crc = "3.3.0"
 flexbuffers = "25.2.10"
 futures = "0.3.31"
-hex = "0.4.3"
+hex = { version = "0.4.3", features = ["serde"] }
 crossbeam = { version = "0.8.4", features = ["crossbeam-queue"] }
 serde = { version = "1.0.219", features = ["derive"] }
 sha2 = "0.10.9"
@@ -54,6 +54,7 @@ zeroize = { version = "1.8.1", features = ["derive"] }
 object_store = "0.12.4"
 statig = { version = "0.4.1", features = ["async", "serde"] }
 async-trait = "0.1.89"
+url = "2.5.7"
 
 [[bin]]
 name = "runir"
