@@ -64,7 +64,28 @@ pub trait Annotate {
     where
         Self: Serialize + Sized,
     {
+        /*
+            This will create a nested map under the `.runir` key
+            
+            .runir : {
+                type_name:
+                size:
+                object:
+                error:
+            }
+        */
         wire_unit
+    
+        /*
+            TODO: This opens up the possibility of other formats, ex:
+            .meta : {
+                ...
+            }
+
+            .connect : {
+                ...
+            }
+        */
     }
 
     /// Returns a type name to represent this type
