@@ -90,10 +90,7 @@ pub trait IRecord {
     /// Returns a vector of accessors for each path
     #[inline]
     fn fields<'peek>(&'peek self, paths: &[&'peek str]) -> Vec<Option<Peek<'peek>>> {
-        paths.iter().fold(vec![], |mut a, p| {
-            a.push(self.field(p).val());
-            a
-        })
+        self.peek().val().at_dot_many(paths)
     }
 
     /// Returns the content digest buffer for the data stored

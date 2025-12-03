@@ -1,6 +1,6 @@
-use std::{cell::RefCell, fmt::Display, ops::Deref};
 use crate::util::{Graph, Node};
 use serde::Deserialize;
+use std::{cell::RefCell, fmt::Display, ops::Deref};
 
 /// Wrapper over a flexbuffer reader, returned by IRecord::peek(..)
 #[derive(Clone)]
@@ -210,10 +210,36 @@ pub trait PeekExtensions<'peek> {
     /// Returns `None` if the current position does not point to a value (e.g., an invalid path).
     fn val(self) -> Option<Peek<'peek>>;
 
+    /// Peeks at many keys at once
+    #[inline]
+    fn at_many(self, keys: &[&str]) -> Vec<Option<Peek<'peek>>>
+    where
+        Self: Sized + Clone,
+    {
+        keys.iter().fold(vec![], |mut vec, k| {
+            let current = self.clone();
+            vec.push(current.at(k));
+            vec
+        })
+    }
+
+    /// Peeks at many "dot" paths at once
+    #[inline]
+    fn at_dot_many(self, paths: &[&'peek str]) -> Vec<Option<Peek<'peek>>>
+    where
+        Self: Sized + Clone,
+    {
+        paths.iter().fold(vec![], |mut vec, p| {
+            let current = self.clone();
+            vec.push(current.at_dot(p));
+            vec
+        })
+    }
+
     /// Deserializes the current buffer as some object
     ///
     /// Note: This will deserialize the entire object, not just the bytes at the current portion of the buffer
-    /// 
+    ///
     /// TODO: Need to deprecate or require format_ext be enabled
     #[inline]
     fn to_obj<T: Deserialize<'peek>>(self) -> Option<T>

@@ -115,7 +115,7 @@ impl<'b> Annotate for Transport<'b> {
 #[cfg(test)]
 mod tests {
     use toml::toml;
-    use crate::{IRecord, Namespace};
+    use crate::{IRecord, Namespace, wire::Describe};
 
     #[test]
     fn test_transport() {
@@ -136,6 +136,12 @@ mod tests {
         let record = record.unwrap().transport();
         assert!(record.is_valid());
         assert!(record.opts().is_transport());
+
+        // Test CAS trait
+        let description = record.describe().unwrap();
+        assert_eq!(description.size, 66);
+        assert_eq!(description.digest, hex::decode("8146b7f5502455c6e317ac80aa7f85e85b2dfc14cead3622b3ff52ac9cdea90d").unwrap());
+
         let ns = Namespace::new("test");
         let transferred = ns.transfer(record.clone()).unwrap();
         assert!(transferred.is_valid());
