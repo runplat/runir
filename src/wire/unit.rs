@@ -1,6 +1,6 @@
 use crate::{
     IRecord, Record,
-    util::{PeekExtensions, format_ext::Object},
+    util::{PeekExtensions, format_ext::ApplyObject},
     wire::Annotate,
 };
 use bytes::Bytes;
@@ -61,7 +61,7 @@ pub trait ToWireUnit: IRecord {
             };
 
             let transport = flexbuffers::Builder::default()
-                .object(&transport)
+                .apply_object(&transport)
                 .take_buffer();
 
             let mut record = self.to_record();

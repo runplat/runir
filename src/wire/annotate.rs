@@ -1,12 +1,12 @@
 use serde::Serialize;
 
-use crate::util::format_ext::ObjectFormat;
+use crate::util::format_ext::{FormatObject, ReadObject};
 
 /// Formats an object into wire-unit format
 #[inline]
 fn wire_unit<'a, T: Serialize + Annotate>(object: &T, map: &mut flexbuffers::MapBuilder<'a>) {
-    use sha2::Digest;
     use flexbuffers::Blob;
+    use sha2::Digest;
 
     let mut ser = flexbuffers::FlexbufferSerializer::new();
     let mut map = map.start_map(".runir");
@@ -16,10 +16,8 @@ fn wire_unit<'a, T: Serialize + Annotate>(object: &T, map: &mut flexbuffers::Map
         Ok(()) => {
             let bytes = ser.view();
             map.push("size", bytes.len() as u64);
-            if let Some("sha256") = T::config("cas") {
-                let digest = sha2::Sha256::digest(bytes);
-                map.push("sha256", Blob(digest.as_slice()));
-            }
+            let digest = sha2::Sha256::digest(bytes);
+            map.push("sha256", Blob(digest.as_slice()));
             map.push("object", Blob(bytes));
         }
         Err(err) => {
@@ -27,6 +25,20 @@ fn wire_unit<'a, T: Serialize + Annotate>(object: &T, map: &mut flexbuffers::Map
         }
     }
     map.end_map();
+}
+
+/// Advances the position of the current reader to the map w/ the wire-unit data
+#[inline]
+fn read_wire_unit<T, B>(reader: flexbuffers::Reader<B>) -> Option<flexbuffers::Reader<B>>
+where
+    T: Annotate,
+    B: flexbuffers::Buffer,
+    B::BufferString: AsRef<str>,
+{
+    Some(reader.as_map().idx(".runir")).filter(|r| {
+        r.flexbuffer_type().is_map()
+            && r.as_map().idx("type_name").as_str().as_ref() == T::type_name()
+    })
 }
 
 /// Enables self-annotation of types programatically
@@ -46,74 +58,64 @@ fn wire_unit<'a, T: Serialize + Annotate>(object: &T, map: &mut flexbuffers::Map
 /// Another example, is type_name, which is supported by Rust,
 /// however cannot be used outside of diagnostic purposes
 pub trait Annotate {
-    /// config("cas") - enables content-address storage mode
-    ///
-    /// Supported values: sha256
-    const CAS: &str = "";
+    /// Returns a type name to represent this type
+    fn type_name() -> &'static str;
 
-    /// config("secret") - enables secret storage mode
-    ///
-    /// Indicates to co-operators the "secret" settings to use
-    /// when transporting or storing this type
-    ///
-    /// Supported values: <TODO>
-    const SECRET: &str = "";
+    /// Returns the format object function to use when converting this type
+    #[inline]
+    fn object_format() -> FormatObject<Self>
+    where
+        Self: Serialize + Sized,
+    {
+        Self::default_object_format()
+    }
 
-    /// Returns the object format function to use when converting this type
-    fn object_format() -> ObjectFormat<Self>
+    /// Returns the object reader function
+    #[inline]
+    fn object_reader<B>() -> ReadObject<B>
+    where
+        Self: Sized,
+        B: flexbuffers::Buffer,
+        B::BufferString: AsRef<str>,
+    {
+        Self::default_object_reader()
+    }
+
+    /// Returns the format object function to use when converting this type
+    #[inline]
+    fn default_object_format() -> FormatObject<Self>
     where
         Self: Serialize + Sized,
     {
         /*
             This will create a nested map under the `.runir` key
-            
-            .runir : {
-                type_name:
-                size:
-                object:
-                error:
+            {
+                .runir : {
+                    type_name:
+                    size:
+                    object:
+                    error:
+                }
             }
         */
         wire_unit
-    
-        /*
-            TODO: This opens up the possibility of other formats, ex:
-            .meta : {
-                ...
-            }
-
-            .connect : {
-                ...
-            }
-        */
     }
 
-    /// Returns a type name to represent this type
-    fn type_name() -> &'static str;
-
-    /// Returns a name template to use when formatting names
-    /// for an instance of this type
+    /// Returns the object reader function
     #[inline]
-    fn name_template() -> Option<&'static str> {
-        None
-    }
-
-    /// Returns true if SHA256 CAS is enabled for this type
-    ///
-    /// Cooperating Operators can use this internally to know whether to generate
-    /// a content digest of this type's serialized forms, or whether to validate
-    /// a content digest when deserializing this type's serialized form
-    #[inline]
-    fn is_sha256_cas_enabled() -> bool {
-        matches!(Self::config("cas"), Some("sha256"))
+    fn default_object_reader<B>() -> ReadObject<B>
+    where
+        Self: Sized,
+        B: flexbuffers::Buffer,
+        B::BufferString: AsRef<str>,
+    {
+        read_wire_unit::<Self, B>
     }
 
     /// Returns the value of a meta-configuration specified by this type
     #[inline]
     fn config(name: &str) -> Option<&'static str> {
         match name {
-            "cas" if Self::CAS != "" => Some(Self::CAS),
-            "secret" if Self::SECRET != "" => Some(Self::SECRET),
             _ => None,
         }
     }

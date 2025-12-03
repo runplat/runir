@@ -7,13 +7,16 @@ use flexbuffers::{Blob, Buffer, MapBuilder};
 use serde::{Deserialize, Serialize};
 use time::UtcDateTime;
 
-/// Type-alias for an object format function
-pub type ObjectFormat<T> = for<'a> fn(&T, &mut MapBuilder<'a>);
+/// Type-alias for a format object function
+pub type FormatObject<T> = for<'a> fn(&T, &mut MapBuilder<'a>);
+
+/// Type-alias for a read object function
+pub type ReadObject<B> = fn(flexbuffers::Reader<B>) -> Option<flexbuffers::Reader<B>>;
 
 /// Trait for embedding an object into a receiver
-pub trait Object {
-    /// Packages a serializable object into this type
-    fn object<T: Serialize + Annotate>(self, obj: &T) -> Self;
+pub trait ApplyObject {
+    /// Applies a serializable object into this container
+    fn apply_object<T: Serialize + Annotate>(self, obj: &T) -> Self;
 }
 
 /// Trait for pushing an object into a receiver
@@ -35,18 +38,18 @@ pub trait AsObject<B> {
     fn as_object<T: Annotate>(&self) -> Option<ObjectReader<B, T>>;
 }
 
-impl<'a> Object for flexbuffers::MapBuilder<'a> {
+impl<'a> ApplyObject for flexbuffers::MapBuilder<'a> {
     #[inline]
-    fn object<T: Serialize + Annotate>(mut self, obj: &T) -> Self {
+    fn apply_object<T: Serialize + Annotate>(mut self, obj: &T) -> Self {
         T::object_format()(obj, &mut self);
         self
     }
 }
 
-impl Object for flexbuffers::Builder {
+impl ApplyObject for flexbuffers::Builder {
     #[inline]
-    fn object<T: Serialize + Annotate>(mut self, obj: &T) -> Self {
-        self.start_map().object(obj).end_map();
+    fn apply_object<T: Serialize + Annotate>(mut self, obj: &T) -> Self {
+        self.start_map().apply_object(obj).end_map();
         self
     }
 }
@@ -55,7 +58,7 @@ impl<'a> PushObject<'a> for flexbuffers::MapBuilder<'a> {
     /// Enables pushing an object into a builder as an annotated blob
     #[inline]
     fn push_object<T: Serialize + Annotate>(&mut self, name: &str, obj: &T) -> &mut Self {
-        self.start_map(name).object(obj).end_map();
+        self.start_map(name).apply_object(obj).end_map();
         self
     }
 }
@@ -75,7 +78,7 @@ where
             );
             span.in_scope(|| object.read())
         } else {
-            Err(anyhow!("Does not have version set").into())
+            Err(anyhow!("Current reader is not an object").into())
         }
     }
 }
@@ -86,15 +89,9 @@ where
     B::BufferString: AsRef<str>,
 {
     fn as_object<T: Annotate>(&self) -> Option<ObjectReader<B, T>> {
-        self.as_map()
-            .idx(".runir")
-            .as_map()
-            .idx("type_name")
-            .get_str()
-            .ok()
-            .filter(|t| t.as_ref() == T::type_name())
-            .map(|_| ObjectReader {
-                reader: self.clone(),
+        T::object_reader()(self.clone())
+            .map(|reader| ObjectReader {
+                reader,
                 _t: Default::default(),
             })
     }
@@ -150,7 +147,7 @@ where
     }
 
     fn idx(&self, key: &str) -> flexbuffers::Reader<B> {
-        self.as_map().idx(".runir").as_map().idx(key)
+        self.reader.as_map().idx(key)
     }
 }
 
@@ -198,7 +195,7 @@ mod tests {
         map.push_object("test", &test);
         map.end_map();
 
-        let object = flexbuffers::Builder::default().object(&test);
+        let object = flexbuffers::Builder::default().apply_object(&test);
 
         let reader = flexbuffers::Reader::get_root(builder.view()).unwrap();
         let obj = reader.as_map().idx("test").get_object::<Test>().unwrap();
