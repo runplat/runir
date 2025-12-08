@@ -1,9 +1,13 @@
 use std::{
+    fmt::Debug,
     sync::{Arc, Weak},
     thread::JoinHandle,
 };
 
-use crossbeam::{channel::{bounded, Receiver, Sender}, utils::Backoff};
+use crossbeam::{
+    channel::{Receiver, Sender, bounded},
+    utils::Backoff,
+};
 
 const DEFAULT_QUEUE_SIZE: usize = 1000;
 
@@ -24,6 +28,14 @@ impl<R> Clone for Pusher<R> {
             inner: self.inner.clone(),
             sender: self.sender.clone(),
         }
+    }
+}
+
+impl<R> Debug for Pusher<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pusher")
+            .field("is_alive", &self.inner.upgrade().is_some())
+            .finish()
     }
 }
 
@@ -63,6 +75,7 @@ impl<R> Pusher<R> {
 }
 
 /// Thread-safe write queue for Records
+#[derive(Debug)]
 pub struct Queue<R, const INITIAL_CAPACITY: usize = DEFAULT_QUEUE_SIZE> {
     /// Inner queue data structure
     queue: Arc<crossbeam::queue::ArrayQueue<R>>,
@@ -134,6 +147,12 @@ impl<R, const INITIAL_CAPACITY: usize> Queue<R, INITIAL_CAPACITY> {
         dest.extend(self.flush());
     }
 
+    /// Pops from the queue
+    #[inline]
+    pub fn pop(&self) -> Option<R> {
+        self.queue.pop()
+    }
+
     /// Subscribes to notifications when an item is pushed to the queue
     #[inline]
     pub fn subscribe(&self) -> Receiver<()> {
@@ -187,9 +206,7 @@ impl<R, const INITIAL_CAPACITY: usize> Queue<R, INITIAL_CAPACITY> {
     where
         R: Send + 'static,
     {
-        self.worker_thread_fold((), move |d, _| {
-            work(d)
-        })
+        self.worker_thread_fold((), move |d, _| work(d))
     }
 
     /// Closes the queue, signaling that no new pushers will be created.

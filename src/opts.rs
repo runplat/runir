@@ -134,7 +134,7 @@ impl Opts {
         self.branch.contains(Branch::Staging)
     }
 
-    /// Returns true if the data stored by the record has been marked for staging
+    /// Returns true if the data stored by the record has been marked for transport
     #[inline]
     pub fn is_transport(&self) -> bool {
         self.branch.contains(Branch::Transport)
@@ -262,6 +262,14 @@ impl Opts {
     pub fn promote(&mut self) -> &mut Self {
         self.branch.remove(Branch::Staging);
         self.branch.remove(Branch::Deleted);
+        self
+    }
+
+    /// Removes Transport from branch options which will
+    /// flag the record as being transport done
+    #[inline]
+    pub fn done(&mut self) -> &mut Self {
+        self.branch.remove(Branch::Transport);
         self
     }
 

@@ -217,7 +217,7 @@ pub trait PeekExtensions<'peek> {
         Self: Sized + Clone,
     {
         keys.iter().fold(vec![], |mut vec, k| {
-            let current = self.clone();
+            let current = self.clone(); // This will be a shallow copy since it only needs to clone a pointer
             vec.push(current.at(k));
             vec
         })
@@ -230,8 +230,21 @@ pub trait PeekExtensions<'peek> {
         Self: Sized + Clone,
     {
         paths.iter().fold(vec![], |mut vec, p| {
-            let current = self.clone();
+            let current = self.clone(); // This will be a shallow copy since it only needs to clone a pointer
             vec.push(current.at_dot(p));
+            vec
+        })
+    }
+
+    /// Peeks at many paths at once
+    #[inline]
+    fn at_path_many(self, paths: &[&[&'peek str]]) -> Vec<Option<Peek<'peek>>>
+    where
+        Self: Sized + Clone,
+    {
+        paths.iter().fold(vec![], |mut vec, p| {
+            let current = self.clone(); // This will be a shallow copy since it only needs to clone a pointer
+            vec.push(current.at_path(p));
             vec
         })
     }

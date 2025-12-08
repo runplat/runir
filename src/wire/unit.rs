@@ -28,7 +28,9 @@ pub trait ToWireUnit: IRecord {
     #[inline]
     fn to_wire_unit(&self) -> Record {
         if self.opts().is_wire_unit() && self.peek().at(".runir").is_some() {
-            return self.to_record();
+            let mut record = self.to_record();
+            record.opts.enable_wire_unit();
+            return record;
         } else {
             /*
                 Wire Unit format has two modes, transport and native.
@@ -115,7 +117,7 @@ impl<'b> Annotate for Transport<'b> {
 #[cfg(test)]
 mod tests {
     use toml::toml;
-    use crate::{IRecord, Namespace, wire::Describe};
+    use crate::{IRecord, Namespace, wire::{Describe, Wire}};
 
     #[test]
     fn test_transport() {
@@ -137,10 +139,11 @@ mod tests {
         assert!(record.is_valid());
         assert!(record.opts().is_transport());
 
+        let wire = Wire::from(record.clone());
         // Test CAS trait
-        let description = record.describe().unwrap();
-        assert_eq!(description.size, 66);
-        assert_eq!(description.digest, hex::decode("8146b7f5502455c6e317ac80aa7f85e85b2dfc14cead3622b3ff52ac9cdea90d").unwrap());
+        let description = wire.describe();
+        assert_eq!(description.object.size, 66);
+        assert_eq!(description.object.digest, hex::decode("8146b7f5502455c6e317ac80aa7f85e85b2dfc14cead3622b3ff52ac9cdea90d").unwrap());
 
         let ns = Namespace::new("test");
         let transferred = ns.transfer(record.clone()).unwrap();

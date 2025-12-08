@@ -54,6 +54,12 @@ impl Worker {
         self
     }
 
+    /// Count of records currently stored by the worker
+    #[inline]
+    pub fn count(&self) -> usize {
+        self.records.len()
+    }
+
     /// Pushes a record onto this worker
     ///
     /// Returns true if the record was pushed into state, false if the record's ns_chk did not match

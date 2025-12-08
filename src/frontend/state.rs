@@ -119,7 +119,7 @@ impl State {
                 "====== Processing member {idx}, count: {} ======",
                 i.storage().len()
             );
-            for r in i.storage().iter_records() {
+            for r in i.storage().iter_records().filter(|r| !r.opts().is_transport()) {
                 match next_snapshot.index(r.clone()) {
                     crate::index::IndexResult::Inserted(k) => {
                         debug!(

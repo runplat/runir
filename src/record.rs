@@ -96,7 +96,7 @@ pub trait IRecord {
     /// Returns the content digest buffer for the data stored
     #[inline]
     fn content(&self) -> Sha256Digest {
-        if self.opts().is_transport() && self.is_wire_unit_mode_transport() {
+        if /* self.opts().is_transport() && */ self.is_wire_unit_mode_transport() {
             match self.peek().to_wire_object().at("bytes").blob() {
                 Some(bytes) => <Sha256 as sha2::Digest>::digest(bytes).into(),
                 None => {
@@ -327,7 +327,7 @@ impl Record {
         let mut crc = crc_digest();
 
         // If Namespace::transfer(..) is being used, this needs to be used in-order to preserve the correct checksum
-        if self.opts().is_wire_unit() && self.is_wire_unit_mode_transport() {
+        if self.is_wire_unit_mode_transport() {
             if let Some(object) = self
                 .peek()
                 .val()
@@ -359,7 +359,7 @@ impl Record {
         }
 
         let mut crc = crc_digest();
-        if self.opts().is_wire_unit() && self.is_wire_unit_mode_transport() {
+        if self.is_wire_unit_mode_transport() {
             if let Some(object) = self
                 .peek()
                 .val()
