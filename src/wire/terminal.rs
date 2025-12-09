@@ -26,7 +26,7 @@ pub struct Terminal {
     output_retries: usize,
     /// Packet drops
     packet_drops: usize,
-}   
+}
 
 impl Terminal {
     /// Creates a new terminal
@@ -130,19 +130,17 @@ impl Terminal {
 /// Variants of Terminal State
 #[derive(Debug, Default)]
 pub enum State {
-    /// Entry is empty
+    /// State is empty
     #[default]
     Empty,
-    /// Entry is new
+    /// State contains a new record
     New(Record),
-    /// Pending means that the entry has been removed from the terminal for processing by an operator
-    ///
-    /// Operator is expected to return a record to the terminal
+    /// State contains parts to receive a record that has finished evaluation
     Pending {
         ready: Receiver<Record>,
         backup: Record,
     },
-    /// Entry is ready, when the operator has set the record to ready
+    /// State contains a record that is ready for output
     Ready(Record),
 }
 
