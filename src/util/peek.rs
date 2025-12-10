@@ -166,6 +166,18 @@ pub trait PeekExtensions<'peek> {
     /// ```
     fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>>;
 
+    /// Access current position as a vector and return the element at idx
+    fn at_idx(self, idx: usize) -> Option<Peek<'peek>>;
+
+    /// Peeks at the current position
+    #[inline]
+    fn peek(self) -> Option<Peek<'peek>>
+    where
+        Self: Sized
+    {
+        self.blob().and_then(|b| flexbuffers::Reader::get_root(b).ok()).map(Peek)
+    }
+
     /// Returns a bool if the current peek context is a bool
     fn bool(self) -> Option<bool>;
 
@@ -304,6 +316,11 @@ impl<'peek> PeekExtensions<'peek> for &'peek Peek<'peek> {
     fn at(self, key: &str) -> Option<Peek<'peek>> {
         self.get_map().ok().map(|p| Peek(p.idx(key)))
     }
+    
+    #[inline]
+    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
+        self.get_vector().ok().map(|p| Peek(p.idx(idx)))
+    }
 
     #[inline]
     fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<Peek<'peek>> {
@@ -387,6 +404,11 @@ impl<'peek> PeekExtensions<'peek> for Peek<'peek> {
     }
 
     #[inline]
+    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
+        self.get_vector().ok().map(|p| Peek(p.idx(idx)))
+    }
+
+    #[inline]
     fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<Peek<'peek>> {
         keys.as_ref().iter().fold(Some(self), |p, s| p.at(s))
     }
@@ -455,6 +477,11 @@ impl<'peek> PeekExtensions<'peek> for Option<Peek<'peek>> {
     }
 
     #[inline]
+    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
+        self.and_then(|r| r.at_idx(idx))
+    }
+
+    #[inline]
     fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<Peek<'peek>> {
         self.and_then(|p| p.at_path(keys))
     }
@@ -516,6 +543,11 @@ impl<'peek> PeekExtensions<'peek> for &Option<Peek<'peek>> {
     #[inline]
     fn at(self, key: &str) -> Option<Peek<'peek>> {
         self.clone().and_then(|r| r.at(key))
+    }
+
+    #[inline]
+    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
+        self.clone().and_then(|r| r.at_idx(idx))
     }
 
     #[inline]
@@ -596,6 +628,11 @@ impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
     fn at(self, key: &str) -> Option<Peek<'peek>> {
         self.cloned().and_then(|r| r.at(key))
     }
+    
+    #[inline]
+    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
+        self.cloned().and_then(|r| r.at_idx(idx))
+    }
 
     #[inline]
     fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
@@ -641,6 +678,7 @@ impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
 }
 
 impl<'peek> PeekExtensions<'peek> for &'peek crate::Data {
+    #[inline]
     fn in_ref(
         self,
     ) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + crate::util::PeekRefExtensions<'peek>
@@ -648,46 +686,62 @@ impl<'peek> PeekExtensions<'peek> for &'peek crate::Data {
         self.val().in_ref()
     }
 
+    #[inline]
     fn at(self, key: &str) -> Option<crate::util::Peek<'peek>> {
         self.val().at(key)
     }
+    
+    #[inline]
+    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
+        self.val().at_idx(idx)
+    }
 
+    #[inline]
     fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<crate::util::Peek<'peek>> {
         self.val().at_path(keys)
     }
 
+    #[inline]
     fn at_dot(self, path: &'peek str) -> Option<crate::util::Peek<'peek>> {
         self.val().at_dot(path)
     }
 
+    #[inline]
     fn bool(self) -> Option<bool> {
         self.val().bool()
     }
 
+    #[inline]
     fn str(self) -> Option<&'peek str> {
         self.val().str()
     }
 
+    #[inline]
     fn u64(self) -> Option<u64> {
         self.val().u64()
     }
 
+    #[inline]
     fn int(self) -> Option<i64> {
         self.val().int()
     }
 
+    #[inline]
     fn blob(self) -> Option<&'peek [u8]> {
         self.val().blob()
     }
 
+    #[inline]
     fn iter(self) -> Option<impl Iterator<Item = crate::util::Peek<'peek>>> {
         self.val().iter()
     }
 
+    #[inline]
     fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, crate::util::Peek<'peek>)>> {
         self.val().iter_kv()
     }
 
+    #[inline]
     fn val(self) -> Option<crate::util::Peek<'peek>> {
         flexbuffers::Reader::get_root(self.as_ref())
             .ok()

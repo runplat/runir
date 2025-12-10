@@ -276,6 +276,7 @@ impl<'peek> From<Peek<'peek>> for Node<'peek> {
 }
 
 impl<'peek> PeekExtensions<'peek> for Node<'peek> {
+    #[inline]
     fn in_ref(
         self,
     ) -> impl std::ops::Index<&'peek str, Output = super::peek::PeekRef<'peek>>
@@ -286,6 +287,7 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
         }
     }
 
+    #[inline]
     fn at(self, key: &str) -> Option<Peek<'peek>> {
         match self {
             Node::Single(peek) => peek.at(key),
@@ -293,6 +295,15 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
         }
     }
 
+    #[inline]
+    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
+        match self {
+            Node::Single(peek) => peek.at_idx(idx),
+            Node::Composite(graph) => graph.root.clone().at_idx(idx),
+        }
+    }
+
+    #[inline]
     fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<Peek<'peek>> {
         match self {
             Node::Single(peek) => peek.at_path(keys),
@@ -300,6 +311,7 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
         }
     }
 
+    #[inline]
     fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
         match self {
             Node::Single(peek) => peek.at_dot(path),
@@ -307,6 +319,7 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
         }
     }
 
+    #[inline]
     fn bool(self) -> Option<bool> {
         match self {
             Node::Single(peek) => peek.bool(),
@@ -314,6 +327,7 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
         }
     }
 
+    #[inline]
     fn str(self) -> Option<&'peek str> {
         match self {
             Node::Single(peek) => peek.str(),
@@ -321,6 +335,7 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
         }
     }
 
+    #[inline]
     fn u64(self) -> Option<u64> {
         match self {
             Node::Single(peek) => peek.u64(),
@@ -328,6 +343,7 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
         }
     }
 
+    #[inline]
     fn int(self) -> Option<i64> {
         match self {
             Node::Single(peek) => peek.int(),
@@ -335,6 +351,7 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
         }
     }
 
+    #[inline]
     fn blob(self) -> Option<&'peek [u8]> {
         match self {
             Node::Single(peek) => peek.blob(),
@@ -342,6 +359,7 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
         }
     }
 
+    #[inline]
     fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
         match self {
             Node::Single(peek) => peek.iter(),
@@ -349,6 +367,7 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
         }
     }
 
+    #[inline]
     fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
         match self {
             Node::Single(peek) => peek.iter_kv(),
@@ -356,6 +375,7 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
         }
     }
 
+    #[inline]
     fn val(self) -> Option<Peek<'peek>> {
         match self {
             Node::Single(peek) => peek.val(),
@@ -365,6 +385,7 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
 }
 
 impl<'peek> PeekExtensions<'peek> for Option<Node<'peek>> {
+    #[inline]
     fn in_ref(
         self,
     ) -> impl std::ops::Index<&'peek str, Output = super::peek::PeekRef<'peek>>
@@ -372,46 +393,62 @@ impl<'peek> PeekExtensions<'peek> for Option<Node<'peek>> {
         self.val().in_ref()
     }
 
+    #[inline]
     fn at(self, key: &str) -> Option<Peek<'peek>> {
         self.and_then(|s| s.at(key))
     }
 
+    #[inline]
+    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
+        self.and_then(|s| s.at_idx(idx))
+    }
+
+    #[inline]
     fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<Peek<'peek>> {
         self.and_then(|s| s.at_path(keys))
     }
 
+    #[inline]
     fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
         self.and_then(|s| s.at_dot(path))
     }
 
+    #[inline]
     fn bool(self) -> Option<bool> {
         self.and_then(|s| s.bool())
     }
 
+    #[inline]
     fn str(self) -> Option<&'peek str> {
         self.and_then(|s| s.str())
     }
 
+    #[inline]
     fn u64(self) -> Option<u64> {
         self.and_then(|s| s.u64())
     }
 
+    #[inline]
     fn int(self) -> Option<i64> {
         self.and_then(|s| s.int())
     }
 
+    #[inline]
     fn blob(self) -> Option<&'peek [u8]> {
         self.and_then(|s| s.blob())
     }
 
+    #[inline]
     fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
         self.and_then(|s| s.iter())
     }
 
+    #[inline]
     fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
         self.and_then(|s| s.iter_kv())
     }
 
+    #[inline]
     fn val(self) -> Option<Peek<'peek>> {
         self.and_then(|s| s.val())
     }

@@ -796,7 +796,9 @@ impl<P: Packer> MultiRoot<P> {
             } => {
                 P::pack_bytes(content, buffer)?;
             }
-            _ => {}
+            State::Read { .. } | State::Run { .. } => {
+                return Err(anyhow!("Cannot push content to a read-only container").into());
+            }
         }
 
         self.push(content.len(), digest.finalize().into(), labels, false)
@@ -1063,6 +1065,8 @@ impl SystemLayer {
             .map(|v| LayerDesc::Read(v.idx(layer).into()))
     }
 
+    /// Returns any labels associated to this layer
+    #[inline]
     fn labels<'p>(&'p self, layer: usize) -> Option<Peek<'p>>
     where
         Self: 'p,
@@ -1267,12 +1271,14 @@ where
 
     fn iter_layer_desc(&self) -> crate::Result<impl Iterator<Item = impl ILayerDescriptor>>;
 
+    #[inline]
     fn layer_desc(&'p self, idx: usize) -> crate::Result<LayerDesc<'p>> {
         Ok(LayerDesc::Read(self.system()?.as_vector().idx(idx).into()))
     }
 }
 
 impl<'p> IContainer<'p> for Record {
+    #[inline]
     fn layer(&'p self, idx: usize) -> Option<&'p [u8]> {
         if !self.opts().is_multi() {
             return None;
@@ -1285,6 +1291,7 @@ impl<'p> IContainer<'p> for Record {
         Some(blob.0)
     }
 
+    #[inline]
     fn iter_layer_desc(&self) -> crate::Result<impl Iterator<Item = impl ILayerDescriptor>> {
         if !self.opts().is_multi() {
             return Err(anyhow!("Record is not a multi-root record").into());
@@ -1299,10 +1306,16 @@ impl<'p> IContainer<'p> for Record {
         }
     }
 
+    #[inline]
     fn system(&'p self) -> crate::Result<Peek<'p>> {
-        Ok(flexbuffers::Reader::get_root(self.bytes())
-            .and_then(|root| root.as_vector().idx(1).get_blob())
-            .and_then(|obj| Ok(Peek::from(flexbuffers::Reader::get_root(obj.0)?)))?)
+       match self.peek().at_idx(1).peek() {
+            Some(found) => {
+                Ok(found)
+            },
+            None => {
+                Err(anyhow!("Container is in an invalid format").into())
+            },
+        }
     }
 }
 
@@ -1333,6 +1346,7 @@ enum LayerDesc<'p> {
 }
 
 impl<'p> ILayerDescriptor for LayerDesc<'p> {
+    #[inline]
     fn runtime_size(&self) -> u64 {
         match self {
             LayerDesc::Build(build_descriptor) => build_descriptor.runtime_size(),
@@ -1340,6 +1354,7 @@ impl<'p> ILayerDescriptor for LayerDesc<'p> {
         }
     }
 
+    #[inline]
     fn distribution(&self) -> GenericArray<u8, U32> {
         match self {
             LayerDesc::Build(build_descriptor) => build_descriptor.distribution(),
@@ -1347,6 +1362,7 @@ impl<'p> ILayerDescriptor for LayerDesc<'p> {
         }
     }
 
+    #[inline]
     fn content(&self) -> GenericArray<u8, U32> {
         match self {
             LayerDesc::Build(build_descriptor) => build_descriptor.content(),
@@ -1354,6 +1370,7 @@ impl<'p> ILayerDescriptor for LayerDesc<'p> {
         }
     }
 
+    #[inline]
     fn is_packed(&self) -> bool {
         match self {
             LayerDesc::Build(build_descriptor) => build_descriptor.is_packed(),
@@ -1361,6 +1378,7 @@ impl<'p> ILayerDescriptor for LayerDesc<'p> {
         }
     }
 
+    #[inline]
     fn is_object(&self) -> bool {
         match self {
             LayerDesc::Build(build_descriptor) => build_descriptor.is_object(),
@@ -1368,6 +1386,7 @@ impl<'p> ILayerDescriptor for LayerDesc<'p> {
         }
     }
 
+    #[inline]
     fn labels(&self) -> Option<Peek<'_>> {
         match self {
             LayerDesc::Build(build_descriptor) => build_descriptor.labels(),
@@ -1405,10 +1424,12 @@ enum BuildDescriptor {
 const EMPTY_DIGEST: GenericArray<u8, U32> = GenericArray::from_array([0; 32]);
 
 impl<'p> ILayerDescriptor for Peek<'p> {
+    #[inline]
     fn runtime_size(&self) -> u64 {
         self.at("runtime_size").u64().unwrap_or_default()
     }
 
+    #[inline]
     fn distribution(&self) -> GenericArray<u8, U32> {
         self.at("distribution")
             .blob()
@@ -1416,6 +1437,7 @@ impl<'p> ILayerDescriptor for Peek<'p> {
             .unwrap_or(EMPTY_DIGEST.clone())
     }
 
+    #[inline]
     fn content(&self) -> GenericArray<u8, U32> {
         self.at("content")
             .blob()
@@ -1423,14 +1445,17 @@ impl<'p> ILayerDescriptor for Peek<'p> {
             .unwrap_or(EMPTY_DIGEST.clone())
     }
 
+    #[inline]
     fn is_packed(&self) -> bool {
         self.at("is_packed").bool().unwrap_or_default()
     }
 
+    #[inline]
     fn is_object(&self) -> bool {
         self.at("is_object").bool().unwrap_or_default()
     }
 
+    #[inline]
     fn labels(&self) -> Option<Peek<'_>> {
         let labels = self.at("labels").blob()?;
         Some(Peek::from(flexbuffers::Reader::get_root(labels).ok()?))
@@ -1523,6 +1548,7 @@ struct Packed {
 }
 
 impl<P> IRecord for MultiRoot<P> {
+    #[inline]
     fn ns_chk(&self) -> u64 {
         match &self.state {
             State::Build { root, .. } => root.ns_chk(),
@@ -1530,6 +1556,7 @@ impl<P> IRecord for MultiRoot<P> {
         }
     }
 
+    #[inline]
     fn uuid(&self) -> uuid::Uuid {
         match &self.state {
             State::Build { root, .. } => root.uuid(),
@@ -1537,6 +1564,7 @@ impl<P> IRecord for MultiRoot<P> {
         }
     }
 
+    #[inline]
     fn opts(&self) -> &crate::Opts {
         match &self.state {
             State::Build { root, .. } => root.opts(),
@@ -1544,6 +1572,7 @@ impl<P> IRecord for MultiRoot<P> {
         }
     }
 
+    #[inline]
     fn bytes(&self) -> &[u8] {
         match &self.state {
             State::Build { root, .. } => root.bytes(),
@@ -1553,6 +1582,7 @@ impl<P> IRecord for MultiRoot<P> {
         }
     }
 
+    #[inline]
     fn to_record(&self) -> Record {
         match &self.state {
             State::Build { root, .. } => root.to_record(),
@@ -1560,6 +1590,7 @@ impl<P> IRecord for MultiRoot<P> {
         }
     }
 
+    #[inline]
     fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
         match &mut self.state {
             State::Build { root, .. } => root.opts_mut(),
@@ -1569,26 +1600,32 @@ impl<P> IRecord for MultiRoot<P> {
 }
 
 impl<'b, P> IRecord for &'b MultiRoot<P> {
+    #[inline]
     fn ns_chk(&self) -> u64 {
         MultiRoot::ns_chk(*self)
     }
 
+    #[inline]
     fn uuid(&self) -> uuid::Uuid {
         MultiRoot::uuid(*self)
     }
 
+    #[inline]
     fn opts(&self) -> &crate::Opts {
         MultiRoot::opts(*self)
     }
 
+    #[inline]
     fn bytes(&self) -> &[u8] {
         MultiRoot::bytes(*self)
     }
 
+    #[inline]
     fn to_record(&self) -> Record {
         MultiRoot::to_record(*self)
     }
 
+    #[inline]
     fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
         None
     }
