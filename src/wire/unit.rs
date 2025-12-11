@@ -83,7 +83,7 @@ pub struct Transport<'b> {
     /// Reserved
     reserved: u64,
     /// Bytes being wrapped by the wire
-    #[serde(serialize_with="serialize_bytes")]
+    #[serde(serialize_with="crate::util::ser::bytes")]
     bytes: &'b [u8],
 }
 
@@ -99,13 +99,6 @@ impl<'b> Transport<'b> {
     pub fn bytes(&self) -> &[u8] {
         self.bytes
     }
-}
-
-fn serialize_bytes<S>(bytes: &[u8], ser: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    ser.serialize_bytes(bytes)
 }
 
 impl<'b> Annotate for Transport<'b> {

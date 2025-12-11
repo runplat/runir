@@ -31,7 +31,7 @@ pub use run::RunCell;
 pub mod format_ext;
 pub mod fs;
 pub mod object_store;
-
+pub mod ser;
 
 use futures::future::RemoteHandle;
 

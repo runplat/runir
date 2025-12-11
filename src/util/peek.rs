@@ -1043,7 +1043,7 @@ pub mod peek_ser {
                 },
                 flexbuffers::FlexBufferType::Bool => visitor.visit_bool(self.as_bool()),
                 flexbuffers::FlexBufferType::String => visitor.visit_str(self.as_str()),
-                flexbuffers::FlexBufferType::Blob => visitor.visit_bytes(self.as_blob().0),
+                flexbuffers::FlexBufferType::Blob => visitor.visit_borrowed_bytes(self.as_blob().0),
                 _ => visitor.visit_none(),
             }
         }
@@ -1196,11 +1196,14 @@ pub mod peek_ser {
             todo!()
         }
 
-        fn deserialize_seq<V>(self, _: V) -> Result<V::Value, Self::Error>
+        fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value, Self::Error>
         where
             V: serde::de::Visitor<'peek>,
         {
-            todo!()
+            if self.flexbuffer_type().is_blob() {
+                return visitor.visit_borrowed_bytes(self.as_blob().0);
+            }
+            unimplemented!()
         }
 
         fn deserialize_tuple<V>(self, _: usize, _: V) -> Result<V::Value, Self::Error>
