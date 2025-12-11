@@ -71,7 +71,7 @@ pub trait PeekRefExtensions<'peek> {
 }
 
 /// Extension methods for working with a Peek container
-pub trait PeekExtensions<'peek> : Sized {
+pub trait PeekExtensions<'peek>: Sized {
     /// Returns the [`Peek<'peek>`] at the current position, if a value exists.
     ///
     /// This method is useful as an "escape hatch" when chaining peek operations,
@@ -153,7 +153,7 @@ pub trait PeekExtensions<'peek> : Sized {
     /// ```
     #[inline]
     fn at(self, key: &str) -> Option<Peek<'peek>> {
-        self.val().at(key)
+        self.val()?.at(key)
     }
 
     /// Traverses a list of keys and returns a `Peek` at the final value, if found.
@@ -178,7 +178,7 @@ pub trait PeekExtensions<'peek> : Sized {
     /// For dot-separated strings, see [`PeekExtensions::at_dot`].
     #[inline]
     fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<Peek<'peek>> {
-        self.val().at_path(keys)
+        self.val()?.at_path(keys)
     }
 
     /// Traverses a dot-separated path and returns a `Peek` at the final key, if it exists.
@@ -201,19 +201,18 @@ pub trait PeekExtensions<'peek> : Sized {
     /// ```
     #[inline]
     fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
-        self.val().at_dot(path)
+        self.val()?.at_dot(path)
     }
 
     /// Access current position as a vector and return the element at idx
     #[inline]
     fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
-        self.val().at_idx(idx)
+        self.val()?.at_idx(idx)
     }
 
     /// Peeks at the current position
     #[inline]
-    fn peek(self) -> Option<Peek<'peek>>
-    {
+    fn peek(self) -> Option<Peek<'peek>> {
         self.blob()
             .and_then(|b| flexbuffers::Reader::get_root(b).ok())
             .map(Peek)
@@ -222,31 +221,31 @@ pub trait PeekExtensions<'peek> : Sized {
     /// Returns a bool if the current peek context is a bool
     #[inline]
     fn bool(self) -> Option<bool> {
-        self.val().bool()
+        self.val()?.bool()
     }
 
     /// Returns a str if the current peek context is a str
     #[inline]
     fn str(self) -> Option<&'peek str> {
-        self.val().str()
+        self.val()?.str()
     }
 
     /// Returns a u64 if the current peek context is a u64
     #[inline]
     fn u64(self) -> Option<u64> {
-        self.val().u64()
+        self.val()?.u64()
     }
 
     /// Returns an i64 if the current peek context is a i64 or u64
     #[inline]
     fn int(self) -> Option<i64> {
-        self.val().int()
+        self.val()?.int()
     }
 
     /// Returns a blob slice if the current peek context is a blob slice
     #[inline]
     fn blob(self) -> Option<&'peek [u8]> {
-        self.val().blob()
+        self.val()?.blob()
     }
 
     /// Peeks at many keys at once
@@ -954,7 +953,8 @@ mod peek_path {
 }
 
 pub mod peek_ser {
-    use serde::Serialize;
+    use anyhow::anyhow;
+    use serde::{Deserializer, Serialize, de::DeserializeSeed};
 
     use super::{Peek, PeekExtensions};
 
@@ -1000,6 +1000,540 @@ pub mod peek_ser {
         }
     }
 
+    impl serde::de::Error for crate::Error {
+        fn custom<T>(msg: T) -> Self
+        where
+            T: std::fmt::Display,
+        {
+            anyhow!(msg.to_string()).into()
+        }
+    }
+
+    impl<'peek> Deserializer<'peek> for Peek<'peek> {
+        type Error = crate::Error;
+
+        fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            if let Some(kv) = self.clone().as_iter_kv() {
+                return visitor.visit_map(Map(kv.collect()));
+            }
+
+            match self.flexbuffer_type() {
+                flexbuffers::FlexBufferType::Null => visitor.visit_none(),
+                flexbuffers::FlexBufferType::Int => match self.bitwidth() {
+                    flexbuffers::BitWidth::W8 => visitor.visit_i8(self.as_i8()),
+                    flexbuffers::BitWidth::W16 => visitor.visit_i16(self.as_i16()),
+                    flexbuffers::BitWidth::W32 => visitor.visit_i32(self.as_i32()),
+                    flexbuffers::BitWidth::W64 => visitor.visit_i64(self.as_i64()),
+                },
+                flexbuffers::FlexBufferType::UInt => match self.bitwidth() {
+                    flexbuffers::BitWidth::W8 => visitor.visit_u8(self.as_u8()),
+                    flexbuffers::BitWidth::W16 => visitor.visit_u16(self.as_u16()),
+                    flexbuffers::BitWidth::W32 => visitor.visit_u32(self.as_u32()),
+                    flexbuffers::BitWidth::W64 => visitor.visit_u64(self.as_u64()),
+                },
+                flexbuffers::FlexBufferType::Float => match self.bitwidth() {
+                    flexbuffers::BitWidth::W32 => visitor.visit_f32(self.as_f32()),
+                    flexbuffers::BitWidth::W64 => visitor.visit_f64(self.as_f64()),
+                    _ => {
+                        unreachable!()
+                    }
+                },
+                flexbuffers::FlexBufferType::Bool => visitor.visit_bool(self.as_bool()),
+                flexbuffers::FlexBufferType::String => visitor.visit_str(self.as_str()),
+                flexbuffers::FlexBufferType::Blob => visitor.visit_bytes(self.as_blob().0),
+                _ => visitor.visit_none(),
+            }
+        }
+
+        fn deserialize_bool<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_bool(self.as_bool())
+        }
+
+        fn deserialize_i8<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_i8(self.as_i8())
+        }
+
+        fn deserialize_i16<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_i16(self.as_i16())
+        }
+
+        fn deserialize_i32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_i32(self.as_i32())
+        }
+
+        fn deserialize_i64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_i64(self.as_i64())
+        }
+
+        fn deserialize_u8<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_u8(self.as_u8())
+        }
+
+        fn deserialize_u16<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_u16(self.as_u16())
+        }
+
+        fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_u32(self.as_u32())
+        }
+
+        fn deserialize_u64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_u64(self.as_u64())
+        }
+
+        fn deserialize_f32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_f32(self.as_f32())
+        }
+
+        fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_f64(self.as_f64())
+        }
+
+        fn deserialize_char<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_char(self.as_u8() as char)
+        }
+
+        fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_borrowed_str(self.as_str())
+        }
+
+        fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            self.deserialize_str(visitor)
+        }
+
+        fn deserialize_bytes<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_borrowed_bytes(self.as_blob().0)
+        }
+
+        fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            self.deserialize_bytes(visitor)
+        }
+
+        fn deserialize_option<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            todo!()
+        }
+
+        fn deserialize_unit<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            todo!()
+        }
+
+        fn deserialize_unit_struct<V>(
+            self,
+            _: &'static str,
+            _: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            todo!()
+        }
+
+        fn deserialize_newtype_struct<V>(
+            self,
+            _: &'static str,
+            _: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            todo!()
+        }
+
+        fn deserialize_seq<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            todo!()
+        }
+
+        fn deserialize_tuple<V>(self, _: usize, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            todo!()
+        }
+
+        fn deserialize_tuple_struct<V>(
+            self,
+            _: &'static str,
+            _: usize,
+            _: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            todo!()
+        }
+
+        fn deserialize_map<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            if let Some(iter_kv) = self.as_iter_kv() {
+                let map = Map(iter_kv.collect());
+                visitor.visit_map(map)
+            } else {
+                Err(<Self::Error as serde::de::Error>::custom(
+                    "Not a map currently",
+                ))
+            }
+        }
+
+        fn deserialize_struct<V>(
+            self,
+            _: &'static str,
+            _: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            self.deserialize_map(visitor)
+        }
+
+        fn deserialize_enum<V>(
+            self,
+            _: &'static str,
+            _: &'static [&'static str],
+            _: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            todo!()
+        }
+
+        fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_str(self.as_str())
+        }
+
+        fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            self.deserialize_any(visitor)
+        }
+    }
+
+    struct Key<'peek>(&'peek str, usize);
+
+    impl<'peek> Deserializer<'peek> for Key<'peek> {
+        type Error = crate::Error;
+
+        fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            self.deserialize_str(visitor)
+        }
+
+        fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            self.deserialize_str(visitor)
+        }
+
+        fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_borrowed_str(self.0)
+        }
+
+        fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_u32(self.1 as u32)
+        }
+
+        fn deserialize_u64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            visitor.visit_u64(self.1 as u64)
+        }
+
+        fn deserialize_any<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_bool<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_i8<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_i16<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_i32<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_i64<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_u8<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_u16<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_f32<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_f64<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_char<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_bytes<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_byte_buf<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_option<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_unit<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_unit_struct<V>(self, _: &'static str, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_newtype_struct<V>(
+            self,
+            _: &'static str,
+            _: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_seq<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_tuple<V>(self, _: usize, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_tuple_struct<V>(
+            self,
+            _: &'static str,
+            _: usize,
+            _: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_map<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_struct<V>(
+            self,
+            _: &'static str,
+            _: &'static [&'static str],
+            _: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_enum<V>(
+            self,
+            _: &'static str,
+            _: &'static [&'static str],
+            _: V,
+        ) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+
+        fn deserialize_ignored_any<V>(self, _: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'peek>,
+        {
+            unimplemented!()
+        }
+    }
+
+    struct Map<'peek>(Vec<(&'peek str, Peek<'peek>)>);
+
+    impl<'peek> serde::de::MapAccess<'peek> for Map<'peek> {
+        type Error = crate::Error;
+
+        fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
+        where
+            K: DeserializeSeed<'peek>,
+        {
+            if let Some((key, _)) = self.0.last() {
+                Ok(Some(
+                    seed.deserialize(Key(key, self.0.len().saturating_sub(1)))?,
+                ))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
+        where
+            V: DeserializeSeed<'peek>,
+        {
+            if let Some((_k, reader)) = self.0.pop() {
+                seed.deserialize(reader)
+            } else {
+                unreachable!("Must not be called if next_key_seed returned None")
+            }
+        }
+    }
+
+    #[cfg(test)]
     #[test]
     fn test_serialize() {
         use crate::{IRecord, Namespace};
@@ -1023,5 +1557,40 @@ pub mod peek_ser {
 
         let val = toml::to_string(&val).unwrap();
         eprintln!("{val}");
+    }
+
+    #[cfg(test)]
+    #[derive(serde::Deserialize)]
+    struct Test<'peek> {
+        value: &'peek str,
+        float: f32,
+        integer: u64,
+    }
+    #[cfg(test)]
+    #[test]
+    fn test_deserialize() {
+        use toml::toml;
+
+        let rec = crate::Namespace::ephemeral().store(
+            "test",
+            &toml! {
+                [test]
+                value = "hello world"
+                float = 2.32
+                integer = 1000
+
+                [test2]
+                value = 3.14
+
+                [test3]
+                value = 100
+            },
+        );
+
+        let peek = crate::IRecord::peek(&rec).at("test").val().unwrap();
+        let test = <Test as serde::Deserialize>::deserialize(peek).unwrap();
+        assert_eq!(test.value, "hello world");
+        assert_eq!(test.float, 2.32);
+        assert_eq!(test.integer, 1000);
     }
 }
