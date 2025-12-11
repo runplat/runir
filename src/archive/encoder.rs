@@ -235,7 +235,7 @@ mod test {
             Some(0),
             entry
                 .peek()
-                .iter()
+                .as_iter()
                 .and_then(|mut i| i.next())
                 .unwrap()
                 .at("Extent")

@@ -218,7 +218,7 @@ async fn kv_get(value: &impl IRecord, format: Format, peek: Option<String>) -> r
     if value.opts().is_object() {
         if let Some(peek) = peek {
             if peek == "." {
-                if let Some(map) = value.peek().iter_kv() {
+                if let Some(map) = value.peek().as_iter_kv() {
                     for kvp in map {
                         eprintln!(
                             "{}: {:?} = {}",
@@ -227,7 +227,7 @@ async fn kv_get(value: &impl IRecord, format: Format, peek: Option<String>) -> r
                             kvp.1.deref()
                         );
                     }
-                } else if let Some(vec) = value.peek().iter() {
+                } else if let Some(vec) = value.peek().as_iter() {
                     for (i, v) in vec.enumerate() {
                         eprintln!("[{i}]: {:?} = {}", v.flexbuffer_type(), v.deref());
                     }
@@ -337,7 +337,7 @@ async fn kv_get_multi_root(
             debug!("Found projection at layer: {layer}");
             if let Some(ref peek) = peek {
                 if peek == "." {
-                    if let Some(map) = container.object(layer).iter_kv() {
+                    if let Some(map) = container.object(layer).as_iter_kv() {
                         for kvp in map {
                             eprintln!(
                                 "{}: {:?} = {}",
@@ -346,7 +346,7 @@ async fn kv_get_multi_root(
                                 kvp.1.deref()
                             );
                         }
-                    } else if let Some(vec) = container.object(layer).iter() {
+                    } else if let Some(vec) = container.object(layer).as_iter() {
                         for (i, v) in vec.enumerate() {
                             eprintln!("[{i}]: {:?} = {}", v.flexbuffer_type(), v.deref());
                         }

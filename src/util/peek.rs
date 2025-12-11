@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::{cell::RefCell, fmt::Display, ops::Deref};
 
 /// Wrapper over a flexbuffer reader, returned by IRecord::peek(..)
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Peek<'peek>(flexbuffers::Reader<&'peek [u8]>);
 
 impl<'peek> From<flexbuffers::Reader<&'peek [u8]>> for Peek<'peek> {
@@ -71,7 +71,36 @@ pub trait PeekRefExtensions<'peek> {
 }
 
 /// Extension methods for working with a Peek container
-pub trait PeekExtensions<'peek> {
+pub trait PeekExtensions<'peek> : Sized {
+    /// Returns the [`Peek<'peek>`] at the current position, if a value exists.
+    ///
+    /// This method is useful as an "escape hatch" when chaining peek operations,
+    /// allowing you to exit the fluent API and inspect or manipulate the raw [`Peek`] directly.
+    ///
+    /// # Example
+    /// ```rs no_run
+    /// if let Some(peek) = value.field(&path).val() {
+    ///     // Since Peek implements Deref<Target = flexbuffers::Reader>,
+    ///     // this allows it to use Reader's Display implementation when dereferenced
+    ///     println!("{}", peek.deref());
+    ///     
+    ///     // Similarly, all `as_*`, `get_*`, etc. methods from Reader are available as well
+    ///     println!("{}", peek.as_str());
+    /// }
+    /// ```
+    /// Returns `None` if the current position does not point to a value (e.g., an invalid path).
+    fn val(self) -> Option<Peek<'peek>>;
+
+    /// Returns an iterator of peek's from the current item
+    ///
+    /// If the current value is not a vector, returns None
+    fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>>;
+
+    /// Returns an iterator over kv pairs from the peek's current position
+    ///
+    /// If the current value is not a map, returns None
+    fn as_iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>>;
+
     /// Converts this `Peek` into a shared reference-like wrapper that enables `Index`-based traversal.
     ///
     /// This method returns a value that implements [`std::ops::Index`] with reference semantics,
@@ -122,7 +151,10 @@ pub trait PeekExtensions<'peek> {
     /// let peek = record.peek();
     /// let value = peek.at("key")?.str();
     /// ```
-    fn at(self, key: &str) -> Option<Peek<'peek>>;
+    #[inline]
+    fn at(self, key: &str) -> Option<Peek<'peek>> {
+        self.val().at(key)
+    }
 
     /// Traverses a list of keys and returns a `Peek` at the final value, if found.
     ///
@@ -144,7 +176,10 @@ pub trait PeekExtensions<'peek> {
     /// ```
     ///
     /// For dot-separated strings, see [`PeekExtensions::at_dot`].
-    fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<Peek<'peek>>;
+    #[inline]
+    fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<Peek<'peek>> {
+        self.val().at_path(keys)
+    }
 
     /// Traverses a dot-separated path and returns a `Peek` at the final key, if it exists.
     ///
@@ -164,63 +199,55 @@ pub trait PeekExtensions<'peek> {
     /// ```rs no_run
     /// peek.at("a").at("b").at("c")
     /// ```
-    fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>>;
+    #[inline]
+    fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
+        self.val().at_dot(path)
+    }
 
     /// Access current position as a vector and return the element at idx
-    fn at_idx(self, idx: usize) -> Option<Peek<'peek>>;
+    #[inline]
+    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
+        self.val().at_idx(idx)
+    }
 
     /// Peeks at the current position
     #[inline]
     fn peek(self) -> Option<Peek<'peek>>
-    where
-        Self: Sized
     {
-        self.blob().and_then(|b| flexbuffers::Reader::get_root(b).ok()).map(Peek)
+        self.blob()
+            .and_then(|b| flexbuffers::Reader::get_root(b).ok())
+            .map(Peek)
     }
 
     /// Returns a bool if the current peek context is a bool
-    fn bool(self) -> Option<bool>;
+    #[inline]
+    fn bool(self) -> Option<bool> {
+        self.val().bool()
+    }
 
     /// Returns a str if the current peek context is a str
-    fn str(self) -> Option<&'peek str>;
+    #[inline]
+    fn str(self) -> Option<&'peek str> {
+        self.val().str()
+    }
 
     /// Returns a u64 if the current peek context is a u64
-    fn u64(self) -> Option<u64>;
+    #[inline]
+    fn u64(self) -> Option<u64> {
+        self.val().u64()
+    }
 
     /// Returns an i64 if the current peek context is a i64 or u64
-    fn int(self) -> Option<i64>;
+    #[inline]
+    fn int(self) -> Option<i64> {
+        self.val().int()
+    }
 
     /// Returns a blob slice if the current peek context is a blob slice
-    fn blob(self) -> Option<&'peek [u8]>;
-
-    /// Returns an iterator of peek's from the current item
-    ///
-    /// If the current value is not a vector, returns None
-    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>>;
-
-    /// Returns an iterator over kv pairs from the peek's current position
-    ///
-    /// If the current value is not a map, returns None
-    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>>;
-
-    /// Returns the [`Peek<'peek>`] at the current position, if a value exists.
-    ///
-    /// This method is useful as an "escape hatch" when chaining peek operations,
-    /// allowing you to exit the fluent API and inspect or manipulate the raw [`Peek`] directly.
-    ///
-    /// # Example
-    /// ```rs no_run
-    /// if let Some(peek) = value.field(&path).val() {
-    ///     // Since Peek implements Deref<Target = flexbuffers::Reader>,
-    ///     // this allows it to use Reader's Display implementation when dereferenced
-    ///     println!("{}", peek.deref());
-    ///     
-    ///     // Similarly, all `as_*`, `get_*`, etc. methods from Reader are available as well
-    ///     println!("{}", peek.as_str());
-    /// }
-    /// ```
-    /// Returns `None` if the current position does not point to a value (e.g., an invalid path).
-    fn val(self) -> Option<Peek<'peek>>;
+    #[inline]
+    fn blob(self) -> Option<&'peek [u8]> {
+        self.val().blob()
+    }
 
     /// Peeks at many keys at once
     #[inline]
@@ -316,7 +343,7 @@ impl<'peek> PeekExtensions<'peek> for &'peek Peek<'peek> {
     fn at(self, key: &str) -> Option<Peek<'peek>> {
         self.get_map().ok().map(|p| Peek(p.idx(key)))
     }
-    
+
     #[inline]
     fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
         self.get_vector().ok().map(|p| Peek(p.idx(idx)))
@@ -331,21 +358,21 @@ impl<'peek> PeekExtensions<'peek> for &'peek Peek<'peek> {
 
     #[inline]
     fn bool(self) -> Option<bool> {
-        self.0.get_bool().ok()
+        self.get_bool().ok()
     }
 
     #[inline]
     fn str(self) -> Option<&'peek str> {
-        self.0.get_str().ok()
+        self.get_str().ok()
     }
 
     #[inline]
     fn u64(self) -> Option<u64> {
-        self.0.get_u64().ok()
+        self.get_u64().ok()
     }
 
     #[inline]
-    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+    fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
         self.get_vector().ok().map(|v| v.iter().map(|r| Peek(r)))
     }
 
@@ -357,7 +384,7 @@ impl<'peek> PeekExtensions<'peek> for &'peek Peek<'peek> {
     }
 
     #[inline]
-    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+    fn as_iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
         self.get_map().ok().map(|m| {
             let _m2 = m.clone();
             m.iter_keys().map(move |l| (l, Peek(_m2.idx(l))))
@@ -375,18 +402,13 @@ impl<'peek> PeekExtensions<'peek> for &'peek Peek<'peek> {
     }
 
     #[inline]
-    fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
-        self.clone().at_dot(path)
-    }
-
-    #[inline]
     fn val(self) -> Option<Peek<'peek>> {
         Some(self.clone())
     }
 
     #[inline]
     fn blob(self) -> Option<&'peek [u8]> {
-        self.clone().0.get_blob().ok().map(|b| b.0)
+        self.get_blob().ok().map(|b| b.0)
     }
 }
 
@@ -439,12 +461,12 @@ impl<'peek> PeekExtensions<'peek> for Peek<'peek> {
     }
 
     #[inline]
-    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+    fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
         self.get_vector().ok().map(|v| v.iter().map(|r| Peek(r)))
     }
 
     #[inline]
-    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+    fn as_iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
         self.get_map().ok().map(|m| {
             let _m = m.clone();
             let _m2 = m.clone();
@@ -472,38 +494,8 @@ impl<'peek> PeekExtensions<'peek> for Peek<'peek> {
 
 impl<'peek> PeekExtensions<'peek> for Option<Peek<'peek>> {
     #[inline]
-    fn at(self, key: &str) -> Option<Peek<'peek>> {
-        self.and_then(|r| r.at(key))
-    }
-
-    #[inline]
-    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
-        self.and_then(|r| r.at_idx(idx))
-    }
-
-    #[inline]
-    fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<Peek<'peek>> {
-        self.and_then(|p| p.at_path(keys))
-    }
-
-    #[inline]
-    fn bool(self) -> Option<bool> {
-        self.and_then(|r| r.bool())
-    }
-
-    #[inline]
-    fn str(self) -> Option<&'peek str> {
-        self.and_then(|r| r.str())
-    }
-
-    #[inline]
-    fn u64(self) -> Option<u64> {
-        self.and_then(|r| r.u64())
-    }
-
-    #[inline]
-    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
-        self.and_then(|r| r.iter())
+    fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+        self.and_then(|r| r.as_iter())
     }
 
     #[inline]
@@ -514,65 +506,20 @@ impl<'peek> PeekExtensions<'peek> for Option<Peek<'peek>> {
     }
 
     #[inline]
-    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
-        self.and_then(|r| r.iter_kv())
-    }
-
-    #[inline]
-    fn int(self) -> Option<i64> {
-        self.and_then(|r| r.int())
-    }
-
-    #[inline]
-    fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
-        self.and_then(|r| r.at_dot(path))
+    fn as_iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+        self.and_then(|r| r.as_iter_kv())
     }
 
     #[inline]
     fn val(self) -> Option<Peek<'peek>> {
         self
     }
-
-    #[inline]
-    fn blob(self) -> Option<&'peek [u8]> {
-        self.and_then(|r| r.blob())
-    }
 }
 
 impl<'peek> PeekExtensions<'peek> for &Option<Peek<'peek>> {
     #[inline]
-    fn at(self, key: &str) -> Option<Peek<'peek>> {
-        self.clone().and_then(|r| r.at(key))
-    }
-
-    #[inline]
-    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
-        self.clone().and_then(|r| r.at_idx(idx))
-    }
-
-    #[inline]
-    fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<Peek<'peek>> {
-        self.clone().and_then(|p| p.at_path(keys))
-    }
-
-    #[inline]
-    fn bool(self) -> Option<bool> {
-        self.clone().and_then(|r| r.bool())
-    }
-
-    #[inline]
-    fn str(self) -> Option<&'peek str> {
-        self.clone().and_then(|r| r.str())
-    }
-
-    #[inline]
-    fn u64(self) -> Option<u64> {
-        self.clone().and_then(|r| r.u64())
-    }
-
-    #[inline]
-    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
-        self.clone().and_then(|r| r.iter())
+    fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+        self.clone().and_then(|r| r.as_iter())
     }
 
     #[inline]
@@ -583,67 +530,17 @@ impl<'peek> PeekExtensions<'peek> for &Option<Peek<'peek>> {
     }
 
     #[inline]
-    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
-        self.clone().and_then(|r| r.iter_kv())
-    }
-
-    #[inline]
-    fn int(self) -> Option<i64> {
-        self.clone().and_then(|r| r.int())
-    }
-
-    #[inline]
-    fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
-        self.clone().and_then(|r| r.at_dot(path))
+    fn as_iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+        self.clone().and_then(|r| r.as_iter_kv())
     }
 
     #[inline]
     fn val(self) -> Option<Peek<'peek>> {
         self.clone()
     }
-
-    #[inline]
-    fn blob(self) -> Option<&'peek [u8]> {
-        self.clone().and_then(|r| r.blob())
-    }
 }
 
 impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
-    #[inline]
-    fn bool(self) -> Option<bool> {
-        self.cloned().and_then(|r| r.bool())
-    }
-
-    #[inline]
-    fn str(self) -> Option<&'peek str> {
-        self.cloned().and_then(|r| r.str())
-    }
-
-    #[inline]
-    fn u64(self) -> Option<u64> {
-        self.cloned().and_then(|r| r.u64())
-    }
-
-    #[inline]
-    fn at(self, key: &str) -> Option<Peek<'peek>> {
-        self.cloned().and_then(|r| r.at(key))
-    }
-    
-    #[inline]
-    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
-        self.cloned().and_then(|r| r.at_idx(idx))
-    }
-
-    #[inline]
-    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
-        self.cloned().and_then(|r| r.iter())
-    }
-
-    #[inline]
-    fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<Peek<'peek>> {
-        self.cloned().and_then(|r| r.at_path(keys))
-    }
-
     #[inline]
     fn in_ref(
         self,
@@ -652,28 +549,18 @@ impl<'peek> PeekExtensions<'peek> for Option<&'peek Peek<'peek>> {
     }
 
     #[inline]
-    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
-        self.cloned().and_then(|r| r.iter_kv())
+    fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+        self.cloned().and_then(|r| r.as_iter())
     }
 
     #[inline]
-    fn int(self) -> Option<i64> {
-        self.and_then(|r| r.int())
-    }
-
-    #[inline]
-    fn at_dot(self, path: &'peek str) -> Option<Peek<'peek>> {
-        self.cloned().and_then(|r| r.at_dot(path))
+    fn as_iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+        self.cloned().and_then(|r| r.as_iter_kv())
     }
 
     #[inline]
     fn val(self) -> Option<Peek<'peek>> {
         self.cloned()
-    }
-
-    #[inline]
-    fn blob(self) -> Option<&'peek [u8]> {
-        self.cloned().and_then(|r| r.blob())
     }
 }
 
@@ -687,58 +574,13 @@ impl<'peek> PeekExtensions<'peek> for &'peek crate::Data {
     }
 
     #[inline]
-    fn at(self, key: &str) -> Option<crate::util::Peek<'peek>> {
-        self.val().at(key)
-    }
-    
-    #[inline]
-    fn at_idx(self, idx: usize) -> Option<Peek<'peek>> {
-        self.val().at_idx(idx)
+    fn as_iter(self) -> Option<impl Iterator<Item = crate::util::Peek<'peek>>> {
+        self.val().as_iter()
     }
 
     #[inline]
-    fn at_path(self, keys: impl AsRef<[&'peek str]>) -> Option<crate::util::Peek<'peek>> {
-        self.val().at_path(keys)
-    }
-
-    #[inline]
-    fn at_dot(self, path: &'peek str) -> Option<crate::util::Peek<'peek>> {
-        self.val().at_dot(path)
-    }
-
-    #[inline]
-    fn bool(self) -> Option<bool> {
-        self.val().bool()
-    }
-
-    #[inline]
-    fn str(self) -> Option<&'peek str> {
-        self.val().str()
-    }
-
-    #[inline]
-    fn u64(self) -> Option<u64> {
-        self.val().u64()
-    }
-
-    #[inline]
-    fn int(self) -> Option<i64> {
-        self.val().int()
-    }
-
-    #[inline]
-    fn blob(self) -> Option<&'peek [u8]> {
-        self.val().blob()
-    }
-
-    #[inline]
-    fn iter(self) -> Option<impl Iterator<Item = crate::util::Peek<'peek>>> {
-        self.val().iter()
-    }
-
-    #[inline]
-    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, crate::util::Peek<'peek>)>> {
-        self.val().iter_kv()
+    fn as_iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, crate::util::Peek<'peek>)>> {
+        self.val().as_iter_kv()
     }
 
     #[inline]
@@ -746,6 +588,26 @@ impl<'peek> PeekExtensions<'peek> for &'peek crate::Data {
         flexbuffers::Reader::get_root(self.as_ref())
             .ok()
             .map(Peek::from)
+    }
+}
+
+impl<'peek> PeekExtensions<'peek> for &'peek [u8] {
+    fn val(self) -> Option<Peek<'peek>> {
+        flexbuffers::Reader::get_root(self).ok().map(Peek)
+    }
+
+    fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+        self.val().as_iter()
+    }
+
+    fn as_iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+        self.val().as_iter_kv()
+    }
+
+    fn in_ref(
+        self,
+    ) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
+        self.val().in_ref()
     }
 }
 
@@ -766,18 +628,18 @@ impl<'p> PeekRefExtensions<'p> for PeekRef<'p> {
     }
 
     #[inline]
+    fn int(&self) -> Option<i64> {
+        self.0.borrow().clone().int()
+    }
+
+    #[inline]
     fn iter(&self) -> Option<impl Iterator<Item = Peek<'p>>> {
-        self.0.borrow().clone().iter()
+        self.0.borrow().clone().as_iter()
     }
 
     #[inline]
     fn iter_kv(&self) -> Option<impl Iterator<Item = (&'p str, Peek<'p>)>> {
-        self.0.borrow().clone().iter_kv()
-    }
-
-    #[inline]
-    fn int(&self) -> Option<i64> {
-        self.0.borrow().clone().int()
+        self.0.borrow().clone().as_iter_kv()
     }
 }
 
@@ -1101,9 +963,9 @@ pub mod peek_ser {
         where
             S: serde::Serializer,
         {
-            if let Some(map) = self.iter_kv() {
+            if let Some(map) = self.as_iter_kv() {
                 serializer.collect_map(map)
-            } else if let Some(arr) = self.iter() {
+            } else if let Some(arr) = self.as_iter() {
                 serializer.collect_seq(arr)
             } else {
                 match self.flexbuffer_type() {

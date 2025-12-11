@@ -360,18 +360,18 @@ impl<'peek> PeekExtensions<'peek> for Node<'peek> {
     }
 
     #[inline]
-    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+    fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
         match self {
-            Node::Single(peek) => peek.iter(),
-            Node::Composite(graph) => graph.root.clone().iter(),
+            Node::Single(peek) => peek.as_iter(),
+            Node::Composite(graph) => graph.root.clone().as_iter(),
         }
     }
 
     #[inline]
-    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+    fn as_iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
         match self {
-            Node::Single(peek) => peek.iter_kv(),
-            Node::Composite(graph) => graph.root.clone().iter_kv(),
+            Node::Single(peek) => peek.as_iter_kv(),
+            Node::Composite(graph) => graph.root.clone().as_iter_kv(),
         }
     }
 
@@ -439,13 +439,13 @@ impl<'peek> PeekExtensions<'peek> for Option<Node<'peek>> {
     }
 
     #[inline]
-    fn iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
-        self.and_then(|s| s.iter())
+    fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+        self.and_then(|s| s.as_iter())
     }
 
     #[inline]
-    fn iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
-        self.and_then(|s| s.iter_kv())
+    fn as_iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+        self.and_then(|s| s.as_iter_kv())
     }
 
     #[inline]

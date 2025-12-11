@@ -1299,7 +1299,7 @@ impl<'p> IContainer<'p> for Record {
 
         let system = self.system()?;
 
-        if let Some(iter) = system.iter() {
+        if let Some(iter) = system.as_iter() {
             Ok(iter.map(|p| LayerDesc::Read(p)))
         } else {
             Err(anyhow!("System layer was in an unexpected format").into())
