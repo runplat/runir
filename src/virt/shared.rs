@@ -12,6 +12,7 @@ use super::vol::Volume;
 /// Wrapper over a shared volume
 ///
 /// Allows conversion into Data
+#[derive(Debug)]
 pub struct SharedVolume<T, Enc>(Arc<RwLock<Volume<T, Enc>>>);
 
 impl<T, Enc> SharedVolume<T, Enc> {

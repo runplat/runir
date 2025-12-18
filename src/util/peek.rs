@@ -1,10 +1,20 @@
-use crate::util::{Graph, Node};
+use crate::util::{Graph, Node, TrimPadding, ser::BytesMap};
 use serde::Deserialize;
 use std::{cell::RefCell, fmt::Display, ops::Deref};
 
 /// Wrapper over a flexbuffer reader, returned by IRecord::peek(..)
 #[derive(Clone, Debug)]
 pub struct Peek<'peek>(flexbuffers::Reader<&'peek [u8]>);
+
+impl<'peek> Peek<'peek> {
+    /// Deserializes the current peek state into a type
+    ///
+    /// Returns None if it could not be deserialized
+    #[inline]
+    pub fn try_to_obj<T: Deserialize<'peek>>(self) -> crate::Result<T> {
+        Ok(T::deserialize(self)?)
+    }
+}
 
 impl<'peek> From<flexbuffers::Reader<&'peek [u8]>> for Peek<'peek> {
     fn from(value: flexbuffers::Reader<&'peek [u8]>) -> Self {
@@ -156,6 +166,12 @@ pub trait PeekExtensions<'peek>: Sized {
         self.val()?.at(key)
     }
 
+    /// Shorthand for `.at(key).peek()`
+    #[inline]
+    fn peek_at(self, key: &str) -> Option<Peek<'peek>> {
+        self.val()?.at(key).peek()
+    }
+
     /// Traverses a list of keys and returns a `Peek` at the final value, if found.
     ///
     /// This is equivalent to chaining multiple `.at(..)` calls.  
@@ -230,6 +246,12 @@ pub trait PeekExtensions<'peek>: Sized {
         self.val()?.str()
     }
 
+    /// Returns true if the value matches the current position as a string
+    #[inline]
+    fn str_match(self, value: &str) -> bool {
+        self.str().map(|s| s == value).unwrap_or_default()
+    }
+
     /// Returns a u64 if the current peek context is a u64
     #[inline]
     fn u64(self) -> Option<u64> {
@@ -297,8 +319,11 @@ pub trait PeekExtensions<'peek>: Sized {
     where
         Self: Sized,
     {
-        self.val()
-            .and_then(|v| flexbuffers::from_slice(v.buffer()).ok())
+        self.val().and_then(|p| {
+            T::deserialize(p.clone())
+                .ok()
+                .or_else(|| T::deserialize(p.0).ok())
+        })
     }
 
     /// Converts the current Peek into a Graph
@@ -329,11 +354,7 @@ pub trait PeekExtensions<'peek>: Sized {
     where
         Self: Sized,
     {
-        self.at_path([".runir", "object"]).and_then(|v| {
-            flexbuffers::Reader::get_root(v.as_blob().0)
-                .ok()
-                .map(Peek::from)
-        })
+        self.peek_at(".object")
     }
 }
 
@@ -584,15 +605,19 @@ impl<'peek> PeekExtensions<'peek> for &'peek crate::Data {
 
     #[inline]
     fn val(self) -> Option<crate::util::Peek<'peek>> {
-        flexbuffers::Reader::get_root(self.as_ref())
-            .ok()
-            .map(Peek::from)
+        self.as_ref().val()
     }
 }
 
 impl<'peek> PeekExtensions<'peek> for &'peek [u8] {
     fn val(self) -> Option<Peek<'peek>> {
-        flexbuffers::Reader::get_root(self).ok().map(Peek)
+        flexbuffers::Reader::get_root(self.trim_padding()).ok().and_then(|r| {
+            if r.flexbuffer_type().is_blob() {
+                r.as_blob().0.val()
+            } else {
+                Some(Peek(r))
+            }
+        })
     }
 
     fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
@@ -607,6 +632,31 @@ impl<'peek> PeekExtensions<'peek> for &'peek [u8] {
         self,
     ) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
         self.val().in_ref()
+    }
+}
+
+const UNIMPLEMENTED: Option<Peek<'static>> = None;
+impl<'peek> PeekExtensions<'peek> for &'peek BytesMap<'peek> {
+    fn at(self, key: &str) -> Option<Peek<'peek>> {
+        self.get(key).and_then(|b| b.val())
+    }
+
+    fn val(self) -> Option<Peek<'peek>> {
+        UNIMPLEMENTED.val()
+    }
+
+    fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+        UNIMPLEMENTED.as_iter()
+    }
+
+    fn as_iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+        UNIMPLEMENTED.as_iter_kv()
+    }
+
+    fn in_ref(
+        self,
+    ) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
+        UNIMPLEMENTED.in_ref()
     }
 }
 
@@ -953,6 +1003,8 @@ mod peek_path {
 }
 
 pub mod peek_ser {
+    use std::collections::VecDeque;
+
     use anyhow::anyhow;
     use serde::{Deserializer, Serialize, de::DeserializeSeed};
 
@@ -963,37 +1015,29 @@ pub mod peek_ser {
         where
             S: serde::Serializer,
         {
+            use flexbuffers::BitWidth::*;
+            use flexbuffers::FlexBufferType::*;
+
             if let Some(map) = self.as_iter_kv() {
                 serializer.collect_map(map)
             } else if let Some(arr) = self.as_iter() {
                 serializer.collect_seq(arr)
             } else {
-                match self.flexbuffer_type() {
-                    flexbuffers::FlexBufferType::Null => serializer.serialize_none(),
-                    flexbuffers::FlexBufferType::Int => match self.bitwidth() {
-                        flexbuffers::BitWidth::W8 => serializer.serialize_i8(self.as_i8()),
-                        flexbuffers::BitWidth::W16 => serializer.serialize_i16(self.as_i16()),
-                        flexbuffers::BitWidth::W32 => serializer.serialize_i32(self.as_i32()),
-                        flexbuffers::BitWidth::W64 => serializer.serialize_i64(self.as_i64()),
-                    },
-                    flexbuffers::FlexBufferType::UInt => match self.bitwidth() {
-                        flexbuffers::BitWidth::W8 => serializer.serialize_u8(self.as_u8()),
-                        flexbuffers::BitWidth::W16 => serializer.serialize_u16(self.as_u16()),
-                        flexbuffers::BitWidth::W32 => serializer.serialize_u32(self.as_u32()),
-                        flexbuffers::BitWidth::W64 => serializer.serialize_u64(self.as_u64()),
-                    },
-                    flexbuffers::FlexBufferType::Float => match self.bitwidth() {
-                        flexbuffers::BitWidth::W32 => serializer.serialize_f32(self.as_f32()),
-                        flexbuffers::BitWidth::W64 => serializer.serialize_f64(self.as_f64()),
-                        _ => {
-                            unreachable!()
-                        }
-                    },
-                    flexbuffers::FlexBufferType::Bool => serializer.serialize_bool(self.as_bool()),
-                    flexbuffers::FlexBufferType::String => serializer.serialize_str(self.as_str()),
-                    flexbuffers::FlexBufferType::Blob => {
-                        serializer.serialize_bytes(self.as_blob().0)
-                    }
+                match (self.flexbuffer_type(), self.bitwidth()) {
+                    (Null, _) => serializer.serialize_none(),
+                    (Int, W8) => serializer.serialize_i8(self.as_i8()),
+                    (Int, W16) => serializer.serialize_i16(self.as_i16()),
+                    (Int, W32) => serializer.serialize_i32(self.as_i32()),
+                    (Int, W64) => serializer.serialize_i64(self.as_i64()),
+                    (UInt, W8) => serializer.serialize_u8(self.as_u8()),
+                    (UInt, W16) => serializer.serialize_u16(self.as_u16()),
+                    (UInt, W32) => serializer.serialize_u32(self.as_u32()),
+                    (UInt, W64) => serializer.serialize_u64(self.as_u64()),
+                    (Float, W32) => serializer.serialize_f32(self.as_f32()),
+                    (Float, W64) => serializer.serialize_f64(self.as_f64()),
+                    (Bool, _) => serializer.serialize_bool(self.as_bool()),
+                    (String, _) => serializer.serialize_str(self.as_str()),
+                    (Blob, _) => serializer.serialize_bytes(self.as_blob().0),
                     _ => serializer.serialize_none(),
                 }
             }
@@ -1018,33 +1062,28 @@ pub mod peek_ser {
         {
             if let Some(kv) = self.clone().as_iter_kv() {
                 return visitor.visit_map(Map(kv.collect()));
-            }
-
-            match self.flexbuffer_type() {
-                flexbuffers::FlexBufferType::Null => visitor.visit_none(),
-                flexbuffers::FlexBufferType::Int => match self.bitwidth() {
-                    flexbuffers::BitWidth::W8 => visitor.visit_i8(self.as_i8()),
-                    flexbuffers::BitWidth::W16 => visitor.visit_i16(self.as_i16()),
-                    flexbuffers::BitWidth::W32 => visitor.visit_i32(self.as_i32()),
-                    flexbuffers::BitWidth::W64 => visitor.visit_i64(self.as_i64()),
-                },
-                flexbuffers::FlexBufferType::UInt => match self.bitwidth() {
-                    flexbuffers::BitWidth::W8 => visitor.visit_u8(self.as_u8()),
-                    flexbuffers::BitWidth::W16 => visitor.visit_u16(self.as_u16()),
-                    flexbuffers::BitWidth::W32 => visitor.visit_u32(self.as_u32()),
-                    flexbuffers::BitWidth::W64 => visitor.visit_u64(self.as_u64()),
-                },
-                flexbuffers::FlexBufferType::Float => match self.bitwidth() {
-                    flexbuffers::BitWidth::W32 => visitor.visit_f32(self.as_f32()),
-                    flexbuffers::BitWidth::W64 => visitor.visit_f64(self.as_f64()),
-                    _ => {
-                        unreachable!()
-                    }
-                },
-                flexbuffers::FlexBufferType::Bool => visitor.visit_bool(self.as_bool()),
-                flexbuffers::FlexBufferType::String => visitor.visit_str(self.as_str()),
-                flexbuffers::FlexBufferType::Blob => visitor.visit_borrowed_bytes(self.as_blob().0),
-                _ => visitor.visit_none(),
+            } else if let Some(list) = self.clone().as_iter() {
+                return visitor.visit_seq(List(list.collect()));
+            } else {
+                use flexbuffers::BitWidth::*;
+                use flexbuffers::FlexBufferType::*;
+                match (self.flexbuffer_type(), self.bitwidth()) {
+                    (Null, _) => visitor.visit_none(),
+                    (Int, W8) => visitor.visit_i8(self.as_i8()),
+                    (Int, W16) => visitor.visit_i16(self.as_i16()),
+                    (Int, W32) => visitor.visit_i32(self.as_i32()),
+                    (Int, W64) => visitor.visit_i64(self.as_i64()),
+                    (UInt, W8) => visitor.visit_u8(self.as_u8()),
+                    (UInt, W16) => visitor.visit_u16(self.as_u16()),
+                    (UInt, W32) => visitor.visit_u32(self.as_u32()),
+                    (UInt, W64) => visitor.visit_u64(self.as_u64()),
+                    (Float, W32) => visitor.visit_f32(self.as_f32()),
+                    (Float, W64) => visitor.visit_f64(self.as_f64()),
+                    (Bool, _) => visitor.visit_bool(self.as_bool()),
+                    (String, _) => visitor.visit_str(self.as_str()),
+                    (Blob, _) => visitor.visit_borrowed_bytes(self.as_blob().0),
+                    _ => Ok(self.0.deserialize_any(visitor)?),
+                }
             }
         }
 
@@ -1160,76 +1199,105 @@ pub mod peek_ser {
             self.deserialize_bytes(visitor)
         }
 
-        fn deserialize_option<V>(self, _: V) -> Result<V::Value, Self::Error>
+        fn deserialize_option<V>(self, visitor: V) -> Result<V::Value, Self::Error>
         where
             V: serde::de::Visitor<'peek>,
         {
-            todo!()
+            if self.flexbuffer_type().is_null() {
+                visitor.visit_none()
+            } else {
+                visitor.visit_some(self)
+            }
         }
 
-        fn deserialize_unit<V>(self, _: V) -> Result<V::Value, Self::Error>
+        fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value, Self::Error>
         where
             V: serde::de::Visitor<'peek>,
         {
-            todo!()
+            visitor.visit_unit()
         }
 
         fn deserialize_unit_struct<V>(
             self,
-            _: &'static str,
-            _: V,
+            name: &'static str,
+            visitor: V,
         ) -> Result<V::Value, Self::Error>
         where
             V: serde::de::Visitor<'peek>,
         {
-            todo!()
+            Ok(self.0.deserialize_unit_struct(name, visitor)?)
         }
 
         fn deserialize_newtype_struct<V>(
             self,
-            _: &'static str,
-            _: V,
+            name: &'static str,
+            visitor: V,
         ) -> Result<V::Value, Self::Error>
         where
             V: serde::de::Visitor<'peek>,
         {
-            todo!()
+            Ok(self.0.deserialize_newtype_struct(name, visitor)?)
         }
 
         fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value, Self::Error>
         where
             V: serde::de::Visitor<'peek>,
         {
+            /*
+                NOTE: This special handling allows us to store a flexbuffer root as a plain blob.
+                Otherwise, we could use the flexbuffer implementation instead
+            */
             if self.flexbuffer_type().is_blob() {
-                return visitor.visit_borrowed_bytes(self.as_blob().0);
+                let list = self
+                    .val()
+                    .as_iter()
+                    .map(|v| List(v.collect()))
+                    .unwrap_or_else(|| List(vec![].into()));
+                visitor.visit_seq(list)
+            } else if let Some(vec) = self.as_iter() {
+                visitor.visit_seq(List(vec.collect()))
+            } else {
+                visitor.visit_none()
             }
-            unimplemented!()
         }
 
-        fn deserialize_tuple<V>(self, _: usize, _: V) -> Result<V::Value, Self::Error>
+        fn deserialize_tuple<V>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error>
         where
             V: serde::de::Visitor<'peek>,
         {
-            todo!()
+            Ok(self.0.deserialize_tuple(len, visitor)?)
         }
 
         fn deserialize_tuple_struct<V>(
             self,
-            _: &'static str,
-            _: usize,
-            _: V,
+            name: &'static str,
+            len: usize,
+            visitor: V,
         ) -> Result<V::Value, Self::Error>
         where
             V: serde::de::Visitor<'peek>,
         {
-            todo!()
+            Ok(self.0.deserialize_tuple_struct(name, len, visitor)?)
         }
 
         fn deserialize_map<V>(self, visitor: V) -> Result<V::Value, Self::Error>
         where
             V: serde::de::Visitor<'peek>,
         {
-            if let Some(iter_kv) = self.as_iter_kv() {
+            /*
+                NOTE: This special handling allows us to store a flexbuffer root as a plain blob.
+                Otherwise, we could use the flexbuffer implementation instead
+            */
+            if self.flexbuffer_type().is_blob() {
+                let map = self
+                    .as_blob()
+                    .0
+                    .val()
+                    .as_iter_kv()
+                    .map(|v| Map(v.collect()))
+                    .unwrap_or_else(|| Map(vec![].into()));
+                visitor.visit_map(map)
+            } else if let Some(iter_kv) = self.as_iter_kv() {
                 let map = Map(iter_kv.collect());
                 visitor.visit_map(map)
             } else {
@@ -1253,14 +1321,14 @@ pub mod peek_ser {
 
         fn deserialize_enum<V>(
             self,
-            _: &'static str,
-            _: &'static [&'static str],
-            _: V,
+            name: &'static str,
+            variants: &'static [&'static str],
+            visitor: V,
         ) -> Result<V::Value, Self::Error>
         where
             V: serde::de::Visitor<'peek>,
         {
-            todo!()
+            Ok(self.0.deserialize_enum(name, variants, visitor)?)
         }
 
         fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -1318,11 +1386,11 @@ pub mod peek_ser {
             visitor.visit_u64(self.1 as u64)
         }
 
-        fn deserialize_any<V>(self, _: V) -> Result<V::Value, Self::Error>
+        fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
         where
             V: serde::de::Visitor<'peek>,
         {
-            unimplemented!()
+            visitor.visit_str(self.0)
         }
 
         fn deserialize_bool<V>(self, _: V) -> Result<V::Value, Self::Error>
@@ -1506,7 +1574,7 @@ pub mod peek_ser {
         }
     }
 
-    struct Map<'peek>(Vec<(&'peek str, Peek<'peek>)>);
+    struct Map<'peek>(VecDeque<(&'peek str, Peek<'peek>)>);
 
     impl<'peek> serde::de::MapAccess<'peek> for Map<'peek> {
         type Error = crate::Error;
@@ -1515,7 +1583,7 @@ pub mod peek_ser {
         where
             K: DeserializeSeed<'peek>,
         {
-            if let Some((key, _)) = self.0.last() {
+            if let Some((key, _)) = self.0.front() {
                 Ok(Some(
                     seed.deserialize(Key(key, self.0.len().saturating_sub(1)))?,
                 ))
@@ -1528,10 +1596,28 @@ pub mod peek_ser {
         where
             V: DeserializeSeed<'peek>,
         {
-            if let Some((_k, reader)) = self.0.pop() {
+            if let Some((_k, reader)) = self.0.pop_front() {
                 seed.deserialize(reader)
             } else {
                 unreachable!("Must not be called if next_key_seed returned None")
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct List<'peek>(VecDeque<Peek<'peek>>);
+
+    impl<'peek> serde::de::SeqAccess<'peek> for List<'peek> {
+        type Error = crate::Error;
+
+        fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+        where
+            T: DeserializeSeed<'peek>,
+        {
+            if let Some(reader) = self.0.pop_front() {
+                Ok(Some(seed.deserialize(reader)?))
+            } else {
+                Ok(None)
             }
         }
     }
@@ -1591,7 +1677,7 @@ pub mod peek_ser {
         );
 
         let peek = crate::IRecord::peek(&rec).at("test").val().unwrap();
-        let test = <Test as serde::Deserialize>::deserialize(peek).unwrap();
+        let test: Test = peek.try_to_obj().unwrap();
         assert_eq!(test.value, "hello world");
         assert_eq!(test.float, 2.32);
         assert_eq!(test.integer, 1000);

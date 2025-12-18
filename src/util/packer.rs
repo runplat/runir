@@ -27,6 +27,7 @@ pub trait Packer: private::Sealed {
 }
 
 /// Generic Packer trait implementation
+#[derive(Debug)]
 pub struct GenericPacker<const SIZE_THRESHOLD: usize, const COMPRESSION_LEVEL: i32>;
 
 impl<const SIZE_THRESHOLD: usize, const COMPRESSION_LEVEL: i32> Packer

@@ -51,11 +51,13 @@ const fn empty_labels() -> Option<impl Serialize> {
 /// ### "system" layer
 ///
 /// The system layer is a vector where each entry is a descriptor containing information on each layer. (Including the system layer)
+#[derive(Debug)]
 pub struct MultiRoot<P> {
     state: State,
     _p: PhantomData<P>,
 }
 
+#[derive(Debug)]
 struct Builder {
     /// Internal serializer
     ser: flexbuffers::FlexbufferSerializer,
@@ -65,6 +67,7 @@ struct Builder {
     layers: Vec<(BuildDescriptor, Data)>,
 }
 
+#[derive(Debug)]
 enum State {
     /// Build state allows new layers to be pushed
     Build {
@@ -1056,7 +1059,7 @@ impl<P: Packer> MultiRoot<P> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SystemLayer(Layer);
 
 impl SystemLayer {
@@ -1077,21 +1080,15 @@ impl SystemLayer {
     where
         Self: 'p,
     {
-        self.0
-            .peek()
-            .val()?
-            .get_vector()
-            .ok()
-            .map(|v| v.idx(layer).into())
-            .and_then(|v: Peek| {
-                let labels = v.at("labels").blob()?;
-                Some(Peek::from(flexbuffers::Reader::get_root(labels).ok()?))
-            })
+        self.0.peek().at_idx(layer).and_then(|v: Peek| {
+            let labels = v.at("labels").blob()?;
+            Some(Peek::from(flexbuffers::Reader::get_root(labels).ok()?))
+        })
     }
 }
 
 /// Scopes the view of a container into a single layer stored in the container
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Layer {
     container: Arc<Container>,
     opts: Opts,
@@ -1215,7 +1212,8 @@ impl IRecord for Layer {
 
     #[inline]
     fn to_record(&self) -> Record {
-        let (k, data, ns_chk, ts, opts) = self.container.to_record().into_parts();
+        let (info, data) = self.container.to_record().into_parts();
+        let (k, ns_chk, ts, opts) = info.to_parts();
 
         if let Some((_, data)) =
             data.find_view(self.bytes())
@@ -1228,9 +1226,21 @@ impl IRecord for Layer {
                     _ => None,
                 })
         {
-            Record::from_parts((self.uuid(), data, self.ns_chk(), ts, self.opts))
+            let info = RecordInfo {
+                key: self.uuid(),
+                ns_chk: self.ns_chk(),
+                opts: self.opts,
+                ts,
+            };
+            Record::from_parts((info, data))
         } else {
-            Record::from_parts((k, data, ns_chk, ts, opts))
+            let info = RecordInfo {
+                key: k,
+                ns_chk,
+                opts,
+                ts,
+            };
+            Record::from_parts((info, data))
         }
     }
 }
@@ -1314,13 +1324,9 @@ impl<'p> IContainer<'p> for Record {
 
     #[inline]
     fn system(&'p self) -> crate::Result<Peek<'p>> {
-       match self.peek().at_idx(1).peek() {
-            Some(found) => {
-                Ok(found)
-            },
-            None => {
-                Err(anyhow!("Container is in an invalid format").into())
-            },
+        match self.peek().at_idx(1).val().peek() {
+            Some(found) => Ok(found),
+            None => Err(anyhow!("Container is in an invalid format").into()),
         }
     }
 }
@@ -1401,7 +1407,7 @@ impl<'p> ILayerDescriptor for LayerDesc<'p> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum BuildDescriptor {
     New {
         /// Content digest of the layer
@@ -1463,8 +1469,7 @@ impl<'p> ILayerDescriptor for Peek<'p> {
 
     #[inline]
     fn labels(&self) -> Option<Peek<'_>> {
-        let labels = self.at("labels").blob()?;
-        Some(Peek::from(flexbuffers::Reader::get_root(labels).ok()?))
+        self.at("labels").peek()
     }
 }
 
@@ -1537,15 +1542,15 @@ impl<'p> ILayerDescriptor for BuildDescriptor {
     #[inline]
     fn labels(&self) -> Option<Peek<'_>> {
         match self {
-            BuildDescriptor::New { labels, .. } => flexbuffers::Reader::get_root(labels.as_slice())
-                .ok()
-                .map(Peek::from),
+            BuildDescriptor::New { labels, .. } => {
+                labels.as_slice().val()
+            }
             BuildDescriptor::Existing { system, layer } => system.labels(*layer),
         }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Packed {
     /// Digest of the packed content
     digest: [u8; 32],
@@ -1706,7 +1711,6 @@ mod test {
                 .str()
                 .unwrap()
         );
-
         assert_eq!(
             "test",
             container

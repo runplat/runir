@@ -14,13 +14,13 @@ use super::vol::{Volume, VolumeTarget};
 /// If an object requires additional memory to be used, the index for that object reserves future memory, otherwise it is considered "inline".
 /// 
 /// At runtime, the atlas can be used along side the data storage medium to unpack objects on demand into the atlas
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct AtlasEncoder {
     objects: Vec<Stored>,
     unpacked: HashSet<usize>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Stored {
     Inline,
     Object {
