@@ -1,6 +1,5 @@
 use crate::{
-    IRecord, Record, Storage, Store, VecIndex,
-    store::{ArchiveMember, StoreArchive},
+    IRecord, Record, Storage, Store, VecIndex, store::{ArchiveMember, StoreArchive}
 };
 use parking_lot::RwLock;
 use std::{
@@ -82,7 +81,9 @@ impl State {
     /// Reduces all records from all archive members found in Store into a single snapshot
     ///
     /// Archive Member -> Index => Snapshot
-    pub fn reduce(&self) -> std::io::Result<()> {
+    /// 
+    /// `S` is the intermediate storage type to use when processing each archive member
+    pub fn reduce<S: Storage<Record = Record>>(&self) -> std::io::Result<()> {
         // Store::archive() will flush all pending archive members into a StoreArchive
         let store_archive = self.store.archive();
 
@@ -119,7 +120,7 @@ impl State {
                 "====== Processing member {idx}, count: {} ======",
                 i.storage().len()
             );
-            for r in i.storage().iter_records().filter(|r| !r.opts().is_transport()) {
+            for r in i.storage().iter_records() {
                 match next_snapshot.index(r.clone()) {
                     crate::index::IndexResult::Inserted(k) => {
                         debug!(
@@ -304,7 +305,7 @@ impl State {
             pusher.ensure_push(mem);
         }
 
-        state.reduce()?;
+        state.reduce::<Vec<Record>>()?;
 
         debug!(
             frontend = F::NAME,

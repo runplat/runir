@@ -282,7 +282,7 @@ impl KeyValue {
         self.worker.sync()?.await?;
 
         // Flushes all work to disk-backed stores and updates indicies
-        self.shared.state.reduce()?;
+        self.shared.state.reduce::<Vec<Record>>()?;
         Ok(())
     }
 

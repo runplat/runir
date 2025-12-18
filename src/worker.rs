@@ -4,7 +4,6 @@ use crate::{
     store::StoreSettings,
     vol::{Volume, new_mmap_anon_target},
 };
-use crossbeam::utils::Backoff;
 use futures::future::RemoteHandle;
 use std::sync::Arc;
 use tracing::debug;
@@ -74,10 +73,16 @@ impl Worker {
         }
     }
 
-    /// Consumes worker state and returns an index
+    /// Consumes worker state and returns an index from a default storage
     #[inline]
-    pub fn to_index<S: Storage<Record = Record>>(mut self) -> Index<Record, S> {
-        let mut index = Index::<Record, S>::default();
+    pub fn to_index<S: Storage<Record = Record>>(self) -> Index<Record, S> {
+        self.into_index(S::default())
+    }
+
+    /// Consumes worker state into a index w/ storage from caller
+    #[inline]
+    pub fn into_index<S: Storage<Record = Record>>(mut self, storage: S) -> Index<Record, S> {
+        let mut index = Index::<Record, S>::from(storage);
         for r in self.records.drain(..) {
             index.index(r);
         }
@@ -123,12 +128,8 @@ impl Worker {
                         Handle mmap_anon error case (probably an edge case)
                      */
                     let output = Volume::new_archive(new_mmap_anon_target(archive_path, total_size)?);
-                    let mut member = output.archive(entries).await?.to_archive_member()?;
-                    let backoff = Backoff::new();
-                    while let Some(retry) = packer.push(member) {
-                        member = retry;
-                        backoff.spin();
-                    }
+                    let member = output.archive(entries).await?.to_archive_member()?;
+                    packer.ensure_push(member);
                 } else {
                     debug!("No new entries to sync");
                 }
