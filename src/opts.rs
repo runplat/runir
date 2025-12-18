@@ -1,6 +1,7 @@
 use std::ops::BitOr;
 
-pub const EMPTY_OPTS: &Opts = &Opts::empty();
+/// Constant for `Opts::empty()`
+pub const EMPTY_OPTS: Opts = Opts::empty();
 
 /// Record option flags used throughout the runir system.
 ///
@@ -53,6 +54,45 @@ pub struct Opts {
     /// - May be repurposed for experimental flags, encoding versions, or special features
     /// - Preserved during encode/decode and bitwise merging for forward compatibility
     reserved: [u8; 4],
+}
+
+pub(crate) mod ser {
+    use serde::de::Visitor;
+
+    use crate::Opts;
+    #[inline]
+    pub fn serialize<S>(opts: &Opts, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        ser.serialize_u64(opts.encode())
+    }
+
+    /// Deserializes an object from a bytes buffer
+    #[inline]
+    pub fn deserialize<'de, D>(deser: D) -> Result<Opts, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deser.deserialize_u64(OptsVisitor)
+    }
+
+    struct OptsVisitor;
+
+    impl Visitor<'_> for OptsVisitor {
+        type Value = Opts;
+    
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(formatter, "Expecting `u64`")
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+        {
+            Ok(Opts::decode(v))
+        }
+    }
 }
 
 impl Opts {
@@ -122,6 +162,12 @@ impl Opts {
         self.branch.is_empty()
     }
 
+    /// Returns true if the stored data is canonical Record Data
+    #[inline]
+    pub const fn is_canonical_data(&self) -> bool {
+        self.spec.is_empty()
+    }
+
     /// Returns true if the data stored by the record has been marked for deletion
     #[inline]
     pub fn is_deleted(&self) -> bool {
@@ -134,22 +180,10 @@ impl Opts {
         self.branch.contains(Branch::Staging)
     }
 
-    /// Returns true if the data stored by the record has been marked for transport
-    #[inline]
-    pub fn is_transport(&self) -> bool {
-        self.branch.contains(Branch::Transport)
-    }
-
     /// Returns true if the data stored by the record is "soft" deleted
     #[inline]
     pub fn is_soft_deleted(&self) -> bool {
         self.is_deleted() && !self.is_staging()
-    }
-
-    /// Returns true if the record has wire unit format enabled
-    #[inline]
-    pub fn is_wire_unit(&self) -> bool {
-        self.runtime.contains(Runtime::WireUnit)
     }
 
     /// Enables runtime indexing behavior for the record.
@@ -170,15 +204,6 @@ impl Opts {
     #[inline]
     pub fn enable_content_addressing(&mut self) -> &mut Self {
         self.runtime.set(Runtime::ContentAddress, true);
-        self
-    }
-
-    /// Enables runtime wire unit format mode for the record
-    /// 
-    /// Wire unit mode means that the record is using a specific flexbuffer-based format
-    #[inline]
-    pub fn enable_wire_unit(&mut self) -> &mut Self {
-        self.runtime.set(Runtime::WireUnit, true);
         self
     }
 
@@ -237,6 +262,20 @@ impl Opts {
         self
     }
 
+    /// Sets the info spec flag, to indicate that the stored data is an archive manifest
+    #[inline]
+    pub fn set_info_spec(&mut self, enabled: bool) -> &mut Self {
+        self.spec.set(Spec::Info, enabled);
+        self
+    }
+
+    /// Sets the extension spec flag, to indicate that the stored data is an archive manifest
+    #[inline]
+    pub fn set_ext_spec(&mut self, enabled: bool) -> &mut Self {
+        self.spec.set(Spec::Ext, enabled);
+        self
+    }
+
     /// Enables a branch flag
     #[inline]
     pub fn enable_branch(&mut self, branch: Branch) -> &mut Self {
@@ -262,14 +301,6 @@ impl Opts {
     pub fn promote(&mut self) -> &mut Self {
         self.branch.remove(Branch::Staging);
         self.branch.remove(Branch::Deleted);
-        self
-    }
-
-    /// Removes Transport from branch options which will
-    /// flag the record as being transport done
-    #[inline]
-    pub fn done(&mut self) -> &mut Self {
-        self.branch.remove(Branch::Transport);
         self
     }
 
@@ -332,8 +363,6 @@ bitflags::bitflags! {
         const NoArchive = 1 << 1;
         /// Indicates that the record label is the content digest of the data stored by the record
         const ContentAddress = 1 << 2;
-        /// Indicates that a record has enabled wire unit format
-        const WireUnit = 1 << 3;
     }
 }
 
@@ -356,8 +385,12 @@ bitflags::bitflags! {
     pub struct Spec: u8 {
         /// Indicates that the stored data does not follow any system specifications
         const None = 0;
-        /// Indicates that data stored for the record is an archive manifest
+        /// Indicates that stored data is an archive manifest
         const Manifest = 1;
+        /// Indicates stored data is a record info
+        const Info = 2;
+        /// Indicates stored data is extension data
+        const Ext = 3;
     }
 }
 
@@ -382,14 +415,57 @@ bitflags::bitflags! {
         /// however only 1 of each content digest will be preserved.
         const Deleted  = 0b00000_010;
 
-        /// Transport branch marks a record as being "in-flight" or "transporting" which means
-        /// the stored bytes relevant to the record have been wrapped in a Transport struct
-        const Transport = 0b00000_100;
-
         /// "Ephemeral" branch signals a scratch branch whose record should not be persisted
         const Ephemeral = u8::MAX;
 
         // Everything else is reserved
+    }
+}
+
+
+bitflags::bitflags! {
+    /// Transport describes the internal format of the stored data belonging to the record
+    /// 
+    /// For example, by default all record data when a record is created is considered "inline",
+    /// because the data of the record is available as a pointer.
+    /// 
+    /// However, when a record is persisted to a medium, the transport could change depending on,
+    /// the constraints.
+    /// 
+    /// For example, for a very large record, locally it can be memory-mapped and attached to a record "inline".
+    /// If that record were to be moved to a remote location, moving it "inline" would not be physically
+    /// possible, as it would likely take more than a single frame to move the data, so in-flight, the record
+    /// would not be viewable "inline". 
+    /// 
+    /// (Even for "smaller" records this is the case however that will be handled by the "inline" transport for reasonably sized records)
+    /// 
+    /// If the runtime does not account for this, it can result in process stalls or exceeding storage limits
+    /// unexpectedly.
+    /// 
+    /// To address this, we can use a "block" strategy. With a block strategy, we view the mass of data as several
+    /// blocks or chunks which reduce the logical overhead to a much more manageable number. We're then able to
+    /// uniformly reserve capacity and resources to dis-assemble and re-assemble very large records from a list of
+    /// blocks.
+    /// 
+    /// ### Notes: 
+    /// - How do we configure a uniformly good block strategy?
+    /// 
+    #[derive(Hash, Default, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct Transport : u8 {
+        /// (Default) Use "inline" transport mode
+        const Inline = 0;
+
+        /// Use "block" transport mode
+        const Block = 1;
+    }
+}
+
+impl From<Storage> for Opts {
+    #[inline]
+    fn from(value: Storage) -> Self {
+        let mut opts = Opts::empty();
+        opts.storage = value;
+        opts
     }
 }
 

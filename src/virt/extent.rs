@@ -3,7 +3,7 @@ use sha2::Digest;
 use tracing::error;
 use uuid::Uuid;
 
-use crate::{Data, Opts, Record, archive::Sha256Digest};
+use crate::{Data, Opts, Record, RecordInfo, archive::Sha256Digest};
 
 /// Provides offset/len information of stored record data in addition
 /// to source and storage metadata
@@ -47,11 +47,13 @@ impl RecordExtent {
     #[inline]
     pub fn materialize(&self, data: &Data) -> Option<Record> {
         let rec = Record::from_parts((
-            Uuid::from_u64_pair(self.key, self.crc),
+            RecordInfo {
+                key: Uuid::from_u64_pair(self.key, self.crc),
+                ns_chk: self.ns_chk,
+                opts: Opts::decode(self.opts),
+                ts: self.ts,
+            },
             data.clone(),
-            self.ns_chk,
-            self.ts,
-            Opts::decode(self.opts),
         ));
 
         let rec_is_valid = rec.is_valid();
@@ -61,8 +63,8 @@ impl RecordExtent {
         } else {
             error!(
                 is_valid = rec_is_valid,
-                data=hex::encode(digest),
-                expected=hex::encode(self.content),
+                data = hex::encode(digest),
+                expected = hex::encode(self.content),
                 "Could not materialize record extent from provided data"
             );
             None

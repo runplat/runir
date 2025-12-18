@@ -1,5 +1,5 @@
 use crate::{
-    Data, IRecord, Index, Opts, Record, Storage,
+    Data, IRecord, Index, Opts, Record, RecordInfo, Storage,
     record::record_crc,
     util::{Packer, packer::GenericPacker},
     virt::{AtlasEncoder, SharedVolume},
@@ -1035,8 +1035,8 @@ impl<P: Packer> MultiRoot<P> {
         match &self.state {
             State::Build { root, .. } => root.clone(),
             _ => {
-                let (uuid, data, ns_chk, ts, opts) = self.to_record().into_parts();
-
+                let (info, data) = self.to_record().into_parts();
+                let (uuid, ns_chk, ts, opts) = info.to_parts();
                 let data = data
                     .find_view(self.bytes())
                     .expect("should be able to find it because self.byytes() is always from data")
@@ -1044,7 +1044,13 @@ impl<P: Packer> MultiRoot<P> {
 
                 let (hi, _) = uuid.as_u64_pair();
                 let uuid = uuid::Uuid::from_u64_pair(hi, record_crc(self.bytes(), ts));
-                Record::from_parts((uuid, data, ns_chk, ts, opts))
+                let info = RecordInfo {
+                    key: uuid,
+                    ns_chk,
+                    opts,
+                    ts,
+                };
+                Record::from_parts((info, data))
             }
         }
     }

@@ -2,7 +2,7 @@ use crate::{
     Data, Namespace, Opts, Symbol,
     archive::{self, Entry, HeaderBuilder, Sha256Digest},
     opts::Branch,
-    util::{Peek, PeekExtensions, format_ext::AsObject},
+    util::{Peek, PeekExtensions},
 };
 use ascii::AsAsciiStr;
 use crc::{CRC_64_MS, Crc, Digest};
@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 static CRC: OnceLock<Crc<u64>> = OnceLock::new();
 
-fn crc_digest() -> Digest<'static, u64> {
+pub(crate) fn crc_digest() -> Digest<'static, u64> {
     CRC.get_or_init(|| Crc::<u64>::new(&CRC_64_MS)).digest()
 }
 
@@ -70,6 +70,14 @@ pub trait IRecord {
             .map(Peek::from)
     }
 
+    /// Returns a flexbuffer reader over the blob field of a flexbuffer root
+    ///
+    /// Returns None if the blob did not contain a flexbuffer root
+    #[inline]
+    fn peek_at<'peek>(&'peek self, key: &str) -> impl PeekExtensions<'peek> {
+        self.peek().peek_at(key)
+    }
+
     /// Traverse the record using a statically defined path.
     ///
     /// # Example
@@ -96,46 +104,34 @@ pub trait IRecord {
     /// Returns the content digest buffer for the data stored
     #[inline]
     fn content(&self) -> Sha256Digest {
-        if /* self.opts().is_transport() && */ self.is_wire_unit_mode_transport() {
-            match self.peek().to_wire_object().at("bytes").blob() {
-                Some(bytes) => <Sha256 as sha2::Digest>::digest(bytes).into(),
-                None => {
-                    <Sha256 as sha2::Digest>::digest(self.bytes()).into()
-                }
-            }
-        } else {
-            <Sha256 as sha2::Digest>::digest(self.bytes()).into()
-        }
+        <Sha256 as sha2::Digest>::digest(self.bytes()).into()
     }
 
-    /// Returns true if the record has enabled wire unit format, and is in transport mode
-    #[inline]
-    fn is_wire_unit_mode_transport(&self) -> bool {
-        use crate::wire::Annotate;
-        self.opts().is_wire_unit()
-            && self
-                .peek()
-                .at_path([".runir", "type_name"])
-                .str()
-                .map(|t| t == crate::wire::Transport::type_name())
-                .unwrap_or_default()
-    }
+    // /// Returns true if the record has enabled wire unit format, and is in transport mode
+    // #[inline]
+    // fn is_wire_unit<T: Annotate>(&self) -> bool {
+    //     self.opts().is_wire_unit()
+    //         && self
+    //             .peek_at(".runir")
+    //             .at("type_name")
+    //             .str_match(T::type_name())
+    // }
 }
 
 impl IRecord for Record {
     #[inline]
     fn ns_chk(&self) -> u64 {
-        self.ns_chk
+        self.info.ns_chk
     }
 
     #[inline]
     fn uuid(&self) -> uuid::Uuid {
-        self.key
+        self.info.key
     }
 
     #[inline]
     fn opts(&self) -> &Opts {
-        &self.opts
+        &self.info.opts
     }
 
     #[inline]
@@ -150,24 +146,24 @@ impl IRecord for Record {
 
     #[inline]
     fn opts_mut(&mut self) -> Option<&mut Opts> {
-        Some(&mut self.opts)
+        Some(&mut self.info.opts)
     }
 }
 
 impl<'b> IRecord for &'b Record {
     #[inline]
     fn ns_chk(&self) -> u64 {
-        self.ns_chk
+        self.info.ns_chk
     }
 
     #[inline]
     fn uuid(&self) -> uuid::Uuid {
-        self.key
+        self.info.key
     }
 
     #[inline]
     fn opts(&self) -> &Opts {
-        &self.opts
+        &self.info.opts
     }
 
     #[inline]
@@ -199,7 +195,7 @@ impl<'b> IRecord for Option<&'b Record> {
 
     #[inline]
     fn opts(&self) -> &Opts {
-        self.map(|r| r.opts()).unwrap_or_else(|| crate::EMPTY_OPTS)
+        self.map(|r| r.opts()).unwrap_or_else(|| &crate::EMPTY_OPTS)
     }
 
     #[inline]
@@ -219,11 +215,9 @@ impl<'b> IRecord for Option<&'b Record> {
     }
 }
 
-/// State for storing data into the database
-///
-/// A record is considered an immutable snapshot of state
-#[derive(Clone, Debug)]
-pub struct Record {
+/// Record system data
+#[derive(Default, PartialEq, Copy, Clone, Debug, Deserialize, Serialize)]
+pub struct Info {
     /// Record key
     ///
     /// The hi-bits are a hash of the label tagging this record,
@@ -234,9 +228,30 @@ pub struct Record {
     /// Namespace checksum
     pub(crate) ns_chk: u64,
     /// Bitflag options
-    pub(crate) opts: Opts,
+    #[serde(with = "crate::opts::ser")]
+    pub(crate) opts: crate::Opts,
     /// Timestamp of when the record was created
     pub(crate) ts: u64,
+}
+
+impl Info {
+    pub fn to_parts(self) -> (Uuid, u64, u64, Opts) {
+        (
+            self.key,
+            self.ns_chk,
+            self.ts,
+            self.opts,
+        )
+    }
+}
+
+/// State for storing data into the database
+///
+/// A record is considered an immutable snapshot of state
+#[derive(Clone, Debug)]
+pub struct Record {
+    /// Record info
+    pub(crate) info: Info,
     /// Data this record is storing
     pub(crate) data: Data,
 }
@@ -250,10 +265,12 @@ impl Record {
         let opts = ns.opts();
         let ts = time::UtcDateTime::now().unix_timestamp() as u64;
         Record {
-            key: Uuid::from_u64_pair(key, 0),
-            ns_chk: ns.chk(),
-            opts: opts.clone(),
-            ts,
+            info: Info {
+                key: Uuid::from_u64_pair(key, 0),
+                ns_chk: ns.chk(),
+                opts: opts.clone(),
+                ts,
+            },
             data: Data::default(),
         }
     }
@@ -264,7 +281,7 @@ impl Record {
         SystemTime::now()
             .duration_since(
                 UNIX_EPOCH
-                    .checked_add(Duration::from_secs(self.ts))
+                    .checked_add(Duration::from_secs(self.info.ts))
                     .unwrap(),
             )
             .unwrap()
@@ -273,7 +290,7 @@ impl Record {
     /// Returns the timestamp/
     #[inline]
     pub fn ts(&self) -> u64 {
-        self.ts
+        self.info.ts
     }
 
     /// Returns the crc checksum
@@ -281,24 +298,24 @@ impl Record {
     /// The checksum is computed as CRC(data | ts)
     #[inline]
     pub fn checksum(&self) -> u64 {
-        self.key.as_u64_pair().1
+        self.info.key.as_u64_pair().1
     }
 
     /// Returns record parts
     #[inline]
-    pub fn into_parts(self) -> (Uuid, Data, u64, u64, Opts) {
-        (self.key, self.data, self.ns_chk, self.ts, self.opts)
+    pub fn into_parts(self) -> (Info, Data) {
+        (
+            self.info,
+            self.data
+        )
     }
 
     /// Returns a record composed of parts
     #[inline]
-    pub fn from_parts((key, data, ns_chk, ts, opts): (Uuid, Data, u64, u64, Opts)) -> Self {
+    pub fn from_parts((info, data): (Info, Data)) -> Self {
         Self {
-            key,
+            info,
             data,
-            ns_chk,
-            opts,
-            ts,
         }
     }
 
@@ -309,7 +326,7 @@ impl Record {
     /// storage options apply only after data is present.
     #[inline]
     pub fn with_opts(mut self, opts: Opts) -> Self {
-        self.opts = opts;
+        self.info.opts = opts;
         self
     }
 
@@ -326,25 +343,11 @@ impl Record {
 
         let mut crc = crc_digest();
 
-        // If Namespace::transfer(..) is being used, this needs to be used in-order to preserve the correct checksum
-        if self.is_wire_unit_mode_transport() {
-            if let Some(object) = self
-                .peek()
-                .val()
-                .and_then(|v| v.as_object::<crate::wire::Transport>())
-                .and_then(|v| v.to_object().ok())
-            {
-                crc.update(object.bytes());
-            } else {
-                crc.update(&self.data);
-            }
-        } else {
-            crc.update(&self.data);
-        }
-        crc.update(&self.ts.to_le_bytes());
+        crc.update(&self.data);
+        crc.update(&self.info.ts.to_le_bytes());
 
-        let (hi, _) = self.key.as_u64_pair();
-        self.key = Uuid::from_u64_pair(hi, crc.finalize());
+        let (hi, _) = self.info.key.as_u64_pair();
+        self.info.key = Uuid::from_u64_pair(hi, crc.finalize());
         self
     }
 
@@ -359,23 +362,10 @@ impl Record {
         }
 
         let mut crc = crc_digest();
-        if self.is_wire_unit_mode_transport() {
-            if let Some(object) = self
-                .peek()
-                .val()
-                .and_then(|v| v.as_object::<crate::wire::Transport>())
-                .and_then(|v| v.to_object().ok())
-            {
-                crc.update(object.bytes());
-            } else {
-                return false;
-            }
-        } else {
-            crc.update(&self.data);
-        }
-        crc.update(&self.ts.to_le_bytes());
+        crc.update(&self.data);
+        crc.update(&self.info.ts.to_le_bytes());
 
-        let (_, lo) = self.key.as_u64_pair();
+        let (_, lo) = self.info.key.as_u64_pair();
         lo == crc.finalize()
     }
 
@@ -385,7 +375,7 @@ impl Record {
         let ns: Namespace = namespace.into();
         let label_key = ns.key(label);
 
-        let (hi, _) = self.key.as_u64_pair();
+        let (hi, _) = self.info.key.as_u64_pair();
         hi == label_key
     }
 
@@ -411,15 +401,15 @@ impl Record {
         let mut header = HeaderBuilder::regular(
             format!(
                 "{:x}_{}_{:x}",
-                self.ns_chk,
-                self.key.as_simple(),
-                self.opts.encode()
+                self.info.ns_chk,
+                self.info.key.as_simple(),
+                self.info.opts.encode()
             )
             .as_ascii_str()
             .map_err(|e| Error::new(std::io::ErrorKind::InvalidFilename, e.to_string()))?,
         )?
         .set_defaults_for_archive();
-        header.set_last_modified(self.ts)?;
+        header.set_last_modified(self.info.ts)?;
         header.set_size(self.bytes().len())?;
         header.build()
     }
@@ -457,7 +447,7 @@ impl Record {
         if let Some((ns_chk, key, opts)) = header.split_name_for_record() {
             let ts = header.last_modified();
             let record = Record {
-                key,
+                info: Info { key, ns_chk, opts, ts },
                 data: entry
                     .data()
                     .map(|(b, d)| {
@@ -466,9 +456,6 @@ impl Record {
                         if digest.eq(&d) { b } else { Data::default() }
                     })
                     .unwrap_or_default(),
-                ns_chk,
-                opts,
-                ts,
             };
 
             return if record.is_valid() {
@@ -524,7 +511,7 @@ impl Record {
                 .enable_branch(Branch::Staging);
 
             // Since we are about to commit new data, we need to create a new timestamp
-            staging.ts = time::UtcDateTime::now().unix_timestamp() as u64;
+            staging.info.ts = time::UtcDateTime::now().unix_timestamp() as u64;
 
             Ok(staging.commit(data))
         } else {
@@ -550,24 +537,24 @@ impl Record {
         deleting
     }
 
-    /// Returns a version of the current record marked for transport.
-    ///
-    /// Enables the `TRANSPORT` branch flag on this record, which indicates
-    /// that the record data is in an intermediate format
-    ///
-    /// Before stores promote this record from TRANSPORT -> HEAD, it can decide
-    /// whether or not to flatten record data
-    ///
-    /// All records in the TRANSPORT branch must be a wire unit enabled record,
-    /// but not all wire unit enabled records must be in the TRANSPORT branch.
-    #[inline]
-    #[must_use = "Calling `.transport()` enables wire-unit format and sets the proper branch bit-flag, however it requires in-take to resolve"]
-    pub fn transport(&self) -> Self {
-        use crate::wire::ToWireUnit;
-        let mut record = self.to_record();
-        record.opts.enable_branch(Branch::Transport);
-        record.to_wire_unit()
-    }
+    // /// Returns a version of the current record marked for transport.
+    // ///
+    // /// Enables the `TRANSPORT` branch flag on this record, which indicates
+    // /// that the record data is in an intermediate format
+    // ///
+    // /// Before stores promote this record from TRANSPORT -> HEAD, it can decide
+    // /// whether or not to flatten record data
+    // ///
+    // /// All records in the TRANSPORT branch must be a wire unit enabled record,
+    // /// but not all wire unit enabled records must be in the TRANSPORT branch.
+    // #[inline]
+    // #[must_use = "Calling `.transport()` enables wire-unit format and sets the proper branch bit-flag, however it requires in-take to resolve"]
+    // pub fn transport(&self) -> Self {
+    //     use crate::wire::ToWireUnit;
+    //     let mut record = self.to_record();
+    //     record.info.opts.enable_branch(Branch::Transport);
+    //     record.to_wire_unit()
+    // }
 }
 
 /// Returns the record crc value
@@ -598,7 +585,7 @@ impl Serialize for Record {
 mod test {
     use super::Record;
     use crate::{
-        Computed, IRecord, Opts, RecordableExtensions, record::Namespace, util::PeekExtensions,
+        Computed, IRecord, Opts, RecordInfo, RecordableExtensions, record::Namespace, util::PeekExtensions
     };
     use bytes::Bytes;
     use serde::{Deserialize, Serialize};
@@ -659,11 +646,13 @@ mod test {
     #[test]
     fn test_record_from_parts_is_invalid_with_random_parts() {
         let record = Record::from_parts((
-            Uuid::nil(),
+            RecordInfo {
+                key: Uuid::nil(),
+                ns_chk: 0,
+                opts: Opts::default(),
+                ts: 0,
+            },
             Bytes::from_static(b"gibberish").into(),
-            0,
-            0,
-            Opts::default(),
         ));
         assert!(!record.is_valid())
     }
@@ -788,11 +777,11 @@ mod test {
             .expect("should always be able to mutate options from a full record")
             .enable_archiving();
 
-        let key = record.key.clone();
+        let key = record.info.key.clone();
         let archive = record.archive().unwrap();
         assert!(archive.header().name().ends_with("1"));
         let record = Record::restore(archive).unwrap();
-        assert_eq!(key, record.key);
+        assert_eq!(key, record.info.key);
     }
 
     #[test]
@@ -859,5 +848,14 @@ mod test {
         let ns = Namespace::new("test");
         let rec = ns.commit("example", b"hello world");
         assert_eq!(rec.index_key(), ns.record("example").index_key());
+    }
+
+    #[test]
+    fn test_ser_record_info() {
+        let rec = crate::test::test_record();
+        let bytes = flexbuffers::to_vec(&rec.info).unwrap();
+        assert_eq!(bytes.as_slice().val().at("key").blob().unwrap(), rec.info.key.as_bytes());
+        let info: RecordInfo = flexbuffers::from_slice(&bytes).unwrap();
+        assert_eq!(info, rec.info);
     }
 }

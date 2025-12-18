@@ -137,7 +137,8 @@ impl Entry {
     pub fn create_journal_entry(&self, offset: usize) -> Option<JournalEntry> {
         match self {
             Entry::Record(record) => {
-                let (id, data, ns_chk, ts, opts) = record.clone().into_parts();
+                let (info, data) = record.clone().into_parts();
+                let (id, ns_chk, ts, opts) = info.to_parts();
                 let (key, crc) = id.as_u64_pair();
                 Some(JournalEntry::Record(crate::RecordExtent {
                     source: [0; 32],
