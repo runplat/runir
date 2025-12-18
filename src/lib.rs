@@ -19,58 +19,59 @@ pub use namespace::Namespace;
 pub use namespace::ToNamespace;
 
 mod record;
-pub use record::Record;
 pub use record::IRecord;
+pub use record::Info as RecordInfo;
+pub use record::Record;
 
 mod worker;
-pub use worker::Worker;
 pub use worker::SharedWorker;
+pub use worker::Worker;
 
 mod opts;
-pub use opts::Opts;
 pub use opts::EMPTY_OPTS;
+pub use opts::Opts;
 
 mod index;
-pub use index::Index;
-pub use index::Storage;
-pub use index::HashIndex;
-pub use index::HashMapStorage;
-pub use index::VecIndex;
-pub use index::VecStorage;
 pub use index::ConcurrentIndex;
 pub use index::ConcurrentStorage;
+pub use index::HashIndex;
+pub use index::HashMapStorage;
+pub use index::Index;
+pub use index::Storage;
+pub use index::VecIndex;
+pub use index::VecStorage;
 pub use index::search;
 
 mod query;
-pub use query::field;
-pub use query::string;
-pub use query::namespace;
-pub use query::filter;
-pub use query::not;
-pub use query::content;
-pub use query::container;
-pub use query::QueryBuilder;
 pub use query::Query;
+pub use query::QueryBuilder;
+pub use query::container;
+pub use query::content;
+pub use query::field;
+pub use query::filter;
+pub use query::namespace;
+pub use query::not;
+pub use query::string;
 
 mod store;
 pub use store::Store;
 pub use store::ToArchiveMember;
 
 mod virt;
-pub use virt::vol;
-pub use virt::SharedVolume;
 pub use virt::RecordExtent;
+pub use virt::SharedVolume;
 pub use virt::Virtual;
+pub use virt::vol;
 
 pub mod frontend;
 pub use frontend::kv;
 
 mod queue;
-pub use queue::Queue;
 pub use queue::Pusher;
+pub use queue::Queue;
 
-pub mod wire;
 pub mod env;
+pub mod wire;
 
 /// Provides extensions for configuring a type before it is committed as a record
 pub trait RecordableExtensions {
@@ -228,8 +229,9 @@ pub mod prelude {
     pub use crate::util::PeekRefExtensions;
 }
 
+#[macro_use]
 #[cfg(test)]
-mod test {
+pub mod test {
     use crate::*;
 
     #[test]
@@ -246,5 +248,44 @@ mod test {
                 .as_str()
                 .unwrap()
         );
+    }
+
+    /// Creates a test record
+    #[inline]
+    pub fn test_record() -> Record {
+        let ephemeral = Namespace::ephemeral();
+        let record = ephemeral.author("test", |mut b| {
+            b.start_map().push("value", "hello world");
+            b
+        });
+        record
+    }
+
+    /// Creates a test cas-based Record
+    #[inline]
+    pub fn test_cas_record() -> Record {
+        let ephemeral = Namespace::ephemeral();
+        let record = ephemeral.author("test", |mut b| {
+            b.start_map().push("value", "hello world");
+            b
+        });
+        ephemeral
+            .store_content(&util::PeekExtensions::val(record.peek()).unwrap())
+            .unwrap()
+    }
+
+    /// Creates a test Boot value
+    /// 
+    /// Boot has strict borrow requirements so a regular function wouldn't work,
+    /// otherwise the below would need to be copy-pasted
+    #[macro_export]
+    macro_rules! test_boot {
+        (let $var:ident = $ns:expr) => {
+            let ns =  $crate::Namespace::new($ns);
+            let wire = $crate::wire::Wire::new(ns.clone());
+            let target = wire.encode($crate::test::test_cas_record()).unwrap();
+            let bytes = $crate::virt::vol::VolumeTarget::filled(&target);
+            let $var = $crate::wire::Boot::decode(&bytes).unwrap();
+        };
     }
 }

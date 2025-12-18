@@ -304,6 +304,12 @@ pub static EMPTY_HEADER: Header = Header {
 };
 
 impl Header {
+    /// Returns the header bytes
+    #[inline]
+    pub fn bytes(&self) -> &Bytes {
+        &self.bytes
+    }
+
     /// Splits the entry name for record parts
     ///
     /// Returns None if the entry name does not contain record parts

@@ -18,11 +18,13 @@ pub enum JournalEntry {
 }
 
 impl JournalEntry {
+
     /// If this journal entry is a record extent, returns the archive name of this journal entry
     #[inline]
     pub fn archive_name(&self) -> Option<String> {
+        use super::JournalEntry::*;
         match self {
-            JournalEntry::Record(record_extent) => Some(record_extent.format_archive_name()),
+            Record(record_extent) => Some(record_extent.format_archive_name()),
             _ => None,
         }
     }
@@ -30,36 +32,40 @@ impl JournalEntry {
     /// Returns the content digest of the journaled entry's data
     #[inline]
     pub fn source(&self) -> &Sha256Digest {
+        use super::JournalEntry::*;
         match self {
-            JournalEntry::Extent { source, .. } => &source,
-            JournalEntry::Record(record_extent) => &record_extent.source,
+            Extent { source, .. } => &source,
+            Record(record_extent) => &record_extent.source,
         }
     }
 
     /// Returns the content digest of the journaled entry's data
     #[inline]
     pub fn content(&self) -> &Sha256Digest {
+        use super::JournalEntry::*;
         match self {
-            JournalEntry::Extent { content, .. } => &content,
-            JournalEntry::Record(record_extent) => &record_extent.content,
+            Extent { content, .. } => &content,
+            Record(record_extent) => &record_extent.content,
         }
     }
 
     /// Returns an offset, len tuple
     #[inline]
     pub fn extent(&self) -> (u64, u32) {
+        use super::JournalEntry::*;
         match self {
-            JournalEntry::Extent { offset, len, .. } => (*offset, *len),
-            JournalEntry::Record(record_extent) => (record_extent.offset, record_extent.len),
+            Extent { offset, len, .. } => (*offset, *len),
+            Record(record_extent) => (record_extent.offset, record_extent.len),
         }
     }
 
     /// Returns the crc value
     #[inline]
     pub fn uuid(&self) -> Uuid {
+        use super::JournalEntry::*;
         match self {
-            JournalEntry::Extent { .. } => uuid::Uuid::nil(),
-            JournalEntry::Record(record_extent) => {
+            Extent { .. } => uuid::Uuid::nil(),
+            Record(record_extent) => {
                 uuid::Uuid::from_u64_pair(record_extent.key, record_extent.crc)
             }
         }

@@ -28,10 +28,10 @@ pub use executor::Executor;
 mod run;
 pub use run::RunCell;
 
-pub mod format_ext;
 pub mod fs;
-pub mod object_store;
 pub mod ser;
+mod trim;
+pub(crate) use trim::TrimPadding;
 
 use futures::future::RemoteHandle;
 
