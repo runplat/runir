@@ -14,3 +14,4 @@ pub use shared::SharedVolume;
 
 mod archive;
 mod secure;
+mod sync;

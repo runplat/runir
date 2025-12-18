@@ -69,377 +69,218 @@
 //!
 //! If valid, use public-key to generate an ephemeral key that can be used to encrypt a message for this remote
 //!
-use std::sync::Arc;
-
-use sha2::Digest;
-
+use crate::Data;
 use crate::IRecord;
-use crate::Opts;
-use crate::Queue;
+use crate::Namespace;
 use crate::Record;
-use crate::util::Intern;
-use crate::util::PeekExtensions;
-use crate::wire::plugin::IPlugin;
+use crate::vol::VolumeTarget;
+use crate::vol::new_mmap_anon_target;
+use crate::wire::boot::NS_HEADER_INLINE_BLOCK_SIZE;
+use crate::wire::receive::Receive;
+use anyhow::anyhow;
+use bytes::BufMut;
 
-mod annotate;
-pub use annotate::Annotate;
-
+mod boot;
 mod cas;
+mod ext;
+mod proto;
+mod receive;
+mod root;
+mod transport;
+
+pub use boot::Boot;
 pub use cas::Describe;
+pub use cas::Fetch;
+pub use cas::FrameList;
+pub use ext::Ext;
+pub use root::Root;
 
-mod unit;
-pub use unit::ToWireUnit;
-pub use unit::Transport;
+use transport::TransportMut;
 
-mod fsm;
-mod route;
-mod terminal;
-
-pub use terminal::Terminal;
-pub use route::Route;
-
-pub mod plugin;
-
-type ObjectStore = std::sync::Arc<object_store::DynObjectStore>;
-
-#[inline]
-fn ensure_root_store_path() -> std::io::Result<std::path::PathBuf> {
-    let workdir = std::env::current_dir()?.join(".runir");
-    std::fs::create_dir_all(&workdir)?;
-    Ok(workdir)
-}
-
-/// Returns the "root" store, i.e "<Current Directory>/.runir"
-#[inline]
-pub fn root_store() -> std::io::Result<ObjectStore> {
-    let path = ensure_root_store_path()?;
-    Ok(std::sync::Arc::new(
-        object_store::local::LocalFileSystem::new_with_prefix(path)?,
-    ))
-}
-
-/// Wire is the entire runtime for a wire unit
+/// Wire protocol runtime
 ///
-/// Provides mappings to the inner metadata, while also implementing IRecord
-/// so that the inner object can be used
+/// `Protocol` encodes a `Boot` and a set of `Frames` into a binary
+///
+/// `Boot` can decode into a record from binary
 #[derive(Debug)]
-pub struct Wire<R> {
-    record: R,
-    runtime: Arc<Runtime>,
-    settings: Settings,
+pub struct Wire<'wire> {
+    proto: proto::Proto<'wire>,
 }
 
-#[derive(Debug)]
-struct Settings {
-    /*
-        FSM Ready Sync Settings
-    */
-    fsm_ready_sync_enable: bool,
-    fsm_ready_sync_threshold: usize,
-}
-
-impl<R> Wire<R> {
-    /// Registers a filter w/ the runtime
+impl<'wire> Wire<'wire> {
+    /// Creates a new wire protocol for a namespace
     #[inline]
-    pub fn filter<P: IPlugin>(&self, filter: Opts) -> &Self {
-        self.runtime
-            .filters
-            .entry(filter)
-            .and_modify(|f| {
-                f.push(P::record_mut);
-            })
-            .or_default()
-            .push(P::record_mut);
-        self
-    }
-
-    // /// Push a record on to the wire
-    // #[inline]
-    // pub fn push(&self, record: Record) -> Option<Record> {
-    //     match self.bus_in.pusher() {
-    //         Some(pusher) => {
-    //             pusher.push(record)
-    //         },
-    //         None => {
-    //             Some(record)
-    //         },
-    //     }
-    // }
-
-    /// Returns a reference to the inner runtime
-    #[inline]
-    fn runtime(&self) -> &Arc<Runtime> {
-        &self.runtime
-    }
-}
-
-type Filter = fn(Record) -> Record;
-
-#[derive(Default, Debug)]
-struct Runtime {
-    filters: dashmap::DashMap<Opts, Vec<Filter>>,
-}
-
-impl<R: IRecord> Wire<R> {
-    /// Returns true if the record transport has completed
-    ///
-    /// Note: This means that the "Transport" branch flag is no longer enabled
-    #[inline]
-    pub fn is_transport_complete(&self) -> bool {
-        !self.opts().is_transport()
-    }
-
-    /// Checks the result of the wire unit transform
-    ///
-    /// Returns an error if the transform was successful
-    #[inline]
-    pub fn result(&self) -> std::io::Result<()> {
-        let err = self.record.peek().at_path(&[".runir", "err"]).str();
-        match err {
-            Some(err) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, err)),
-            None => Ok(()),
-        }
-    }
-
-    /// Returns the unix timestamp of the wire unit transform
-    #[inline]
-    pub fn ts(&self) -> i64 {
-        self.record
-            .peek()
-            .at_path(&[".runir", "ts"])
-            .u64()
-            .unwrap_or_default() as i64
-    }
-
-    /// Returns the type name of the current object
-    #[inline]
-    pub fn type_name(&self) -> &'static str {
-        self.record
-            .peek()
-            .at_path(&[".runir", "type_name"])
-            .str()
-            .unwrap_or_default()
-            .intern()
-    }
-
-    /// Returns the size of the current object
-    #[inline]
-    pub fn size(&self) -> u64 {
-        self.record
-            .peek()
-            .at_path(&[".runir", "size"])
-            .u64()
-            .unwrap_or_default()
-    }
-
-    /// Returns the sha256 digest of the current object
-    #[inline]
-    pub fn digest(&self) -> &[u8] {
-        match self.record.peek().at_path(&[".runir", "sha256"]).blob() {
-            Some(digest) => digest,
-            None => &[],
-        }
-    }
-}
-
-impl<R: IRecord> IRecord for Wire<R> {
-    fn ns_chk(&self) -> u64 {
-        self.record.ns_chk()
-    }
-
-    fn uuid(&self) -> uuid::Uuid {
-        self.record.uuid()
-    }
-
-    fn opts(&self) -> &crate::Opts {
-        self.record.opts()
-    }
-
-    fn opts_mut(&mut self) -> Option<&mut crate::Opts> {
-        self.record.opts_mut()
-    }
-
-    fn bytes(&self) -> &[u8] {
-        match self.record.peek().to_wire_object() {
-            Some(object) => {
-                let bytes = object.clone().blob().unwrap_or_default();
-                if self.record.is_wire_unit_mode_transport() {
-                    object.at("bytes").blob().unwrap_or(bytes)
-                } else {
-                    bytes
-                }
-            }
-            None => self.record.bytes(),
-        }
-    }
-
-    fn to_record(&self) -> crate::Record {
-        self.record.to_record()
-    }
-}
-
-impl<R> From<R> for Wire<R> {
-    fn from(value: R) -> Self {
+    pub fn new(ns: Namespace) -> Self {
         Self {
-            record: value,
-            runtime: Arc::new(Runtime::default()),
-            settings: Settings {
-                fsm_ready_sync_enable: false,
-                fsm_ready_sync_threshold: 1,
+            proto: proto::Proto::new(ns),
+        }
+    }
+
+    /// Sets the root on the underlying protocol
+    #[inline]
+    pub fn with_root(&mut self, root: Root) {
+        self.proto.use_root(root);
+    }
+
+    /// Encodes a record into the wire protocol boot
+    ///
+    /// Returns the intermediate volume target
+    /// --
+    /// Returns an error if:
+    /// - The record could not be transferred into the protocol's namespace
+    /// - An intermediate target could not be allocated for the encoding
+    /// - Building the protocol boot object failed
+    /// --
+    /// If a Root is set, the returned target can call .commit() to persist the data
+    /// into .path()
+    ///
+    /// Otherwise, .commit() will be a no-op
+    #[inline]
+    pub fn encode(&self, rec: impl IRecord) -> crate::Result<impl VolumeTarget + BufMut> {
+        // 1) Transfer into the wire namespce
+        let rec: Record = self.proto.ns.transfer(rec)?;
+        // 2) Get the intermediate target dest for the record
+        let target = self.target(&rec)?;
+        // 3) Create builder for record
+        let mut proto = self.proto.clone();
+        // 4) Set record state
+        proto.use_record(rec.clone());
+
+        // TODO: Enable "indexer"
+        if let Some(index) = self.indexer(&rec) {
+            proto.use_index(index);
+        }
+        // TODO: Enable "block list"
+        if let Some(block_list) = self.block_list(&rec) {
+            proto.use_frame_transport(block_list)?;
+        }
+
+        // 5) Build the wire encoding and output to target
+        proto.build(target)
+    }
+
+    /// Decodes the current protocol state into a record
+    /// 
+    /// Note: Should be used w/ `BootLoader::load()`
+    #[inline]
+    pub fn decode(&self) -> crate::Result<Record> {
+        match &self.proto.transport {
+            transport::Transport::Inline(data) => self.decode_record(data),
+            transport::Transport::Frame((_, data)) => self.decode_record(data),
+            transport::Transport::Receive(receive) => {
+                // TODO: Handle non-block list case
+                self.decode_block_list(receive)
             },
         }
     }
+
+    #[inline]
+    fn decode_record(&self, data: &Data) -> crate::Result<Record> {
+        let rec = Record::from_parts((self.proto.info.clone(), data.clone()));
+        if rec.is_valid() {
+            Ok(rec)
+        } else {
+            Err(anyhow!("Decoded record is invalid").into())
+        }
+    }
+
+    #[inline]
+    fn decode_block_list(&self, receive: &Receive<'_>) -> crate::Result<Record> {
+        // Receive has all the bytes
+        let mut iter = receive
+            .list
+            .frames
+            .iter()
+            .filter(|f| f.opts.is_canonical_data());
+
+        let first = iter.next();
+        let last = iter.last();
+
+        match (first, last) {
+            (Some(first), None) => self.decode_record(
+                &receive
+                    .data
+                    .view(first.offset as usize, first.size as usize),
+            ),
+            (Some(first), Some(last)) => self.decode_record(&receive.data.view(
+                first.offset as usize,
+                // TODO: Check math
+                (last.offset + last.size) as usize,
+            )),
+            _ => {
+                todo!()
+            }
+        }
+    }
+
+    /// Returns the dest target for encoding records
+    ///
+    /// If a Root is set, then returned the target can commit to the file system.
+    /// Otherwise, commit is a no-op
+    #[inline]
+    fn target(&self, record: &Record) -> crate::Result<impl VolumeTarget + BufMut + use<'_>> {
+        let target = self
+            .proto
+            .root
+            .as_ref()
+            .map(|r| r.write_boot_target(&record.info, Some(self.proto.transport.describe())))
+            .unwrap_or_else(|| {
+                if self.proto.transport.is_inline() {
+                    new_mmap_anon_target("", NS_HEADER_INLINE_BLOCK_SIZE)
+                } else {
+                    new_mmap_anon_target(
+                        "",
+                        NS_HEADER_INLINE_BLOCK_SIZE
+                            + self.proto.transport.describe().required_capacity() as usize,
+                    )
+                }
+            });
+        Ok(target?)
+    }
+
+    /// Returns true if the root is enabled
+    #[inline]
+    pub fn is_root_enabled(&self) -> bool {
+        self.proto.root.is_some()
+    }
+
+    /// Runs the protocol
+    #[inline]
+    fn indexer<'a: 'wire>(&self, _: &Record) -> Option<proto::Index<'a>> {
+        None
+    }
+
+    #[inline]
+    fn block_list(&'wire self, _: &Record) -> Option<FrameList<'wire>> {
+        None
+    }
 }
 
-impl<R: IRecord> cas::Describe for Wire<R> {
-    #[inline]
-    fn describe<'desc>(&'desc self) -> cas::Manifest<'desc> {
-        let container = self.record.bytes();
-        cas::Manifest {
-            container: cas::Descriptor {
-                size: container.len() as u64,
-                digest: std::borrow::Cow::Owned(sha2::Sha256::digest(container).to_vec()),
-            },
-            object: cas::Descriptor {
-                size: self.size(),
-                digest: self.digest().into(),
-            },
-        }
+impl<'wire> From<proto::Proto<'wire>> for Wire<'wire> {
+    fn from(value: proto::Proto<'wire>) -> Self {
+        Self { proto: value }
     }
 }
 
 #[cfg(test)]
-mod prototype {
-    use crate::frontend::state::State;
+mod tests {
+    use crate::{
+        Namespace,
+        test::test_cas_record,
+        vol::VolumeTarget,
+        wire::{Root, Wire},
+    };
 
     #[test]
-    fn test_dispatcher_remote() {
+    fn test_wire_root() {
+        let mut wire = Wire::new(Namespace::new("test"));
+        wire.with_root(Root::current_dir().unwrap());
+
+        let _target = wire.encode(test_cas_record()).unwrap();
+        _target.commit().unwrap();
         /*
-            dispatcher -> remote
-
-            - Action: Dispatcher wants to dispatch records to remote
-
-            Dispatcher takes record and calls .transport()
-
-            Record is in wire_unit mode and then call .archive()
-
-            .archive() creates a tar entry, tar entry is included in a msg.tar
-
-            *msg.tar is transmitted to remote
-
-            Remote takes `msg.tar` and loads it as an archive member.
-
-            --- Critical Section
-                If .reduce() is called, any records w/ Branch::Transport will be skipped
-
-                Record must remove Branch::Transport via wire runtime
-            ---
-
-            Remote calls .reduce()
-
-            Action is complete
-
-            *Missing: what do we consider a "transmit"?
-            - It's probably better to decouple these details from runir
-            - So, it's probably better to use object_store as what we consider as "transported"
-            - Which would enable using other storage providers as the transport vehicle
-            - This is nice because it enables integration as a side-effect
-            - Can leave the implementation details outside of runir
-            - Can focus on just the ingestion of the msg.tar -
-        */
-        let dispatcher = State::default();
-        /*
-            let route = runir::wire::route(object_store);
-            let terminal = runir::wire::terminal(dispatcher);
-            terminal.send(record!("next-update-1").transport());
-            terminal.send(record!("next-update-2").transport());
-            terminal.dispatch(route).await?;
-        */
-
-        let remote = State::default();
-        /*
-            let route = runir::wire::route(object_store);
-            select! {
-                msg_tar = route.recv() => {
-                    // route is completely de-coupled from "remote"
-                    let terminal = runir::wire::terminal(remote);
-                    terminal.receive(msg_tar); // Impl, just writes the archive_member to state
-                    terminal.reconcile().await?;  // Run "fsm" to handle all transported records, then call .reduce() and .save()
-                    // Can just drop terminal w/o needing to maintain any state
-                },
-                reason = route.shutdown() => {
-                    match reason {
-                        Reason::Upgrade => {
-                            // In this case, infrastructure wants to upgrade and is signaling to call runir::wire::route(object_store) once more
-                            // route = ::wire:route(object_store);
-                        }
-                        Reason::Host => {
-                            //
-                        }
-                        Reason::Error(e) => {
-                            // Encountered some sort of error, so need to log the error and in most cases restart the route
-                        }
-                    }
-                },
-                ...
-            }
-
-            // CLI-side
-
-            let remote = KV::open_remote(Impl); // Schedule leaves the remote "open" for re-use, otherwise re-uses an open remote
-            /*
-                Frontend::open_remote,
-
-                Each app directory looks like this,
-                    .runir/wire.route.messages
-                    .runir/<frontend>/wire.route.messages
-                    .runir/<frontend>/store.tar <-- Currently using a single archive
-
-                .runir/wire.route.messages/<EPOCH>.<TS>.msg.tar <-- this is a top level message
-
-                <TAR-ENTRY-HEADER>
-                ...
-                runir <frontend-name> <- Each entry uses the tar entry header ext to state the frontend the entry is for
-                ...
-
-                runir <frontend-name>.<frontend-action> <-- And the backend action responsible for completing the transport
-
-                ...
-
-                Ex:
-
-                runir kv.put
-
-                ## Concurrency strategy
-
-                Checks for open .runir/var/run/route.sock
-                If exists, sends command to .sock
-                If doesn't exist,
-                    Create route.sock
-                    Start listening for msg_tar
-                    Start recv loop
-
-                <BEGIN  :UUID>
-                <MSG    :UUID>
-                <MSG    :BYTES>
-
-                let stream = TcpStream::open(".runir/var/run/route.sock");
-                stream.write(BEGIN);
-                stream.write(MSG_UUID);
-                stream.write(MSG_BYTES);
-                stream.flush();
-            */
-
-            match command {
-                Put => {
-                    remote.put();
-                    remote.await // If "origin" then this will block
-                }
-                Get => {
-                    remote.get();
-                    // Don't need to await remote, because receive loop doesn't need to be active
-                }
-            }
+            1) Test booting from a (VolumeTarget + BufMut)
+            2) Test restoring the record from a Boot::decode(..)
         */
     }
 }

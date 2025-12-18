@@ -1,16 +1,16 @@
 use crate::Data;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{AsyncRead, AsyncSeek, AsyncWrite};
-use memmap2::MmapMut;
+use memmap2::{Mmap, MmapMut, MmapOptions};
 use parking_lot::Mutex;
 use pin_project_lite::pin_project;
+use std::path::{Path, PathBuf};
 use std::{
     io::{Read, Write},
     ops::{Deref, DerefMut},
     sync::OnceLock,
 };
-use std::path::{Path, PathBuf};
-use tracing::trace;
+use tracing::{debug, trace};
 use zeroize::Zeroize;
 
 pub const KIB: usize = 2usize.pow(10);
@@ -31,23 +31,136 @@ pub trait VolumeTarget: AsyncWrite + Unpin + Sync + 'static {
     /// Freezes the volume target to ensure it becomes cloneable and read-only
     fn freeze(self) -> std::io::Result<Data>;
 
+    /// Creates a snapshot of the target from the beginning to end the current pos
+    fn snapshot(&mut self) -> std::io::Result<Data>;
+
     /// Returns a readonly view of the volume target
     fn view<'view>(&'view self) -> &'view [u8];
+
+    /// Returns the current position of the target
+    fn pos(&self) -> usize;
+
+    /// Returns the filled section of the volume
+    #[inline]
+    fn filled<'view>(&'view self) -> &'view [u8] {
+        &self.view()[..self.pos()]
+    }
 
     /// Returns the remaining number of available bytes
     fn remaining(&self) -> u64;
 
     /// Advances the cursor by count
     fn advance(&mut self, count: usize) -> std::io::Result<()>;
+
+    /// Commits the target to it's path setting
+    fn commit(&self) -> std::io::Result<()> {
+        if self.path().as_ref().as_os_str().is_empty() || self.filled().is_empty() {
+            return Ok(()); // TODO: Silent failure okay?
+        }
+
+        let commit = self.filled();
+        let path: PathBuf = self.path().as_ref().to_path_buf();
+        let mut temp_path = path.clone();
+        temp_path.set_extension("temp");
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&temp_path)?;
+        let result = {
+            file.set_len(commit.len() as u64)?;
+            let mut dest = unsafe { MmapMut::map_mut(&file)? };
+            dest.copy_from_slice(commit);
+            dest.flush()
+        };
+
+        match result {
+            Ok(_) => {}
+            Err(err) => {
+                std::fs::remove_file(temp_path)?;
+                return Err(err);
+            }
+        }
+
+        let mut old_path = path.clone();
+        old_path.set_extension("old");
+
+        /*
+            # File Handling
+            1) Create TEMP
+            err) Delete TEMP
+            2) CURRENT -> OLD
+            3) TEMP -> CURRENT
+            ok) Detele OLD
+            error) OLD -> CURRENT
+        */
+        if path.exists() {
+            std::fs::rename(&path, &old_path)?;
+        }
+
+        match std::fs::rename(&temp_path, &path) {
+            Ok(_) => {
+                if old_path.exists() {
+                    std::fs::remove_file(&old_path)?;
+                }
+                debug!("Commiting volume target to `{:?}`", path);
+            }
+            Err(err) => {
+                if old_path.exists() {
+                    std::fs::rename(&old_path, &path)?;
+                    std::fs::remove_file(&temp_path)?;
+                }
+                return Err(err);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Type-alias for a memory-mapped volume target
-///
-/// A memory mapped target is backed by a memory mapped file
 pub type MemoryMappedTarget = CursorTarget<MmapMut>;
+
+/// Type-alias for a readonly memory-mapped volume target
+pub type ReadMemoryMappedTarget = CursorTarget<Mmap>;
 
 /// Type-alias for an in-memory volume target
 pub type InMemoryTarget = CursorTarget<BytesMut>;
+
+/// (Readonly) Opens an existing volume target backed by a memory-mapped file
+///
+/// Returns an error if the file could not be opened
+#[inline]
+pub fn read_mmap_target(path: impl Into<PathBuf>) -> std::io::Result<ReadMemoryMappedTarget> {
+    let path = path.into();
+    let file = std::fs::OpenOptions::new().read(true).open(&path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    Ok(CursorTarget::new(path, mmap))
+}
+
+/// Opens an existing volume target backed by a memory-mapped file
+///
+/// Returns an error if the file could not be opened
+#[inline]
+pub fn open_mmap_target(
+    path: impl Into<PathBuf>,
+    copy_on_write: bool,
+) -> std::io::Result<MemoryMappedTarget> {
+    let path = path.into();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .read(true)
+        .open(&path)?;
+
+    let mmap = unsafe {
+        if copy_on_write {
+            MmapOptions::new().map_copy(&file)?
+        } else {
+            MmapMut::map_mut(&file)?
+        }
+    };
+    Ok(CursorTarget::new(path, mmap))
+}
 
 /// Creates a new volume target backed by a memory-mapped file
 ///
@@ -124,6 +237,7 @@ pub fn new_memory_target(path: impl Into<PathBuf>, capacity: usize) -> InMemoryT
 /// Volume stores a "target" which can read/write bytes
 ///
 /// And an "encoder" which manages state/mapping/decoding
+#[derive(Debug)]
 pub struct Volume<T, Enc> {
     /// Inner target
     target: T,
@@ -201,10 +315,11 @@ pin_project! {
     ///
     /// Used as the backing store for both in-memory and memory-mapped volume targets.
     /// Maintains a manual cursor for read/write/seek coordination across async traits.
+    #[derive(Debug)]
     pub struct CursorTarget<T> {
         path: PathBuf,
         pos: usize,
-        inner: T
+        inner: T,
     }
 }
 
@@ -218,6 +333,7 @@ impl<T> CursorTarget<T> {
             inner,
         }
     }
+
     /// Returns the inner parts of the cursor_target
     #[inline]
     pub fn into_parts(self) -> (PathBuf, T, usize) {
@@ -267,6 +383,82 @@ impl VolumeTarget for MemoryMappedTarget {
         self.pos += count;
         Ok(())
     }
+
+    #[inline]
+    fn snapshot(&mut self) -> std::io::Result<Data> {
+        if self.pos == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Cannot snapshot an empty target",
+            ));
+        }
+        self.inner.flush()?;
+        let ptr = self.inner.as_ptr();
+        let view = unsafe { std::slice::from_raw_parts(ptr, self.pos) };
+        let view = Bytes::from_owner(view);
+        Ok(view.into())
+    }
+
+    // #[inline]
+    // fn copy_from_slice(&mut self, slice: &[u8]) -> std::io::Result<()> {
+    //     if self.pos + slice.len() > self.inner.len() {
+    //         return Err(std::io::Error::new(
+    //             std::io::ErrorKind::InvalidInput,
+    //             "Slice exceeds available capacity",
+    //         ));
+    //     }
+    //     let pos = self.pos;
+    //     if let Some(copy_to) = self.get_mut(pos..pos + slice.len()) {
+    //         copy_to.copy_from_slice(slice);
+    //         self.advance(slice.len())?;
+    //     }
+    //     Ok(())
+    // }
+
+    #[inline]
+    fn pos(&self) -> usize {
+        self.pos
+    }
+}
+
+unsafe impl BufMut for MemoryMappedTarget {
+    fn remaining_mut(&self) -> usize {
+        self.remaining_capacity()
+    }
+
+    unsafe fn advance_mut(&mut self, cnt: usize) {
+        self.advance(cnt).ok();
+    }
+
+    fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
+        let unfilled = &mut self.inner[self.pos..];
+        let len = unfilled.len();
+        let ptr = unfilled.as_mut_ptr() as *mut u8;
+
+        // SAFETY: The pointer is valid for `len` bytes because it comes from a
+        // slice of that length.
+        unsafe { bytes::buf::UninitSlice::from_raw_parts_mut(ptr, len) }
+    }
+}
+
+unsafe impl BufMut for InMemoryTarget {
+    fn remaining_mut(&self) -> usize {
+        self.remaining_capacity()
+    }
+
+    unsafe fn advance_mut(&mut self, cnt: usize) {
+        self.advance(cnt).ok();
+    }
+
+    fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
+        let unfilled = &mut self.inner[self.pos..];
+        let len = unfilled.len();
+        let ptr = unfilled.as_mut_ptr() as *mut u8;
+
+        // SAFETY: The pointer is valid for `len` bytes because it comes from a
+        // slice of that length.
+        unsafe { bytes::buf::UninitSlice::from_raw_parts_mut(ptr, len) }
+    }
 }
 
 impl VolumeTarget for InMemoryTarget {
@@ -299,6 +491,38 @@ impl VolumeTarget for InMemoryTarget {
     fn advance(&mut self, count: usize) -> std::io::Result<()> {
         self.pos += count;
         Ok(())
+    }
+
+    #[inline]
+    fn snapshot(&mut self) -> std::io::Result<Data> {
+        if self.pos == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Cannot snapshot an empty target",
+            ));
+        }
+        let ptr = self.inner.as_ptr();
+        let view = unsafe { std::slice::from_raw_parts(ptr, self.pos) };
+        let view = Bytes::from_owner(view);
+        Ok(view.into())
+    }
+
+    // #[inline]
+    // fn copy_from_slice(&mut self, slice: &[u8]) -> std::io::Result<()> {
+    //     self.inner.reserve(slice.len());
+    //     let pos = self.pos;
+    //     if let Some(copy_to) = self.get_mut(pos..pos + slice.len()) {
+    //         copy_to.copy_from_slice(slice);
+    //         self.advance(slice.len())?;
+    //         Ok(())
+    //     } else {
+    //         unreachable!("")
+    //     }
+    // }
+
+    #[inline]
+    fn pos(&self) -> usize {
+        self.pos
     }
 }
 
@@ -415,11 +639,14 @@ impl<T: AsMut<[u8]>> AsMut<[u8]> for CursorTarget<T> {
 #[cfg(test)]
 mod test {
     use crate::{
-        archive::Entry, util::{PeekExtensions, PeekRefExtensions}, IRecord, ToNamespace, VecIndex
+        IRecord, ToNamespace, VecIndex,
+        archive::Entry,
+        util::{PeekExtensions, PeekRefExtensions},
     };
 
     use super::*;
     use futures::AsyncWriteExt;
+    use zstd::zstd_safe::WriteBuf;
 
     #[tokio::test]
     async fn test_writer() {
@@ -723,5 +950,36 @@ mod test {
                 .unwrap()
         );
         assert!(volume.encoder.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_snapshot() {
+        let mut target = new_mmap_anon_target("<inline>", MIB).unwrap();
+        target.write_all(b"hello world").await.unwrap();
+        let snapshot = target.snapshot().unwrap();
+        assert_eq!(snapshot.as_slice(), b"hello world");
+
+        let mut target = new_memory_target("<inline>", MIB);
+        target.write_all(b"hello world").await.unwrap();
+        let snapshot = target.snapshot().unwrap();
+        assert_eq!(snapshot.as_slice(), b"hello world");
+    }
+
+    #[test]
+    fn test_commit_skip_on_empty() {
+        let vol = new_memory_target("", 0);
+        vol.commit().unwrap();
+    }
+
+    #[test]
+    fn test_commit_from_mmap_anon() {
+        let mut vol = new_mmap_anon_target(".test/test_commit_from_mmap_anon.bin", 4096).unwrap();
+        vol.put_bytes(b'h', 4096);
+        vol.flush().unwrap();
+        vol.commit().unwrap();
+        let check = open_mmap_target(".test/test_commit_from_mmap_anon.bin", false).unwrap();
+        assert!(check.iter().all(|b| *b == b'h'));
+        let check = read_mmap_target(".test/test_commit_from_mmap_anon.bin").unwrap();
+        assert!(check.iter().all(|b| *b == b'h'))
     }
 }
