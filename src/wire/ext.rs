@@ -2,6 +2,7 @@ use crate::{
     Data, Namespace, RecordInfo, opts::Storage, util::PeekExtensions, wire::cas::Descriptor
 };
 use flexbuffers::Blob;
+use sha2::Sha256;
 
 /// Allows injecting extensions into the wire format
 pub trait Ext {
@@ -28,7 +29,7 @@ pub trait Ext {
         let mut ext = builder.start_map();
         self.author(&mut ext);
         ext.end_map();
-        let desc = Descriptor::create(ns, Storage::Object.into(), builder.view(), self.name());
+        let desc = Descriptor::create::<Sha256>(ns, Storage::Object.into(), builder.view(), self.name());
         map.push(&desc.label_idx_str(), Blob(builder.take_buffer().as_slice()));
         desc
     }
@@ -74,7 +75,7 @@ impl Ext for Data {
         } else {
             Storage::Content
         };
-        let desc = Descriptor::create(ns, storage.into(), self.as_ref(), ".data");
+        let desc = Descriptor::create::<Sha256>(ns, storage.into(), self.as_ref(), ".data");
         map.push(&desc.label_idx_str(), Blob(self.as_ref()));
         desc
     }

@@ -1,9 +1,12 @@
 use std::ops::Deref;
 
 use bytes::Bytes;
+use rayon::iter::{ParallelBridge, ParallelIterator};
 use sha2::{Sha256, digest::Update};
 
 use crate::Namespace;
+
+type ShaDigest<D> = sha2::digest::Output<D>;
 
 /// Wraps Bytes struct to offer additional functions
 #[derive(Default, Debug, Clone)]
@@ -41,30 +44,63 @@ impl Data {
 
     /// Finds a view based on a descriptor
     #[inline]
-    pub fn find_cas_view_offset(&self, len: usize, digest: &[u8]) -> Option<(u64, Data)> {
+    pub fn find_cas_view_offset<D: sha2::Digest>(&self, len: usize, digest: ShaDigest<D>) -> Option<(u64, Data)> {
         // TODO: This is probably really slow tbh because a digest needs to get computed per window..
         self.windows(len)
             .enumerate()
             .find(|(_, v)| {
-                use sha2::Digest;
-
-                sha2::Sha256::digest(v).as_slice() == digest
+                D::digest(v) == digest
             })
             .map(|(offset, _)| (offset as u64, self.view(offset, len)))
     }
 
-      /// Finds a view based on a descriptor
+    /// (Parallel) Finds a view based on a length/digest
     #[inline]
-    pub fn find_ns_view_offset(&self, len: usize, ns: &Namespace, dchk: u64) -> Option<(u64, Data)> {
+    pub fn par_find_cas_view_offset<D: sha2::Digest>(&self, len: usize, digest: ShaDigest<D>) -> Option<(u64, Data)> {
         // TODO: This is probably really slow tbh because a digest needs to get computed per window..
         self.windows(len)
             .enumerate()
             .find(|(_, v)| {
-                use sha2::Digest;
-
-                ns.key(sha2::Sha256::digest(v).as_slice()) == dchk
+                D::digest(v) == digest
             })
             .map(|(offset, _)| (offset as u64, self.view(offset, len)))
+    }
+
+    /// Finds a view based on a len/namespace and digest checksum
+    #[inline]
+    pub fn find_ns_view_offset<D: sha2::Digest>(&self, len: usize, ns: &Namespace, dchk: u64) -> Option<(u64, Data, ShaDigest<D>)> {
+        // TODO: This is probably really slow tbh because a digest needs to get computed per window..
+        self.windows(len)
+            .enumerate()
+            .find_map(|(offset, v)| {
+                let digest = D::digest(v);
+                if ns.key(digest.as_slice()) == dchk {
+                    Some((offset, digest))
+                } else {
+                    None
+                }
+            })
+            .map(|(offset, digest)| (offset as u64, self.view(offset, len), digest))
+    }
+
+    /// (Parallel) Finds a view based on a len/namespace and digest checksum
+    #[inline]
+    pub fn par_find_ns_view_offset<D: sha2::Digest>(&self, len: usize, ns: &Namespace, dchk: u64) -> Option<(u64, Data, ShaDigest<D>)> {
+        /*
+            This will search for windows
+        */
+        self.windows(len)
+            .enumerate()
+            .par_bridge()
+            .find_map_any(|(offset, v)| {
+                let digest = D::digest(v);
+                if ns.key(digest.as_slice()) == dchk {
+                    Some((offset, v, digest))
+                } else {
+                    None
+                }
+            })
+            .map(|(offset, _, digest)| (offset as u64, self.view(offset, len), digest))
     }
 
     /// Returns a reference to the inner Bytes

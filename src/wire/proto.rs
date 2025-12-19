@@ -23,6 +23,7 @@ use anyhow::anyhow;
 use bytes::BufMut;
 use flexbuffers::Blob;
 use flexbuffers::MapBuilder;
+use sha2::Sha256;
 use tracing::debug;
 use tracing::error;
 type Header = flexbuffers::Builder;
@@ -51,7 +52,7 @@ impl<'wire> Proto {
     ///
     /// However, protocol allows this so that partial record views can be created
     #[inline]
-    pub fn restore(boot: &Boot<'wire>, transport: &TransportMut) -> crate::Result<Proto> {
+    pub fn receive(boot: &Boot<'wire>, transport: &TransportMut) -> crate::Result<Proto> {
         Ok(Proto {
             ns: boot.ns().clone(),
             info: boot
@@ -108,8 +109,8 @@ impl<'wire> Proto {
         Ok(())
     }
 
-    /// Builds the wire protocol into an intermediate volume target
-    pub fn build<T>(&'wire self, target: T) -> crate::Result<T>
+    /// Sends the current wire protocol state to target
+    pub fn send<T>(&'wire self, target: T) -> crate::Result<T>
     where
         T: VolumeTarget + BufMut,
     {
@@ -118,23 +119,27 @@ impl<'wire> Proto {
         let mut map = header.start_map();
         let rec = self.info.apply(&self.ns, &mut map);
         if !rec.is_inline() {
-            todo!() // Record info MUST be inline
+           return Err(anyhow!("Record info must be inline").into());
         }
         let mut framelist = FrameList { frames: vec![rec] };
         if self.transport.is_inline() {
+            // If the transport can fit inside of the header than we apply it inline
             self.apply_transport_inline(&mut map, &mut framelist);
 
-            // Since index is optional it's placed at the end of the encoding
+            // Since tools are optional they are placed at the end of the framelist
             self.apply_tools(&mut map, &mut framelist);
         } else {
             // In this case, the index is likely much smaller than the transport
             // It's useful to place the index ahead of the transport so that
             // partial views can include the index
             self.apply_tools(&mut map, &mut framelist);
+
+            // We know data can't be stored inline, so it's frames are always at the end
             self.apply_transport(&mut framelist); // If the transport is not stored inline
         }
         map.end_map();
 
+        // Check inline frame configuration
         for f in framelist.frames.iter() {
             if f.is_inline()
                 && !header
@@ -147,26 +152,31 @@ impl<'wire> Proto {
             }
         }
 
-        // Begin encodering boot
-        let mut boot_enc = boot::EncodeBoot::from(target);
+        // Begin encoding boot
+        let mut codec = boot::Codec::from(target);
 
         // START of HEADER
         // START of boot
-        boot_enc.encode_boot_start(&self.ns);
+        codec.encode_boot_start(&self.ns);
 
         let fl_bin = flexbuffers::to_vec(&framelist).unwrap();
         // BOOT framelist
-        boot_enc.encode_bytes_desc(&fl_bin);
+        codec.encode_bytes_desc(&fl_bin);
         // END of boot
-        boot_enc.encode_boot_end();
+        codec.encode_boot_end();
 
         // INLINE block
-        boot_enc.encode_inline(&fl_bin, header.view());
+        codec.encode_inline(&fl_bin, header.view());
         // END of HEADER
 
-        match Boot::decode(boot_enc.filled()) {
-            Ok(_) => {
+        match Boot::decode(codec.filled()) {
+            Ok(boot) => {
+                boot.info().expect("MUST build a valid record info");
                 // SUCCESS
+                /*
+                    TODO:
+                    - Could validate inline frames
+                */
             }
             Err(err) => match err {
                 // TODO: For now these are logic errors so panic to find the issue loudly
@@ -183,23 +193,27 @@ impl<'wire> Proto {
             },
         }
 
+        // Move frames into target
         if let Some(frames) = fl_bin.at("frames").as_iter() {
             for f in frames {
                 let desc: Descriptor = f.try_to_obj()?;
                 if desc.is_inline() {
-                    continue;
+                    continue; // All inline header frames have been written
                 }
+                // Read from the header first if there were any frames from the header
+                // that could not be stored inline
+                // Next, read from the transport directly
                 if let Some(frame) = header
                     .view()
                     .at(&desc.label_idx_str())
                     .blob()
                     .or_else(|| self.transport.fetch(&self.ns, &desc))
                 {
-                    boot_enc.put(frame);
+                    codec.put(frame);
                 }
             }
         }
-        Ok(boot_enc.volume.into_parts().0)
+        Ok(codec.volume.into_parts().0)
     }
 
     /// Enables a tool on the protocol
@@ -262,7 +276,7 @@ impl<'wire> Proto {
                                     let mut opts = crate::Opts::from(Spec::Tool);
                                     opts.set_object_storage(true);
                                     let mut desc =
-                                        Descriptor::create(&self.ns, opts, index.as_slice(), *t);
+                                        Descriptor::create::<Sha256>(&self.ns, opts, index.as_slice(), *t);
                                     desc.offset = framelist
                                         .frames
                                         .last()
@@ -287,7 +301,7 @@ impl<'wire> Proto {
             match flexbuffers::to_vec(settings) {
                 Ok(settings) => {
                     let opts = crate::Opts::from(Spec::Tool);
-                    let mut desc = Descriptor::create(&self.ns, opts, &settings, "setting");
+                    let mut desc = Descriptor::create::<Sha256>(&self.ns, opts, &settings, "setting");
                     desc.offset = framelist
                         .frames
                         .last()

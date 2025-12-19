@@ -81,7 +81,7 @@ impl<'wire> Describe for Transport {
                     Storage::Content
                 };
                 FrameList {
-                    frames: vec![Descriptor::create(ns, storage.into(), data, "inline")],
+                    frames: vec![Descriptor::create::<sha2::Sha256>(ns, storage.into(), data, "inline")],
                 }
             }
             Transport::Frame((frames, _)) => frames.clone(),
@@ -95,6 +95,7 @@ impl<'wire> Fetch<'wire> for Transport {
         match self {
             Transport::Inline(data) => Some(&data),
             Transport::Frame((frames, data)) => {
+                // if let Some(frame) = frames.frames.par_iter().find_any(|f| *f == desc) { // TODO: With Rayon
                 if let Some(frame) = frames.frames.iter().find(|f| *f == desc) {
                     data.fetch(ns, frame)
                 } else {

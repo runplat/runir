@@ -2,6 +2,7 @@ use crate::{
     Namespace, vol::{MemoryMappedTarget, VolumeTarget, new_mmap_anon_target}, wire::{Fetch, FrameList, cas::Descriptor}
 };
 use bytes::{BufMut, BytesMut};
+use sha2::Sha256;
 use tracing::error;
 
 pub struct Receive {
@@ -142,15 +143,10 @@ impl Receive {
                 // 2) Check if buf has the next frame (Allow partial writes?)
                 if buf.len() >= next.size as usize {
                     let view = &buf[..next.size as usize];
-                    let mut desc = Descriptor::recover(
-                        &self.ns,
-                        next.opts,
-                        view,
-                        next.label,
-                    );
-                    desc.offset = next.offset;
-                    if desc == next {
-                        let view = buf.split_to(desc.size as usize);
+
+                    // Check the identity of the view
+                    if next.check::<Sha256>(&self.ns, view) {
+                        let view = buf.split_to(next.size as usize);
 
                         // 3) Copy bytes from buf to volume
                         self.writer
@@ -170,7 +166,7 @@ impl Receive {
 
                         Ok(Some(next))
                     } else {
-                        error!("Received an invalid frame:\n{desc:#?}\nExpected: {next:#?}");
+                        error!("Received an invalid frame - Expected: {next:#?}");
                         return Err(ReceiveError::InvalidFrame);
                     }
                 } else {

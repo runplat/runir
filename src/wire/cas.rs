@@ -1,6 +1,6 @@
 use crate::{Namespace, Opts, wire::boot::NS_HEADER_INLINE_BLOCK_SIZE};
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 
 /// Describes a single wire unit record
 #[derive(Debug, Default, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
@@ -53,9 +53,8 @@ impl Descriptor {
 
     /// Creates a descriptor from a blob
     #[inline]
-    pub fn create(ns: &Namespace, opts: Opts, blob: impl AsRef<[u8]>, label: &str) -> Self {
-        use sha2::Digest;
-        let digest = sha2::Sha256::digest(blob.as_ref());
+    pub fn create<D: sha2::Digest>(ns: &Namespace, opts: Opts, blob: impl AsRef<[u8]>, label: &str) -> Self {
+        let digest = D::digest(blob.as_ref());
         Descriptor {
             opts: opts,
             size: blob.as_ref().len() as u64,
@@ -65,25 +64,22 @@ impl Descriptor {
         }
     }
 
-    /// Recovers a descriptor
-    #[inline]
-    pub fn recover(ns: &Namespace, opts: Opts, blob: impl AsRef<[u8]>, label: u64) -> Self {
-        use sha2::Digest;
-        let digest = sha2::Sha256::digest(blob.as_ref());
-
-        Self {
-            opts,
-            size: blob.as_ref().len() as u64,
-            dchk: ns.key(digest.as_slice()),
-            label,
-            offset: 0,
-        }
-    }
-
     /// Returns true if this descriptor is stored inline
     #[inline]
     pub fn is_inline(&self) -> bool {
         (self.offset + self.size) < NS_HEADER_INLINE_BLOCK_SIZE as u64
+    }
+
+    /// Returns true if the namespace/blob data matches the digest checksum
+    #[inline]
+    pub fn check<D: sha2::Digest>(&self, ns: &Namespace, blob: impl AsRef<[u8]>) -> bool {
+        let o = self.offset as usize;
+        if (o + self.size as usize) < blob.as_ref().len() {
+            let digest = D::digest(&blob.as_ref()[o..o + self.size as usize]);
+            ns.key(digest.as_slice()) == self.dchk
+        } else {
+            false
+        }
     }
 }
 
@@ -126,8 +122,8 @@ impl<'peek> Fetch<'peek> for crate::Data {
             })
             .unwrap_or_else(|| {
                 // TODO: This is probably overkill
-                let (offset, _) = self
-                    .find_ns_view_offset(desc.size as usize, ns, desc.dchk)
+                let (offset, ..) = self
+                    .find_ns_view_offset::<Sha256>(desc.size as usize, ns, desc.dchk)
                     .unwrap_or_default();
                 offset
             }) as usize;

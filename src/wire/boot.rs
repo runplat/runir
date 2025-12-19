@@ -25,12 +25,12 @@ pub const INLINE_BLOCK_SIZE: usize = 512;
 pub const NS_HEADER_INLINE_BLOCK_SIZE: usize = 1024;
 
 /// Wrapper struct for encoding boot properties
-pub(crate) struct EncodeBoot<T> {
+pub(crate) struct Codec<T> {
     pub volume: Volume<T, ()>,
     ns: Namespace,
 }
 
-impl<T: VolumeTarget + BufMut> EncodeBoot<T> {
+impl<T: VolumeTarget + BufMut> Codec<T> {
     #[inline]
     pub fn encode_boot_start(&mut self, ns: &Namespace) {
         let [ab, cd, optschk] = ns.encode();
@@ -123,7 +123,7 @@ impl<T: VolumeTarget + BufMut> EncodeBoot<T> {
     }
 }
 
-impl<T> From<T> for EncodeBoot<T> {
+impl<T> From<T> for Codec<T> {
     fn from(value: T) -> Self {
         Self {
             volume: Volume::from_parts((value, ())),
@@ -132,7 +132,7 @@ impl<T> From<T> for EncodeBoot<T> {
     }
 }
 
-impl<T: VolumeTarget + BufMut> Deref for EncodeBoot<T> {
+impl<T: VolumeTarget + BufMut> Deref for Codec<T> {
     type Target = T;
 
     #[inline]
@@ -141,7 +141,7 @@ impl<T: VolumeTarget + BufMut> Deref for EncodeBoot<T> {
     }
 }
 
-impl<T: VolumeTarget + BufMut> DerefMut for EncodeBoot<T> {
+impl<T: VolumeTarget + BufMut> DerefMut for Codec<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.volume.target_mut()
@@ -461,42 +461,12 @@ impl<'wire> BootLoader<'wire> {
         Ok(())
     }
 
-    // /// Loads the record boot to a destination
-    // ///
-    // /// Returns an error if the boot is incomplete, or if the dest did not have enough capacity
-    // #[inline]
-    // pub fn load(&mut self, dest: &mut impl AsMut<[u8]>) -> crate::Result<()> {
-    //     match &self.transport {
-    //         TransportMut::Inline => match dest.as_mut().get_mut(..NS_HEADER_INLINE_BLOCK_SIZE) {
-    //             Some(write_dest) => {
-    //                 write_dest.copy_from_slice(self.boot.header);
-    //                 Ok(())
-    //             }
-    //             None => Err(anyhow!("Destination did not have enough capacity").into()),
-    //         },
-    //         TransportMut::Receive(receive) if receive.is_complete() => {
-    //             if let Some(dest) = dest
-    //                 .as_mut()
-    //                 .get_mut(..NS_HEADER_INLINE_BLOCK_SIZE + receive.len())
-    //             {
-    //                 dest[..NS_HEADER_INLINE_BLOCK_SIZE].copy_from_slice(self.boot.header);
-    //                 receive.commit(
-    //                     &mut dest[NS_HEADER_INLINE_BLOCK_SIZE
-    //                         ..NS_HEADER_INLINE_BLOCK_SIZE + receive.len()],
-    //                 )?;
-    //                 Ok(())
-    //             } else {
-    //                 Err(anyhow!("Destination did not have enough capacity").into())
-    //             }
-    //         }
-    //         _ => Err(anyhow!("Boot is incompleted").into()),
-    //     }
-    // }
-
     /// Loads the current state into a new Wire
+    /// 
+    /// Note: This is used with `Wire::decode()` to return a `Record`
     #[inline]
     pub fn load(&self) -> BootLoadResult<Wire> {
-        let wire = Wire::from(super::proto::Proto::restore(&self.boot, &self.transport)?);
+        let wire = Wire::from(super::proto::Proto::receive(&self.boot, &self.transport)?);
         Ok(wire)
     }
 

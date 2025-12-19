@@ -181,7 +181,7 @@ impl Wire {
         }
 
         // 5) Build the wire encoding and output to target
-        proto.build(target)
+        proto.send(target)
     }
 
     /// Decodes the current protocol state into a record
