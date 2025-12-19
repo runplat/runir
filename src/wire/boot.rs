@@ -17,6 +17,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use serde::Deserialize;
 use sha2::Digest;
 use tracing::{debug, trace};
+use uuid::Uuid;
 
 pub const NS_BLOCK_SIZE: usize = 128;
 pub const NS_HEADER_BLOCK_SIZE: usize = 512;
@@ -26,6 +27,7 @@ pub const NS_HEADER_INLINE_BLOCK_SIZE: usize = 1024;
 /// Wrapper struct for encoding boot properties
 pub(crate) struct EncodeBoot<T> {
     pub volume: Volume<T, ()>,
+    ns: Namespace,
 }
 
 impl<T: VolumeTarget + BufMut> EncodeBoot<T> {
@@ -46,6 +48,7 @@ impl<T: VolumeTarget + BufMut> EncodeBoot<T> {
             self.encode_u64(opts);
             self.encode_u64(chk);
         }
+        self.ns = ns.clone();
     }
 
     #[inline]
@@ -64,27 +67,36 @@ impl<T: VolumeTarget + BufMut> EncodeBoot<T> {
     pub fn encode_boot_end(&mut self) {
         if !self.align_block(NS_BLOCK_SIZE) {
             // TODO: MUST fit in a 128 byte block
+            todo!()
         }
     }
 
     #[inline]
     pub fn encode_inline(&mut self, fl_bin: &[u8], header: &[u8]) {
+        trace!(fl_bin_len = fl_bin.len());
         self.put(fl_bin);
         if !self.align_block(NS_HEADER_BLOCK_SIZE) {
             // TODO:
+            todo!(
+                "Could not align block {} > {NS_HEADER_BLOCK_SIZE}",
+                self.volume.target().pos()
+            );
         }
 
         let framelist = FrameList::deserialize(fl_bin.val().unwrap()).unwrap(); // Zero-copy deserialize
         for f in framelist.frames.iter() {
             // TODO: Validate this frame
             if f.is_inline() {
-                let blob = header.at(&f.label).blob().unwrap();
-                self.put(blob);
+                let label = f.label_idx_str();
+                if let Some(blob) = header.at(&label).blob() {
+                    self.put(blob);
+                }
             }
         }
 
         if !self.align_block(NS_HEADER_INLINE_BLOCK_SIZE) {
             // TODO: Must fit inside of the 1024 inline block
+            todo!()
         }
     }
 
@@ -115,6 +127,7 @@ impl<T> From<T> for EncodeBoot<T> {
     fn from(value: T) -> Self {
         Self {
             volume: Volume::from_parts((value, ())),
+            ns: Namespace::ephemeral(),
         }
     }
 }
@@ -139,11 +152,11 @@ impl<T: VolumeTarget + BufMut> DerefMut for EncodeBoot<T> {
 #[derive(Clone, Debug)]
 pub struct Boot<'peek> {
     /// Namespace
-    _ns: Namespace,
+    ns: Namespace,
     /// Header bytes
     header: &'peek [u8],
     /// Frame layout
-    layout: FrameList<'peek>,
+    layout: FrameList,
 }
 
 #[derive(Debug)]
@@ -163,12 +176,12 @@ impl<'peek> Boot<'peek> {
     /// Returns the namespace of the boot
     #[inline]
     pub fn ns(&self) -> &Namespace {
-        &self._ns
+        &self.ns
     }
 
     /// Returns the frame layout of the boot
     #[inline]
-    pub fn layout(&self) -> &FrameList<'_> {
+    pub fn layout(&self) -> &FrameList {
         &self.layout
     }
 
@@ -193,8 +206,41 @@ impl<'peek> Boot<'peek> {
     /// Note: Record info will always be inline
     #[inline]
     pub fn info(&self) -> Option<RecordInfo> {
-        self.fetch(self.layout.frames.first()?)
-            .and_then(|f| f.val()?.to_obj())
+        self.fetch(self.ns(), self.layout.frames.first()?)
+            .and_then(|f| {
+                let peek = f
+                    .val()?
+                    .at_many(&["label", "checksum", "ns_chk", "opts", "ts"]);
+
+                match peek.as_slice() {
+                    [
+                        Some(label),
+                        Some(checksum),
+                        Some(ns_chk),
+                        Some(opts),
+                        Some(ts),
+                        ..,
+                    ] => Some(RecordInfo {
+                        key: Uuid::from_u64_pair(label.as_u64(), checksum.as_u64()),
+                        ns_chk: ns_chk.as_u64(),
+                        opts: Opts::decode(opts.as_u64()),
+                        ts: ts.as_u64(),
+                    }),
+                    _ => None,
+                }
+            })
+    }
+
+    /// Returns data for an inline tool
+    #[inline]
+    pub fn tool(&self, name: &str) -> Option<&[u8]> {
+        self.fetch(
+            self.ns(),
+            self.layout
+                .frames
+                .iter()
+                .find(|f| f.is_inline() && f.opts.is_tool() && f.label == self.ns().key(name))?,
+        )
     }
 
     /// Returns a new Boot configured from a new header slice
@@ -266,9 +312,9 @@ impl<'peek> Boot<'peek> {
 
         match manifest.val() {
             Some(_m) => {
-                let _manifest: FrameList<'peek> = _m.try_to_obj().map_err(Fault)?;
+                let _manifest: FrameList = _m.try_to_obj().map_err(Fault)?;
                 Ok(Boot {
-                    _ns: ns,
+                    ns,
                     header: header,
                     layout: _manifest,
                 })
@@ -297,11 +343,11 @@ impl<'peek> Boot<'peek> {
             transport: if self.is_boot_inline() {
                 TransportMut::Inline
             } else {
-                let mut recv = Receive::new(self.layout.clone())?;
+                let mut recv = Receive::new(self.ns(), self.layout.clone())?;
 
                 // Configure the receive so that it starts at the right frame
                 for (idx, f) in self.layout.frames.iter().enumerate() {
-                    if self.fetch(f).is_some() {
+                    if self.fetch(self.ns(), f).is_some() {
                         recv.last = idx;
                     } else {
                         break;
@@ -328,7 +374,7 @@ impl<'peek> Boot<'peek> {
 
 impl<'peek> Fetch<'peek> for Boot<'peek> {
     #[inline]
-    fn fetch(&'peek self, desc: &Descriptor<'_>) -> Option<&'peek [u8]> {
+    fn fetch(&'peek self, _: &Namespace, desc: &Descriptor) -> Option<&'peek [u8]> {
         let header_data = self.inline();
 
         if (desc.offset + desc.size) <= header_data.len() as u64 {
@@ -342,11 +388,11 @@ impl<'peek> Fetch<'peek> for Boot<'peek> {
 
 impl<'wire> Fetch<'wire> for BootLoader<'wire> {
     #[inline]
-    fn fetch(&'wire self, desc: &Descriptor<'_>) -> Option<&'wire [u8]> {
+    fn fetch(&'wire self, ns: &Namespace, desc: &Descriptor) -> Option<&'wire [u8]> {
         if desc.is_inline() {
-            self.boot.fetch(desc)
+            self.boot.fetch(ns, desc)
         } else if let Some(recv) = self.transport.as_receive() {
-            recv.fetch(desc)
+            recv.fetch(ns, desc)
         } else {
             None
         }
@@ -357,8 +403,8 @@ impl<'wire> Fetch<'wire> for BootLoader<'wire> {
 #[derive(Debug)]
 pub struct BootLoader<'wire> {
     boot: Boot<'wire>,
-    transport: TransportMut<'wire>,
-    frames: Vec<Descriptor<'wire>>,
+    transport: TransportMut,
+    frames: Vec<Descriptor>,
 }
 
 impl<'wire> BootLoader<'wire> {
@@ -449,9 +495,22 @@ impl<'wire> BootLoader<'wire> {
 
     /// Loads the current state into a new Wire
     #[inline]
-    pub fn load(&'wire self) -> BootLoadResult<Wire<'wire>> {
+    pub fn load(&self) -> BootLoadResult<Wire> {
         let wire = Wire::from(super::proto::Proto::restore(&self.boot, &self.transport)?);
         Ok(wire)
+    }
+
+    /// Returns data for a tool
+    ///
+    /// Searches inline first, and then checks transport
+    #[inline]
+    pub fn tool(&self, name: &str) -> Option<&[u8]> {
+        self.boot.tool(name).or_else(|| {
+            self.frames
+                .iter()
+                .find(|f| f.opts.is_tool() && f.label == self.boot.ns().key(name))
+                .and_then(|f| self.fetch(self.boot.ns(), f))
+        })
     }
 }
 
@@ -470,13 +529,13 @@ impl From<crate::Error> for BootLoadErrors {
 
 /// Frames returned while decoding received bytes
 #[derive(Clone, Debug)]
-pub enum Frame<'peek> {
+pub enum Frame {
     PullBytes(usize),
-    Received(Descriptor<'peek>),
+    Received(Descriptor),
 }
 
-impl<'peek> Decoder for TransportMut<'peek> {
-    type Item = Frame<'peek>;
+impl<'peek> Decoder for TransportMut {
+    type Item = Frame;
 
     type Error = crate::Error;
 
@@ -516,7 +575,7 @@ mod tests {
     async fn test_encode_decode_cas_record_boot() {
         let ns = Namespace::new("test");
         let wire = Wire::new(ns.clone());
-        let target = wire.encode(test_cas_record()).unwrap();
+        let target = wire.encode(test_cas_record(), None).unwrap();
 
         let bytes = target.filled();
         assert_eq!(bytes.len(), NS_HEADER_INLINE_BLOCK_SIZE);
@@ -526,13 +585,21 @@ mod tests {
         let (prelude, manifest, inline) = boot.split_header();
         fn test_boot(ns: Namespace, boot: Boot) {
             let (_, manifest, _) = boot.split_header();
-            assert_eq!(boot._ns.chk(), ns.chk());
+            assert_eq!(boot.ns.chk(), ns.chk());
             assert_eq!(boot.layout.frames.len(), 2);
-            assert_eq!(boot.layout.frames[0].label, ".runir");
-            assert_eq!(boot.layout.frames[1].label, ".data");
+            assert_eq!(boot.layout.frames[0].label, ns.key(".runir"));
+            assert_eq!(boot.layout.frames[1].label, ns.key(".data"));
 
-            let _container = boot.fetch(&boot.layout.frames[0]).unwrap().val().unwrap();
-            let _object = boot.fetch(&boot.layout.frames[1]).unwrap().val().unwrap();
+            let _container = boot
+                .fetch(&ns, &boot.layout.frames[0])
+                .unwrap()
+                .val()
+                .unwrap();
+            let _object = boot
+                .fetch(&ns, &boot.layout.frames[1])
+                .unwrap()
+                .val()
+                .unwrap();
 
             // Test manifest was decoded correctly
             assert_eq!(manifest.val().at("frames").as_iter().unwrap().count(), 2);
@@ -541,6 +608,11 @@ mod tests {
             let _runir = &boot.header[data_start..data_start + 112];
             let data = &boot.header[data_start + 112..data_start + 112 + 29];
             assert_eq!(data.at("value").str(), Some("hello world"));
+
+            eprintln!("{:#?}", boot.layout());
+            eprintln!("{}", _runir.val().unwrap());
+
+            boot.info().unwrap();
         }
         test_boot(ns.clone(), boot.clone());
 

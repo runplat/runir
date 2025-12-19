@@ -3,6 +3,8 @@ use std::ops::Deref;
 use bytes::Bytes;
 use sha2::{Sha256, digest::Update};
 
+use crate::Namespace;
+
 /// Wraps Bytes struct to offer additional functions
 #[derive(Default, Debug, Clone)]
 pub struct Data {
@@ -47,6 +49,20 @@ impl Data {
                 use sha2::Digest;
 
                 sha2::Sha256::digest(v).as_slice() == digest
+            })
+            .map(|(offset, _)| (offset as u64, self.view(offset, len)))
+    }
+
+      /// Finds a view based on a descriptor
+    #[inline]
+    pub fn find_ns_view_offset(&self, len: usize, ns: &Namespace, dchk: u64) -> Option<(u64, Data)> {
+        // TODO: This is probably really slow tbh because a digest needs to get computed per window..
+        self.windows(len)
+            .enumerate()
+            .find(|(_, v)| {
+                use sha2::Digest;
+
+                ns.key(sha2::Sha256::digest(v).as_slice()) == dchk
             })
             .map(|(offset, _)| (offset as u64, self.view(offset, len)))
     }

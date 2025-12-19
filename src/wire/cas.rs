@@ -1,16 +1,15 @@
-use crate::{Opts, util::ser::BytesField, wire::boot::NS_HEADER_INLINE_BLOCK_SIZE};
+use crate::{Namespace, Opts, wire::boot::NS_HEADER_INLINE_BLOCK_SIZE};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 /// Describes a single wire unit record
 #[derive(Debug, Default, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
-pub struct FrameList<'a> {
+pub struct FrameList {
     /// Each frame required to store the record
-    #[serde(borrow)]
-    pub frames: Vec<Descriptor<'a>>,
+    pub frames: Vec<Descriptor>,
 }
 
-impl<'a> FrameList<'a> {
+impl FrameList {
     /// Returns the capacity required by this manifest
     #[inline]
     pub fn required_capacity(&self) -> u64 {
@@ -28,43 +27,57 @@ impl<'a> FrameList<'a> {
 
 /// Generic descriptor for a content-addressed blob
 #[derive(Ord, PartialOrd, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
-pub struct Descriptor<'a> {
+pub struct Descriptor {
     /// Storage flags
-    #[serde(with = "crate::opts::ser")]
+    #[serde(with = "crate::opts::ser", rename = "opt")]
     pub opts: Opts,
     /// Size of the blob
+    #[serde(rename = "s")]
     pub size: u64,
-    /// Digest of the blob
-    #[serde(borrow)]
-    pub digest: BytesField<'a>,
+    /// Digest checksum
+    #[serde(rename = "d")]
+    pub dchk: u64,
     /// Label to identify the descriptor
-    #[serde(borrow)]
-    pub label: std::borrow::Cow<'a, str>,
+    #[serde(rename = "l")]
+    pub label: u64,
     /// Byte offset
+    #[serde(rename = "o")]
     pub offset: u64,
 }
 
-impl<'a> Descriptor<'a> {
+impl Descriptor {
+    #[inline]
+    pub fn label_idx_str(&self) -> String {
+        super::ext::format_ns_key(self.label)
+    }
+
     /// Creates a descriptor from a blob
     #[inline]
-    pub fn create(opts: Opts, blob: impl AsRef<[u8]>, label: &'a str) -> Self {
+    pub fn create(ns: &Namespace, opts: Opts, blob: impl AsRef<[u8]>, label: &str) -> Self {
         use sha2::Digest;
         let digest = sha2::Sha256::digest(blob.as_ref());
         Descriptor {
             opts: opts,
             size: blob.as_ref().len() as u64,
-            digest: BytesField::Owned(digest.to_vec()),
-            label: label.into(),
+            dchk: ns.key(digest.as_slice()),
+            label: ns.key(label),
             offset: 0,
         }
     }
 
-    /// Returns a new descriptor w/ offset set
+    /// Recovers a descriptor
     #[inline]
-    pub fn with_offset(&self, offset: u64) -> Descriptor<'a> {
-        let mut with_offset = self.clone();
-        with_offset.offset = offset;
-        with_offset
+    pub fn recover(ns: &Namespace, opts: Opts, blob: impl AsRef<[u8]>, label: u64) -> Self {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(blob.as_ref());
+
+        Self {
+            opts,
+            size: blob.as_ref().len() as u64,
+            dchk: ns.key(digest.as_slice()),
+            label,
+            offset: 0,
+        }
     }
 
     /// Returns true if this descriptor is stored inline
@@ -72,46 +85,41 @@ impl<'a> Descriptor<'a> {
     pub fn is_inline(&self) -> bool {
         (self.offset + self.size) < NS_HEADER_INLINE_BLOCK_SIZE as u64
     }
-
-    /// Returns true if digest matches
-    #[inline]
-    pub fn is_digest_match(&self, other: &Self) -> bool {
-        self.digest.as_ref() == other.digest.as_ref()
-    }
 }
 
 /// Trait for cas objects to describe themselves as a manifest
-pub trait Describe<'peek> {
+pub trait Describe {
     /// Returns a description of the container and contents of this type
-    fn describe(&'peek self) -> FrameList<'peek>;
+    fn describe(&self, ns: &Namespace) -> FrameList;
 }
 
 /// Trait for a cas store to fetch bytes for a descriptor stored by this store
 pub trait Fetch<'peek> {
     /// Fetches the bytes the correspond to a descriptor owned by this store
-    fn fetch(&'peek self, desc: &Descriptor<'_>) -> Option<&'peek [u8]>;
+    fn fetch(&'peek self, ns: &Namespace, desc: &Descriptor) -> Option<&'peek [u8]>;
 }
 
-impl<'a> std::fmt::Debug for Descriptor<'a> {
+impl std::fmt::Debug for Descriptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Descriptor")
-            .field("size", &self.size)
-            .field("digest", &hex::encode(&self.digest))
-            .field("offset", &self.offset)
             .field("label", &self.label)
-            .field("storage", &self.opts)
+            .field("size", &self.size)
+            .field("offset", &self.offset)
+            .field("dchk", &self.dchk)
+            .field("opts.storage", &self.opts.storage)
+            .field("opts.storage", &self.opts.spec)
             .finish()
     }
 }
 
 impl<'peek> Fetch<'peek> for crate::Data {
-    fn fetch(&'peek self, desc: &Descriptor<'_>) -> Option<&'peek [u8]> {
+    fn fetch(&'peek self, ns: &Namespace, desc: &Descriptor) -> Option<&'peek [u8]> {
         let offset = Some(desc.offset)
             .filter(|o| {
                 let o = *o as usize;
                 if (o + desc.size as usize) < self.len() {
                     let digest = sha2::Sha256::digest(&self[o..o + desc.size as usize]);
-                    digest.as_slice() == desc.digest.as_ref()
+                    ns.key(digest.as_slice()) == desc.dchk
                 } else {
                     false
                 }
@@ -119,7 +127,7 @@ impl<'peek> Fetch<'peek> for crate::Data {
             .unwrap_or_else(|| {
                 // TODO: This is probably overkill
                 let (offset, _) = self
-                    .find_cas_view_offset(desc.size as usize, &desc.digest)
+                    .find_ns_view_offset(desc.size as usize, ns, desc.dchk)
                     .unwrap_or_default();
                 offset
             }) as usize;

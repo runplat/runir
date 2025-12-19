@@ -1,9 +1,12 @@
+use std::collections::BTreeMap;
+
 use crate::Data;
 use crate::Namespace;
 use crate::Record;
 use crate::RecordInfo;
+use crate::opts::Spec;
+use crate::util::Intern;
 use crate::util::PeekExtensions;
-use crate::util::ser::BytesMap;
 use crate::vol::VolumeTarget;
 use crate::wire::Boot;
 use crate::wire::Describe;
@@ -11,6 +14,7 @@ use crate::wire::Ext;
 use crate::wire::Fetch;
 use crate::wire::FrameList;
 use crate::wire::Root;
+use crate::wire::ToolIndex;
 use crate::wire::boot;
 use crate::wire::cas::Descriptor;
 use crate::wire::transport::Transport;
@@ -19,67 +23,35 @@ use anyhow::anyhow;
 use bytes::BufMut;
 use flexbuffers::Blob;
 use flexbuffers::MapBuilder;
-use serde::Deserialize;
-use serde::Serialize;
+use tracing::debug;
+use tracing::error;
 type Header = flexbuffers::Builder;
 
 /// Builds a "wire" protocol intermediate target
 #[derive(Debug, Clone)]
-pub struct Proto<'wire> {
+pub struct Proto {
     pub(crate) ns: Namespace,
     /// Record info
     pub(crate) info: RecordInfo,
     /// Transport state
-    pub(crate) transport: Transport<'wire>,
-    /// Optional, Index of data to include with this record
-    index: Option<Index<'wire>>,
+    pub(crate) transport: Transport,
+    /// Optional, Virtual index to apply when building
+    tool_index: Option<ToolIndex>,
+    /// Optional, Tools to
+    tools: Vec<&'static str>,
     /// Optional, Uses a root to store paths
     pub(crate) root: Option<Root>,
 }
 
-/// State for storing additional data for this record
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Index<'wire> {
-    /// Map of indexes
-    ///
-    /// Each entry contains a value that can be viewed using a Peek interface
-    #[serde(borrow)]
-    map: BytesMap<'wire>,
-}
-
-impl<'wire> Ext for Index<'wire> {
-    fn name(&self) -> &str {
-        ".index"
-    }
-
-    fn author(&self, map: &mut flexbuffers::MapBuilder<'_>) {
-        for (k, v) in self.map.0.iter() {
-            map.push(k, Blob(v.as_ref()));
-        }
-    }
-
-    fn apply<'a>(&'a self, map: &mut flexbuffers::MapBuilder<'_>) -> Descriptor<'a>
-        where
-            Self: Sized
-    {
-        let mut desc = self.default_apply(map);
-        desc.opts.set_ext_spec(true);
-        desc
-    }
-}
-
-impl<'wire> Proto<'wire> {
+impl<'wire> Proto {
     /// Restores a protocol from boot loader parts
-    /// 
+    ///
     /// If restoring from a non-inline transport, it's possible
     /// the full record data has not been received
-    /// 
+    ///
     /// However, protocol allows this so that partial record views can be created
     #[inline]
-    pub fn restore(
-        boot: &Boot<'wire>,
-        transport: &TransportMut<'wire>,
-    ) -> crate::Result<Proto<'wire>> {
+    pub fn restore(boot: &Boot<'wire>, transport: &TransportMut) -> crate::Result<Proto> {
         Ok(Proto {
             ns: boot.ns().clone(),
             info: boot
@@ -91,7 +63,8 @@ impl<'wire> Proto<'wire> {
                 TransportMut::Inline => Transport::Inline(Data::from(boot.header())),
                 TransportMut::Receive(receive) => Transport::Receive(receive.clone()),
             },
-            index: None, // TODO:
+            tool_index: None,
+            tools: vec![],
             root: None, // TODO:
         })
     }
@@ -103,7 +76,8 @@ impl<'wire> Proto<'wire> {
             ns,
             info: RecordInfo::default(),
             transport: Transport::Inline(Data::default()),
-            index: None,
+            tool_index: None,
+            tools: vec![],
             root: None,
         }
     }
@@ -122,14 +96,14 @@ impl<'wire> Proto<'wire> {
     pub fn use_record(&mut self, rec: Record) {
         self.info = rec.info.clone();
         self.transport = Transport::Inline(rec.data);
-        self.index.take();
+        self.tools.clear();
     }
 
     /// Enables frame transport with layout
     ///
     /// Returns an error if the layout is not valid for the current data
     #[inline]
-    pub fn use_frame_transport(&mut self, frames: FrameList<'wire>) -> crate::Result<()> {
+    pub fn use_frame_transport(&mut self, frames: FrameList) -> crate::Result<()> {
         self.transport = Transport::Frame((frames, self.transport.data().clone()));
         Ok(())
     }
@@ -142,24 +116,36 @@ impl<'wire> Proto<'wire> {
         // Build Header
         let mut header = Header::default();
         let mut map = header.start_map();
-        let rec = self.info.apply(&mut map);
+        let rec = self.info.apply(&self.ns, &mut map);
         if !rec.is_inline() {
             todo!() // Record info MUST be inline
         }
         let mut framelist = FrameList { frames: vec![rec] };
         if self.transport.is_inline() {
             self.apply_transport_inline(&mut map, &mut framelist);
-            
+
             // Since index is optional it's placed at the end of the encoding
-            self.apply_index(&mut map, &mut framelist);
+            self.apply_tools(&mut map, &mut framelist);
         } else {
             // In this case, the index is likely much smaller than the transport
             // It's useful to place the index ahead of the transport so that
             // partial views can include the index
-            self.apply_index(&mut map, &mut framelist);
+            self.apply_tools(&mut map, &mut framelist);
             self.apply_transport(&mut framelist); // If the transport is not stored inline
         }
         map.end_map();
+
+        for f in framelist.frames.iter() {
+            if f.is_inline()
+                && !header
+                    .view()
+                    .at(&f.label_idx_str())
+                    .map(|b| b.flexbuffer_type().is_blob())
+                    .unwrap_or_default()
+            {
+                return Err(anyhow!("Invalid inline frame {f:?}").into());
+            }
+        }
 
         // Begin encodering boot
         let mut boot_enc = boot::EncodeBoot::from(target);
@@ -205,9 +191,9 @@ impl<'wire> Proto<'wire> {
                 }
                 if let Some(frame) = header
                     .view()
-                    .at(&desc.label)
+                    .at(&desc.label_idx_str())
                     .blob()
-                    .or_else(|| self.transport.fetch(&desc))
+                    .or_else(|| self.transport.fetch(&self.ns, &desc))
                 {
                     boot_enc.put(frame);
                 }
@@ -216,26 +202,32 @@ impl<'wire> Proto<'wire> {
         Ok(boot_enc.volume.into_parts().0)
     }
 
-    /// Enables an index
+    /// Enables a tool on the protocol
     #[inline]
-    pub fn use_index(&mut self, index: Index<'wire>) {
-        self.index = Some(index);
+    pub fn use_tool(&mut self, name: &str) {
+        self.tools.push(name.intern());
+    }
+
+    /// Enables a virtual index table w/ protocol
+    #[inline]
+    pub(crate) fn tool_index(&mut self) -> &mut ToolIndex {
+        self.tool_index.get_or_insert_default()
     }
 
     #[inline]
-    fn apply_transport_inline(
-        &'wire self,
-        map: &mut MapBuilder<'wire>,
-        framelist: &mut FrameList<'wire>,
-    ) {
-        let mut frame = self.transport.data().apply(map);
-        frame.offset = framelist.frames.last().map(|f| f.size).unwrap_or_default();
+    fn apply_transport_inline(&'wire self, map: &mut MapBuilder<'wire>, framelist: &mut FrameList) {
+        let mut frame = self.transport.data().apply(&self.ns, map);
+        frame.offset = framelist
+            .frames
+            .last()
+            .map(|f| f.offset + f.size)
+            .unwrap_or_default();
         framelist.frames.push(frame);
     }
 
     #[inline]
-    fn apply_transport(&'wire self, framelist: &mut FrameList<'wire>) {
-        let mut transport = self.transport.describe();
+    fn apply_transport(&'wire self, framelist: &mut FrameList) {
+        let mut transport = self.transport.describe(&self.ns);
         transport.align_offset(
             framelist
                 .frames
@@ -246,13 +238,68 @@ impl<'wire> Proto<'wire> {
         framelist.frames.append(&mut transport.frames);
     }
 
-    /// Apply index to the map and framelist
+    /// Apply tools
     #[inline]
-    fn apply_index(&'wire self, map: &mut MapBuilder<'wire>, framelist: &mut FrameList<'wire>) {
-        if let Some(index) = self.index.as_ref() {
-            let mut index = index.apply(map);
-            index.offset = framelist.frames.last().map(|f| f.size).unwrap_or_default();
-            framelist.frames.push(index);
+    fn apply_tools(&'wire self, map: &mut MapBuilder<'wire>, framelist: &mut FrameList) {
+        use crate::wire::tool::Tool::{Indexer, Setting};
+
+        if self.tools.is_empty() {
+            return;
+        }
+        if let Some(tool_index) = self.tool_index.as_ref() {
+            let mut settings = BTreeMap::new();
+            for t in self.tools.iter() {
+                if let Some((_tool_name, tool)) = tool_index.map.get_key_value(*t) {
+                    match tool {
+                        Indexer(indexer) => {
+                            let _index = indexer(&Record::from_parts((
+                                self.info.clone(),
+                                self.transport.data().clone(),
+                            )));
+
+                            match _index {
+                                Ok(index) => {
+                                    let mut opts = crate::Opts::from(Spec::Tool);
+                                    opts.set_object_storage(true);
+                                    let mut desc =
+                                        Descriptor::create(&self.ns, opts, index.as_slice(), *t);
+                                    desc.offset = framelist
+                                        .frames
+                                        .last()
+                                        .map(|f| f.offset + f.size)
+                                        .unwrap_or_default();
+                                    debug!("Evaluated tool `{t}`:\n`{desc:#?}`");
+                                    map.push(&desc.label_idx_str(), Blob(index.as_slice()));
+                                    framelist.frames.push(desc);
+                                }
+                                Err(err) => {
+                                    error!("Skipping tool `{t}`, error: {err}");
+                                }
+                            }
+                        }
+                        Setting(setting) => {
+                            settings.insert(_tool_name, setting);
+                        }
+                    }
+                }
+            }
+
+            match flexbuffers::to_vec(settings) {
+                Ok(settings) => {
+                    let opts = crate::Opts::from(Spec::Tool);
+                    let mut desc = Descriptor::create(&self.ns, opts, &settings, "setting");
+                    desc.offset = framelist
+                        .frames
+                        .last()
+                        .map(|f| f.offset + f.size)
+                        .unwrap_or_default();
+                    map.push(&desc.label_idx_str(), Blob(settings.as_ref()));
+                    framelist.frames.push(desc);
+                }
+                Err(err) => {
+                    error!("Could not encode settings: {err}");
+                },
+            }
         }
     }
 }

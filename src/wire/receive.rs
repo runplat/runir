@@ -1,14 +1,15 @@
 use crate::{
-    vol::{MemoryMappedTarget, VolumeTarget, new_mmap_anon_target}, wire::{Fetch, FrameList, cas::Descriptor}
+    Namespace, vol::{MemoryMappedTarget, VolumeTarget, new_mmap_anon_target}, wire::{Fetch, FrameList, cas::Descriptor}
 };
 use bytes::{BufMut, BytesMut};
 use tracing::error;
 
-pub struct Receive<'wire> {
+pub struct Receive {
+    ns: Namespace,
     /// Currently received data
     pub(crate) data: crate::Data,
     /// List of frames that must be received
-    pub(crate) list: FrameList<'wire>,
+    pub(crate) list: FrameList,
     /// Last frame from list received
     pub(crate) last: usize,
     /// Volume storing the received bytes
@@ -47,9 +48,10 @@ impl From<std::io::Error> for ReceiveError {
     }
 }
 
-impl<'wire> Clone for Receive<'wire> {
+impl<'wire> Clone for Receive {
     fn clone(&self) -> Self {
         Self {
+            ns: self.ns.clone(),
             data: self.data.clone(),
             list: self.list.clone(),
             writer: None,
@@ -58,12 +60,12 @@ impl<'wire> Clone for Receive<'wire> {
     }
 }
 
-impl<'wire> Receive<'wire> {
+impl Receive {
     /// Creates a new Receive for a manifest
     ///
     /// Returns an error if a volume to receive data could not be created
     #[inline]
-    pub fn new(manifest: FrameList<'wire>) -> crate::Result<Self> {
+    pub fn new(ns: &Namespace, manifest: FrameList) -> crate::Result<Self> {
         /*
            TODO:
            - Fallback to BytesMut
@@ -71,6 +73,7 @@ impl<'wire> Receive<'wire> {
         */
         let map = new_mmap_anon_target("", manifest.required_capacity() as usize)?;
         Ok(Self {
+            ns: ns.clone(),
             data: crate::Data::default(),
             list: manifest,
             writer: Some(map),
@@ -86,7 +89,7 @@ impl<'wire> Receive<'wire> {
 
     /// Commits the current snapshot into a target
     #[inline]
-    pub fn commit(&'wire self, target: &mut [u8]) -> crate::Result<()> {
+    pub fn commit(&self, target: &mut [u8]) -> crate::Result<()> {
         let required_capacity = self.list.required_capacity();
         if target.len() >= required_capacity as usize {
             // TODO: Return an error because the target was too short
@@ -119,7 +122,7 @@ impl<'wire> Receive<'wire> {
 
     /// Returns the next frame waiting to be received
     #[inline]
-    pub fn view_next_frame(&self) -> Option<(usize, Descriptor<'wire>)> {
+    pub fn view_next_frame(&self) -> Option<(usize, Descriptor)> {
         let next_frame = if self.data.is_empty() {
             self.last
         } else {
@@ -133,16 +136,17 @@ impl<'wire> Receive<'wire> {
     }
 
     /// Decodes the next frame from the buffer
-    pub fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Descriptor<'wire>>> {
+    pub fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Descriptor>> {
         match self.view_next_frame() {
             Some((next_frame, next)) => {
                 // 2) Check if buf has the next frame (Allow partial writes?)
                 if buf.len() >= next.size as usize {
                     let view = &buf[..next.size as usize];
-                    let mut desc = Descriptor::create(
+                    let mut desc = Descriptor::recover(
+                        &self.ns,
                         next.opts,
                         view,
-                        &next.label,
+                        next.label,
                     );
                     desc.offset = next.offset;
                     if desc == next {
@@ -181,13 +185,13 @@ impl<'wire> Receive<'wire> {
     }
 }
 
-impl<'wire> Fetch<'wire> for Receive<'wire> {
-    fn fetch(&'wire self, desc: &Descriptor<'_>) -> Option<&'wire [u8]> {
-        self.data.fetch(desc)
+impl<'wire> Fetch<'wire> for Receive {
+    fn fetch(&'wire self, ns: &Namespace, desc: &Descriptor) -> Option<&'wire [u8]> {
+        self.data.fetch(ns, desc)
     }
 }
 
-impl<'wire> std::fmt::Debug for Receive<'wire> {
+impl<'wire> std::fmt::Debug for Receive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Receive").field("data", &self.data).finish()
     }
@@ -210,7 +214,7 @@ mod tests {
     fn test_receive() {
         let ns = Namespace::new("test");
         let wire = Wire::new(ns.clone());
-        let target = wire.encode(test_cas_record()).unwrap();
+        let target = wire.encode(test_cas_record(), None).unwrap();
 
         let bytes = target.filled();
         assert_eq!(bytes.len(), NS_HEADER_INLINE_BLOCK_SIZE);
@@ -221,11 +225,11 @@ mod tests {
 
         // Note: Receive is typically only used when the boot is not inline
         // However, it MUST work with any valid list
-        let mut recv = Receive::new(list.clone()).unwrap();
+        let mut recv = Receive::new(&ns, list.clone()).unwrap();
 
         let mut buf = BytesMut::new();
         for f in list.frames.iter() {
-            let bytes = boot.fetch(f).unwrap();
+            let bytes = boot.fetch(&ns, f).unwrap();
             buf.put(bytes);
         }
 
@@ -239,13 +243,13 @@ mod tests {
 
         let data: Data = target.freeze().into();
         let val = data
-            .fetch(&recv.list.frames[0])
+            .fetch(&ns, &recv.list.frames[0])
             .unwrap()
             .val()
             .unwrap();
         eprintln!("{val}");
         let val = data
-            .fetch(&recv.list.frames[1])
+            .fetch(&ns, &recv.list.frames[1])
             .unwrap()
             .val()
             .unwrap();

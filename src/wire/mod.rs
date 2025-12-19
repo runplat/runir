@@ -73,12 +73,16 @@ use crate::Data;
 use crate::IRecord;
 use crate::Namespace;
 use crate::Record;
+use crate::util::Intern;
 use crate::vol::VolumeTarget;
 use crate::vol::new_mmap_anon_target;
 use crate::wire::boot::NS_HEADER_INLINE_BLOCK_SIZE;
 use crate::wire::receive::Receive;
+use crate::wire::tool::Tool;
 use anyhow::anyhow;
 use bytes::BufMut;
+use tracing::warn;
+use std::collections::BTreeMap;
 
 mod boot;
 mod cas;
@@ -86,6 +90,7 @@ mod ext;
 mod proto;
 mod receive;
 mod root;
+mod tool;
 mod transport;
 
 pub use boot::Boot;
@@ -103,11 +108,11 @@ use transport::TransportMut;
 ///
 /// `Boot` can decode into a record from binary
 #[derive(Debug)]
-pub struct Wire<'wire> {
-    proto: proto::Proto<'wire>,
+pub struct Wire {
+    proto: proto::Proto,
 }
 
-impl<'wire> Wire<'wire> {
+impl Wire {
     /// Creates a new wire protocol for a namespace
     #[inline]
     pub fn new(ns: Namespace) -> Self {
@@ -120,6 +125,20 @@ impl<'wire> Wire<'wire> {
     #[inline]
     pub fn with_root(&mut self, root: Root) {
         self.proto.use_root(root);
+    }
+
+    /// Installs all built in tools for the protocol
+    #[inline]
+    pub fn enable_builtin_tools(&mut self) {
+        self.install_tool("projection/from_json", tools::project::json());
+        self.install_tool("projection/from_toml", tools::project::toml());
+        self.install_tool("projection/from_yaml", tools::project::yaml());
+    }
+
+    /// Installs a tool for the protocol
+    #[inline]
+    pub fn install_tool(&mut self, name: &str, tool: impl Into<Tool>) {
+        self.proto.tool_index().add(name, tool);
     }
 
     /// Encodes a record into the wire protocol boot
@@ -136,7 +155,11 @@ impl<'wire> Wire<'wire> {
     ///
     /// Otherwise, .commit() will be a no-op
     #[inline]
-    pub fn encode(&self, rec: impl IRecord) -> crate::Result<impl VolumeTarget + BufMut> {
+    pub fn encode(
+        &self,
+        rec: impl IRecord,
+        tools: Option<Vec<&'static str>>,
+    ) -> crate::Result<impl VolumeTarget + BufMut> {
         // 1) Transfer into the wire namespce
         let rec: Record = self.proto.ns.transfer(rec)?;
         // 2) Get the intermediate target dest for the record
@@ -146,13 +169,15 @@ impl<'wire> Wire<'wire> {
         // 4) Set record state
         proto.use_record(rec.clone());
 
-        // TODO: Enable "indexer"
-        if let Some(index) = self.indexer(&rec) {
-            proto.use_index(index);
-        }
         // TODO: Enable "block list"
         if let Some(block_list) = self.block_list(&rec) {
             proto.use_frame_transport(block_list)?;
+        }
+
+        if let Some(tools) = tools {
+            for t in tools {
+                proto.use_tool(t);
+            }
         }
 
         // 5) Build the wire encoding and output to target
@@ -160,20 +185,21 @@ impl<'wire> Wire<'wire> {
     }
 
     /// Decodes the current protocol state into a record
-    /// 
+    ///
     /// Note: Should be used w/ `BootLoader::load()`
     #[inline]
     pub fn decode(&self) -> crate::Result<Record> {
         match &self.proto.transport {
-            transport::Transport::Inline(data) => self.decode_record(data),
-            transport::Transport::Frame((_, data)) => self.decode_record(data),
+            transport::Transport::Inline(data) => self.decode_record(&data),
+            transport::Transport::Frame((_, data)) => self.decode_record(&data),
             transport::Transport::Receive(receive) => {
                 // TODO: Handle non-block list case
-                self.decode_block_list(receive)
-            },
+                self.decode_block_list(&receive)
+            }
         }
     }
 
+    /// Decode data into a record
     #[inline]
     fn decode_record(&self, data: &Data) -> crate::Result<Record> {
         let rec = Record::from_parts((self.proto.info.clone(), data.clone()));
@@ -184,8 +210,9 @@ impl<'wire> Wire<'wire> {
         }
     }
 
+    /// Decode a block list into a record
     #[inline]
-    fn decode_block_list(&self, receive: &Receive<'_>) -> crate::Result<Record> {
+    fn decode_block_list(&self, receive: &Receive) -> crate::Result<Record> {
         // Receive has all the bytes
         let mut iter = receive
             .list
@@ -216,14 +243,15 @@ impl<'wire> Wire<'wire> {
     /// Returns the dest target for encoding records
     ///
     /// If a Root is set, then returned the target can commit to the file system.
-    /// Otherwise, commit is a no-op
+    ///
+    /// Otherwise, future `.commit()` calls on the target will be a no-op
     #[inline]
     fn target(&self, record: &Record) -> crate::Result<impl VolumeTarget + BufMut + use<'_>> {
         let target = self
             .proto
             .root
             .as_ref()
-            .map(|r| r.write_boot_target(&record.info, Some(self.proto.transport.describe())))
+            .map(|r| r.write_boot_target(&record.info, Some(self.proto.transport.describe(&self.proto.ns))))
             .unwrap_or_else(|| {
                 if self.proto.transport.is_inline() {
                     new_mmap_anon_target("", NS_HEADER_INLINE_BLOCK_SIZE)
@@ -231,7 +259,7 @@ impl<'wire> Wire<'wire> {
                     new_mmap_anon_target(
                         "",
                         NS_HEADER_INLINE_BLOCK_SIZE
-                            + self.proto.transport.describe().required_capacity() as usize,
+                            + self.proto.transport.describe(&self.proto.ns).required_capacity() as usize,
                     )
                 }
             });
@@ -244,21 +272,81 @@ impl<'wire> Wire<'wire> {
         self.proto.root.is_some()
     }
 
-    /// Runs the protocol
     #[inline]
-    fn indexer<'a: 'wire>(&self, _: &Record) -> Option<proto::Index<'a>> {
-        None
-    }
-
-    #[inline]
-    fn block_list(&'wire self, _: &Record) -> Option<FrameList<'wire>> {
+    fn block_list(&self, _: &Record) -> Option<FrameList> {
         None
     }
 }
 
-impl<'wire> From<proto::Proto<'wire>> for Wire<'wire> {
-    fn from(value: proto::Proto<'wire>) -> Self {
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ToolIndex {
+    map: BTreeMap<&'static str, Tool>,
+}
+
+impl ToolIndex {
+    fn add(&mut self, name: &str, tool: impl Into<Tool>) {
+        if self.map.contains_key(name) {
+            warn!("`{name}` is already registered");
+            return;
+        }
+        self.map.insert(name.intern(), tool.into());
+    }
+}
+
+impl From<proto::Proto> for Wire {
+    fn from(value: proto::Proto) -> Self {
         Self { proto: value }
+    }
+}
+
+mod tools {
+    use super::*;
+
+    pub mod project {
+        use super::Tool;
+
+        /// Returns a "projection/from_json" tool
+        #[inline]
+        pub const fn json() -> Tool {
+            Tool::Indexer(super::from_json)
+        }
+
+        /// Returns a "projection/from_toml" tool
+        #[inline]
+        pub const fn toml() -> Tool {
+            Tool::Indexer(super::from_toml)
+        }
+
+        /// Returns a "projection/from_yaml" tool
+        #[inline]
+        pub const fn yaml() -> Tool {
+            Tool::Indexer(super::from_yaml)
+        }
+    }
+
+    fn from_json(rec: &Record) -> std::io::Result<Vec<u8>> {
+        let value: serde_json::Value = serde_json::from_slice(&rec.data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let index = flexbuffers::to_vec(value)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        Ok(index)
+    }
+    fn from_toml(rec: &Record) -> std::io::Result<Vec<u8>> {
+        let toml = toml::from_str::<toml::Value>(
+            str::from_utf8(&rec.data)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let index = flexbuffers::to_vec(toml)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        Ok(index)
+    }
+    fn from_yaml(rec: &Record) -> std::io::Result<Vec<u8>> {
+        let yaml = serde_yaml::from_slice::<serde_yaml::Value>(&rec.data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let index = flexbuffers::to_vec(yaml)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        Ok(index)
     }
 }
 
@@ -276,7 +364,7 @@ mod tests {
         let mut wire = Wire::new(Namespace::new("test"));
         wire.with_root(Root::current_dir().unwrap());
 
-        let _target = wire.encode(test_cas_record()).unwrap();
+        let _target = wire.encode(test_cas_record(), None).unwrap();
         _target.commit().unwrap();
         /*
             1) Test booting from a (VolumeTarget + BufMut)

@@ -1,5 +1,6 @@
 use crate::util::{Graph, Node, TrimPadding, ser::BytesMap};
 use serde::Deserialize;
+use tracing::error;
 use std::{cell::RefCell, fmt::Display, ops::Deref};
 
 /// Wrapper over a flexbuffer reader, returned by IRecord::peek(..)
@@ -321,8 +322,17 @@ pub trait PeekExtensions<'peek>: Sized {
     {
         self.val().and_then(|p| {
             T::deserialize(p.clone())
+                .inspect_err(|e| {
+                    error!("{e}");
+                })
                 .ok()
-                .or_else(|| T::deserialize(p.0).ok())
+                .or_else(|| {
+                    T::deserialize(p.0)
+                        .inspect_err(|e| {
+                            error!("{e}");
+                        })
+                        .ok()
+                })
         })
     }
 
@@ -611,13 +621,15 @@ impl<'peek> PeekExtensions<'peek> for &'peek crate::Data {
 
 impl<'peek> PeekExtensions<'peek> for &'peek [u8] {
     fn val(self) -> Option<Peek<'peek>> {
-        flexbuffers::Reader::get_root(self.trim_padding()).ok().and_then(|r| {
-            if r.flexbuffer_type().is_blob() {
-                r.as_blob().0.val()
-            } else {
-                Some(Peek(r))
-            }
-        })
+        flexbuffers::Reader::get_root(self.trim_padding())
+            .ok()
+            .and_then(|r| {
+                if r.flexbuffer_type().is_blob() {
+                    r.as_blob().0.val()
+                } else {
+                    Some(Peek(r))
+                }
+            })
     }
 
     fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {

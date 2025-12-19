@@ -1,4 +1,6 @@
-use crate::{Data, RecordInfo, opts::Storage, util::PeekExtensions, wire::cas::Descriptor};
+use crate::{
+    Data, Namespace, RecordInfo, opts::Storage, util::PeekExtensions, wire::cas::Descriptor
+};
 use flexbuffers::Blob;
 
 /// Allows injecting extensions into the wire format
@@ -13,21 +15,21 @@ pub trait Ext {
     ///
     /// Returns a descriptor for the data that was written
     #[inline]
-    fn apply<'a>(&'a self, map: &mut flexbuffers::MapBuilder<'_>) -> Descriptor<'a>
+    fn apply(&self, ns: &Namespace, map: &mut flexbuffers::MapBuilder<'_>) -> Descriptor
     where
         Self: Sized,
     {
-        self.default_apply(map)
+        self.default_apply(ns, map)
     }
 
     #[inline]
-    fn default_apply<'a>(&'a self, map: &mut flexbuffers::MapBuilder<'_>) -> Descriptor<'a> {
+    fn default_apply(&self, ns: &Namespace, map: &mut flexbuffers::MapBuilder<'_>) -> Descriptor {
         let mut builder = flexbuffers::Builder::default();
         let mut ext = builder.start_map();
         self.author(&mut ext);
         ext.end_map();
-        let desc = Descriptor::create(Storage::Object.into(), builder.view(), self.name());
-        map.push(self.name(), Blob(builder.take_buffer().as_slice()));
+        let desc = Descriptor::create(ns, Storage::Object.into(), builder.view(), self.name());
+        map.push(&desc.label_idx_str(), Blob(builder.take_buffer().as_slice()));
         desc
     }
 }
@@ -49,11 +51,11 @@ impl Ext for RecordInfo {
         map.push("opts", opts.encode());
     }
 
-    fn apply<'a>(&'a self, map: &mut flexbuffers::MapBuilder<'_>) -> Descriptor<'a>
+    fn apply(&self, ns: &Namespace, map: &mut flexbuffers::MapBuilder<'_>) -> Descriptor
     where
         Self: Sized,
     {
-        let mut desc = self.default_apply(map);
+        let mut desc = self.default_apply(ns, map);
         desc.opts.set_info_spec(true);
         desc
     }
@@ -66,14 +68,18 @@ impl Ext for Data {
 
     fn author(&self, _: &mut flexbuffers::MapBuilder<'_>) {}
 
-    fn apply<'a>(&'a self, map: &mut flexbuffers::MapBuilder<'_>) -> Descriptor<'a> {
+    fn apply(&self, ns: &Namespace, map: &mut flexbuffers::MapBuilder<'_>) -> Descriptor {
         let storage = if self.val().is_some() {
             Storage::Object
         } else {
             Storage::Content
         };
-        let desc = Descriptor::create(storage.into(), self.as_ref(), ".data");
-        map.push(".data", Blob(self.as_ref()));
+        let desc = Descriptor::create(ns, storage.into(), self.as_ref(), ".data");
+        map.push(&desc.label_idx_str(), Blob(self.as_ref()));
         desc
     }
+}
+
+pub fn format_ns_key(key: u64) -> String {
+    format!("{:x}", key)
 }

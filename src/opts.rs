@@ -42,13 +42,13 @@ pub const EMPTY_OPTS: Opts = Opts::empty();
 #[derive(Hash, Debug, Default, PartialEq, PartialOrd, Eq, Ord, Clone, Copy)]
 pub struct Opts {
     /// Runtime options configure runtime decisions
-    runtime: Runtime,
+    pub runtime: Runtime,
     /// Storage options configure internal storage details of what the record is storing
-    storage: Storage,
+    pub storage: Storage,
     /// Spec options configure any system specifications required by record systems
-    spec: Spec,
+    pub spec: Spec,
     /// Branch options configure the mutation state of the data owned by the record
-    branch: Branch,
+    pub branch: Branch,
     /// Padding and reserved bytes for future use
     /// - These bytes are currently ignored by the runtime
     /// - May be repurposed for experimental flags, encoding versions, or special features
@@ -168,6 +168,12 @@ impl Opts {
         self.spec.is_empty()
     }
 
+    /// Returns true if the stored data is the result of a tool
+    #[inline]
+    pub const fn is_tool(&self) -> bool {
+        self.spec.contains(Spec::Tool)
+    }
+
     /// Returns true if the data stored by the record has been marked for deletion
     #[inline]
     pub fn is_deleted(&self) -> bool {
@@ -271,8 +277,8 @@ impl Opts {
 
     /// Sets the extension spec flag, to indicate that the stored data is an archive manifest
     #[inline]
-    pub fn set_ext_spec(&mut self, enabled: bool) -> &mut Self {
-        self.spec.set(Spec::Ext, enabled);
+    pub fn set_tool_spec(&mut self, enabled: bool) -> &mut Self {
+        self.spec.set(Spec::Tool, enabled);
         self
     }
 
@@ -388,9 +394,9 @@ bitflags::bitflags! {
         /// Indicates that stored data is an archive manifest
         const Manifest = 1;
         /// Indicates stored data is a record info
-        const Info = 2;
+        const Info = 1 << 1;
         /// Indicates stored data is extension data
-        const Ext = 3;
+        const Tool = 1 << 2;
     }
 }
 
@@ -465,6 +471,15 @@ impl From<Storage> for Opts {
     fn from(value: Storage) -> Self {
         let mut opts = Opts::empty();
         opts.storage = value;
+        opts
+    }
+}
+
+impl From<Spec> for Opts {
+    #[inline]
+    fn from(value: Spec) -> Self {
+        let mut opts = Opts::empty();
+        opts.spec = value;
         opts
     }
 }
