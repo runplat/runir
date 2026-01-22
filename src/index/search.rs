@@ -1,5 +1,6 @@
 pub mod iter {
     use ahash::{HashSet, HashSetExt};
+    use sha2::Sha256;
     use crate::{IRecord, Query, Storage};
 
     pub trait Search<S: Storage>: AsRef<S> {
@@ -17,7 +18,7 @@ pub mod iter {
             let query = query.into();
             self.as_ref().iter_records().filter(move |r| {
                 let matches = query.matches(r);
-                let dedupe = dedupe.insert(r.content());
+                let dedupe = dedupe.insert(r.content::<Sha256>());
                 dedupe && matches
             })
         }

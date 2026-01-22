@@ -5,10 +5,13 @@ use bytes::{BufMut, BytesMut};
 use sha2::Sha256;
 use tracing::error;
 
+/// State for receiving frames from an input source
 pub struct Receive {
     ns: Namespace,
-    /// Currently received data
-    pub(crate) data: crate::Data,
+    /// Snapshot of currently received data
+    /// 
+    /// Only updated when a valid frame has been decoded
+    pub(crate) snapshot: crate::Data,
     /// List of frames that must be received
     pub(crate) list: FrameList,
     /// Last frame from list received
@@ -53,7 +56,7 @@ impl<'wire> Clone for Receive {
     fn clone(&self) -> Self {
         Self {
             ns: self.ns.clone(),
-            data: self.data.clone(),
+            snapshot: self.snapshot.clone(),
             list: self.list.clone(),
             writer: None,
             last: self.last.clone(),
@@ -75,7 +78,7 @@ impl Receive {
         let map = new_mmap_anon_target("", manifest.required_capacity() as usize)?;
         Ok(Self {
             ns: ns.clone(),
-            data: crate::Data::default(),
+            snapshot: crate::Data::default(),
             list: manifest,
             writer: Some(map),
             last: 0,
@@ -96,14 +99,14 @@ impl Receive {
             // TODO: Return an error because the target was too short
         }
 
-        if self.data.len() <= target.len() {
-            if let Some(target) = target.get_mut(..self.data.len()) {
+        if self.snapshot.len() <= target.len() {
+            if let Some(target) = target.get_mut(..self.snapshot.len()) {
                 let slice: &[u8] = &target;
-                if slice == self.data.as_ref() {
+                if slice == self.snapshot.as_ref() {
                     // Skip, committing if the destination already matches the snapshot
                     return Ok(());
                 }
-                target.copy_from_slice(&self.data);
+                target.copy_from_slice(&self.snapshot);
             } else {
                 unreachable!(
                     "Must return a mutable slice because bounds were checked before get_mut was called"
@@ -118,13 +121,13 @@ impl Receive {
     /// Returns true if all bytes have been received
     #[inline]
     pub fn is_complete(&self) -> bool {
-        self.data.len() == self.list.required_capacity() as usize
+        self.snapshot.len() >= self.list.required_capacity() as usize
     }
 
     /// Returns the next frame waiting to be received
     #[inline]
     pub fn view_next_frame(&self) -> Option<(usize, Descriptor)> {
-        let next_frame = if self.data.is_empty() {
+        let next_frame = if self.snapshot.is_empty() {
             self.last
         } else {
             self.last + 1
@@ -140,6 +143,11 @@ impl Receive {
     pub fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Descriptor>> {
         match self.view_next_frame() {
             Some((next_frame, next)) => {
+                // if next.is_inline() {
+                //     self.last = next_frame;
+                //     return Ok(Some(next));
+                // }
+
                 // 2) Check if buf has the next frame (Allow partial writes?)
                 if buf.len() >= next.size as usize {
                     let view = &buf[..next.size as usize];
@@ -155,11 +163,11 @@ impl Receive {
                             .put(view.as_ref());
 
                         // 4) Update data pointer in Receive
-                        self.data = self
+                        self.snapshot = self
                             .writer
                             .as_mut()
                             .expect("MUST have write to decode a buffer")
-                            .snapshot()?;
+                            .snapshot()?.into();
 
                         // 5) Update last decoded frame
                         self.last = next_frame;
@@ -183,13 +191,13 @@ impl Receive {
 
 impl<'wire> Fetch<'wire> for Receive {
     fn fetch(&'wire self, ns: &Namespace, desc: &Descriptor) -> Option<&'wire [u8]> {
-        self.data.fetch(ns, desc)
+        self.snapshot.fetch(ns, desc)
     }
 }
 
 impl<'wire> std::fmt::Debug for Receive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Receive").field("data", &self.data).finish()
+        f.debug_struct("Receive").field("data", &self.snapshot).finish()
     }
 }
 
@@ -210,13 +218,13 @@ mod tests {
     fn test_receive() {
         let ns = Namespace::new("test");
         let wire = Wire::new(ns.clone());
-        let target = wire.encode(test_cas_record(), None).unwrap();
+        let target = wire.push(test_cas_record(), None).unwrap();
 
-        let bytes = target.filled();
+        let bytes = target.snapshot().unwrap();
         assert_eq!(bytes.len(), NS_HEADER_INLINE_BLOCK_SIZE);
 
         // Test decoding boot
-        let boot = Boot::decode(&bytes).unwrap();
+        let boot = Boot::decode(bytes.clone()).unwrap();
         let list = boot.layout();
 
         // Note: Receive is typically only used when the boot is not inline
@@ -229,12 +237,15 @@ mod tests {
             buf.put(bytes);
         }
 
+        eprintln!("{list:#?}");
+        eprintln!("{} {}", buf.len(), list.required_capacity());
+
         recv.decode(&mut buf).unwrap();
         recv.decode(&mut buf).unwrap();
         assert!(recv.is_complete());
 
-        let mut target = BytesMut::zeroed(recv.data.len());
-        recv.commit(&mut target.get_mut(..recv.data.len()).unwrap())
+        let mut target = BytesMut::zeroed(recv.snapshot.len());
+        recv.commit(&mut target.get_mut(..recv.snapshot.len()).unwrap())
             .unwrap();
 
         let data: Data = target.freeze().into();

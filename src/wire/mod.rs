@@ -76,13 +76,21 @@ use crate::Record;
 use crate::util::Intern;
 use crate::vol::VolumeTarget;
 use crate::vol::new_mmap_anon_target;
+use crate::vol::pool_bytes_mut;
+use crate::wire::boot::Container;
 use crate::wire::boot::NS_HEADER_INLINE_BLOCK_SIZE;
 use crate::wire::receive::Receive;
 use crate::wire::tool::Tool;
 use anyhow::anyhow;
 use bytes::BufMut;
-use tracing::warn;
+use bytes::Bytes;
+use futures::AsyncRead;
+use futures::AsyncReadExt;
 use std::collections::BTreeMap;
+use tracing::debug;
+use tracing::trace;
+use tracing::warn;
+use zstd::zstd_safe::WriteBuf;
 
 mod boot;
 mod cas;
@@ -115,10 +123,16 @@ pub struct Wire {
 impl Wire {
     /// Creates a new wire protocol for a namespace
     #[inline]
-    pub fn new(ns: Namespace) -> Self {
+    pub fn new(ns: impl Into<Namespace>) -> Self {
         Self {
-            proto: proto::Proto::new(ns),
+            proto: proto::Proto::new(ns.into()),
         }
+    }
+
+    /// Returns true if the root is enabled
+    #[inline]
+    pub fn is_root_enabled(&self) -> bool {
+        self.proto.root.is_some()
     }
 
     /// Sets the root on the underlying protocol
@@ -128,16 +142,22 @@ impl Wire {
     }
 
     /// Installs all built in tools for the protocol
+    ///
+    /// - `.from_*`: Deserializes data from a base serialization format and creates a projection as a flexbuffer root
+    ///     - Supports `json`, `toml`, and `yaml`
     #[inline]
     pub fn enable_builtin_tools(&mut self) {
-        self.install_tool("projection/from_json", tools::project::json());
-        self.install_tool("projection/from_toml", tools::project::toml());
-        self.install_tool("projection/from_yaml", tools::project::yaml());
+        self.install_tool(".from_json", tools::project::json());
+        self.install_tool(".from_toml", tools::project::toml());
+        self.install_tool(".from_yaml", tools::project::yaml());
     }
 
     /// Installs a tool for the protocol
+    ///
+    /// This makes the tool available to use from `Wire::send(..)`
     #[inline]
     pub fn install_tool(&mut self, name: &str, tool: impl Into<Tool>) {
+        debug!("Installing tool `{name}`");
         self.proto.tool_index().add(name, tool);
     }
 
@@ -155,11 +175,11 @@ impl Wire {
     ///
     /// Otherwise, .commit() will be a no-op
     #[inline]
-    pub fn encode(
+    pub fn push(
         &self,
         rec: impl IRecord,
         tools: Option<Vec<&'static str>>,
-    ) -> crate::Result<impl VolumeTarget + BufMut> {
+    ) -> crate::Result<impl VolumeTarget + AsyncRead + Send + BufMut> {
         // 1) Transfer into the wire namespce
         let rec: Record = self.proto.ns.transfer(rec)?;
         // 2) Get the intermediate target dest for the record
@@ -169,11 +189,7 @@ impl Wire {
         // 4) Set record state
         proto.use_record(rec.clone());
 
-        // TODO: Enable "block list"
-        if let Some(block_list) = self.block_list(&rec) {
-            proto.use_frame_transport(block_list)?;
-        }
-
+        // Optional) Use tools
         if let Some(tools) = tools {
             for t in tools {
                 proto.use_tool(t);
@@ -184,18 +200,110 @@ impl Wire {
         proto.send(target)
     }
 
-    /// Decodes the current protocol state into a record
+    /// Fetches a record
     ///
-    /// Note: Should be used w/ `BootLoader::load()`
+    /// If `pull` returns true, than the container will be pulled and this
+    /// function will return a `Record`
+    ///
+    /// Otherwise, this function will return None
+    ///
+    /// Returns an error if a boot could not be
     #[inline]
-    pub fn decode(&self) -> crate::Result<Record> {
-        match &self.proto.transport {
-            transport::Transport::Inline(data) => self.decode_record(&data),
-            transport::Transport::Frame((_, data)) => self.decode_record(&data),
-            transport::Transport::Receive(receive) => {
-                // TODO: Handle non-block list case
-                self.decode_block_list(&receive)
+    pub async fn fetch(&self, header: Bytes) -> crate::Result<Container> {
+        match Boot::decode(header) {
+            Ok(boot) => {
+                if *boot.ns() != self.proto.ns {
+                    return Err(anyhow!("Target `Boot` is from a different namespace").into());
+                }
+                boot.start()
             }
+            Err(err) => match err {
+                boot::BootError::Fault(error) => Err(error),
+                boot_err => Err(anyhow!("Fetch could not boot: {boot_err:?}").into()),
+            },
+        }
+    }
+
+    /// Pulls wire protcol state from a src
+    ///
+    /// Returns a newly configured Wire if successful
+    #[inline]
+    pub async fn pull<'wire>(
+        &self,
+        mut src: impl AsyncRead + Send + Unpin,
+    ) -> crate::Result<Self> {
+        let mut header = pool_bytes_mut(1024);
+        src.read_exact(&mut header).await?;
+
+        let mut container = self.fetch(header.freeze()).await?;
+        trace!(
+            frames = container.boot.layout().frames.len(),
+            inline = container
+                .boot
+                .layout()
+                .frames
+                .iter()
+                .filter(|f| f.is_inline())
+                .count(),
+            "pull"
+        );
+        container.pull(src).await?;
+
+        let proto = self.proto.receive(&container)?;
+        Ok(Wire::from(proto))
+    }
+
+    /// Tries to read a record off the wire
+    /// 
+    /// Returns an error if the protocol has not received enough
+    /// frames to read into a Record, or if `Record::is_valid()`
+    /// returned `false`
+    #[inline]
+    pub fn read_record_checked(&self) -> crate::Result<Record> {
+        use transport::Transport::*;
+        match &self.proto.transport {
+            Inline(data) => self.decode_record(&data),
+            Frames { data, .. } => self.decode_record(&data),
+            Receive(receive) => self.decode_from_receive(&receive),
+        }
+    }
+
+    /// Returns a Record from the current protocol state
+    /// 
+    /// Note: Does not check is_valid
+    #[inline]
+    pub fn read_record_unchecked(&self) -> Record {
+        use transport::Transport::*;
+        match &self.proto.transport {
+            Inline(data) | Frames { data, .. } => {
+                Record::from_parts((self.proto.info, data.clone()))
+            }
+            Receive(receive) => {
+                Record::from_parts((self.proto.info, receive.snapshot.clone()))
+            },
+        }
+    }
+
+    /// Returns the record received by the current protocol state
+    #[inline]
+    pub fn commit(&self) -> crate::Result<()> {
+        match &self.proto.root {
+            Some(root) => match &self.proto.transport {
+                transport::Transport::Receive(receive) => {
+                    let mut target =
+                        root.write_boot_target(&self.proto.info, Some(receive.list.clone()))?;
+                    receive.commit(&mut target)?;
+                    target.commit()?;
+                    Ok(())
+                }
+                _ => {
+                    let mut target = root.write_boot_target(&self.proto.info, None)?;
+                    target.put(self.proto.transport.data().as_slice());
+                    target.commit()?;
+                    Ok(())
+                }
+            },
+            None => Err(anyhow!("Protocol does not have a root set").into()),
         }
     }
 
@@ -204,40 +312,26 @@ impl Wire {
     fn decode_record(&self, data: &Data) -> crate::Result<Record> {
         let rec = Record::from_parts((self.proto.info.clone(), data.clone()));
         if rec.is_valid() {
+            /*
+                TODO: Can apply tools here
+            */
             Ok(rec)
         } else {
             Err(anyhow!("Decoded record is invalid").into())
         }
     }
 
-    /// Decode a block list into a record
+    /// Decode a `receive` transport into a record
+    /// 
+    /// Returns an error if the `receive` transport state is incomplete
     #[inline]
-    fn decode_block_list(&self, receive: &Receive) -> crate::Result<Record> {
-        // Receive has all the bytes
-        let mut iter = receive
-            .list
-            .frames
-            .iter()
-            .filter(|f| f.opts.is_canonical_data());
+    fn decode_from_receive(&self, receive: &Receive) -> crate::Result<Record> {
+        /*
+            TODO: Check if the receive snapshot contains the .data framelist
 
-        let first = iter.next();
-        let last = iter.last();
-
-        match (first, last) {
-            (Some(first), None) => self.decode_record(
-                &receive
-                    .data
-                    .view(first.offset as usize, first.size as usize),
-            ),
-            (Some(first), Some(last)) => self.decode_record(&receive.data.view(
-                first.offset as usize,
-                // TODO: Check math
-                (last.offset + last.size) as usize,
-            )),
-            _ => {
-                todo!()
-            }
-        }
+            - 
+        */
+        self.decode_record(&receive.snapshot)
     }
 
     /// Returns the dest target for encoding records
@@ -246,12 +340,20 @@ impl Wire {
     ///
     /// Otherwise, future `.commit()` calls on the target will be a no-op
     #[inline]
-    fn target(&self, record: &Record) -> crate::Result<impl VolumeTarget + BufMut + use<'_>> {
+    fn target(
+        &self,
+        record: &Record,
+    ) -> crate::Result<impl VolumeTarget + AsyncRead + Send + BufMut + use<'_>> {
         let target = self
             .proto
             .root
             .as_ref()
-            .map(|r| r.write_boot_target(&record.info, Some(self.proto.transport.describe(&self.proto.ns))))
+            .map(|r| {
+                r.write_boot_target(
+                    &record.info,
+                    Some(self.proto.transport.describe(&self.proto.ns)),
+                )
+            })
             .unwrap_or_else(|| {
                 if self.proto.transport.is_inline() {
                     new_mmap_anon_target("", NS_HEADER_INLINE_BLOCK_SIZE)
@@ -259,22 +361,15 @@ impl Wire {
                     new_mmap_anon_target(
                         "",
                         NS_HEADER_INLINE_BLOCK_SIZE
-                            + self.proto.transport.describe(&self.proto.ns).required_capacity() as usize,
+                            + self
+                                .proto
+                                .transport
+                                .describe(&self.proto.ns)
+                                .required_capacity() as usize,
                     )
                 }
             });
         Ok(target?)
-    }
-
-    /// Returns true if the root is enabled
-    #[inline]
-    pub fn is_root_enabled(&self) -> bool {
-        self.proto.root.is_some()
-    }
-
-    #[inline]
-    fn block_list(&self, _: &Record) -> Option<FrameList> {
-        None
     }
 }
 
@@ -364,8 +459,9 @@ mod tests {
         let mut wire = Wire::new(Namespace::new("test"));
         wire.with_root(Root::current_dir().unwrap());
 
-        let _target = wire.encode(test_cas_record(), None).unwrap();
+        let _target = wire.push(test_cas_record(), None).unwrap();
         _target.commit().unwrap();
+
         /*
             1) Test booting from a (VolumeTarget + BufMut)
             2) Test restoring the record from a Boot::decode(..)

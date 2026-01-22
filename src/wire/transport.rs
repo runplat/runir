@@ -1,7 +1,10 @@
 use tracing::debug;
 
 use crate::{
-    Namespace, opts::Storage, util::PeekExtensions, wire::{Describe, Fetch, FrameList, cas::Descriptor, receive::Receive}
+    Namespace,
+    opts::Storage,
+    util::PeekExtensions,
+    wire::{Describe, Fetch, FrameList, cas::Descriptor, receive::Receive},
 };
 
 /// Variants of record data state
@@ -9,13 +12,15 @@ use crate::{
 pub enum Transport {
     /// Data is stored and received inline
     Inline(crate::Data),
-    /// Data is stored and received as a list of frames
-    Frame(Frame),
+    Frames {
+        list: FrameList,
+        data: crate::Data,
+    },
     /// Data is being received
     Receive(Receive),
 }
 
-pub type Frame = (FrameList, crate::Data);
+// pub type Frame = (FrameList, crate::Data);
 
 impl Transport {
     /// Returns a reference to the underlying data in the transport
@@ -23,8 +28,8 @@ impl Transport {
     pub fn data(&self) -> &crate::Data {
         match self {
             Transport::Inline(data) => data,
-            Transport::Frame((_, data)) => data,
-            Transport::Receive(receive) => &receive.data,
+            Transport::Receive(receive) => &receive.snapshot,
+            Transport::Frames { data, .. } => data,
         }
     }
 
@@ -81,11 +86,16 @@ impl<'wire> Describe for Transport {
                     Storage::Content
                 };
                 FrameList {
-                    frames: vec![Descriptor::create::<sha2::Sha256>(ns, storage.into(), data, "inline")],
+                    frames: vec![Descriptor::create::<sha2::Sha256>(
+                        ns,
+                        storage.into(),
+                        data,
+                        "inline",
+                    )],
                 }
             }
-            Transport::Frame((frames, _)) => frames.clone(),
             Transport::Receive(receive) => receive.list.clone(),
+            Transport::Frames { list, .. } => list.clone(),
         }
     }
 }
@@ -93,19 +103,18 @@ impl<'wire> Describe for Transport {
 impl<'wire> Fetch<'wire> for Transport {
     fn fetch(&'wire self, ns: &Namespace, desc: &Descriptor) -> Option<&'wire [u8]> {
         match self {
-            Transport::Inline(data) => Some(&data),
-            Transport::Frame((frames, data)) => {
-                // if let Some(frame) = frames.frames.par_iter().find_any(|f| *f == desc) { // TODO: With Rayon
-                if let Some(frame) = frames.frames.iter().find(|f| *f == desc) {
-                    data.fetch(ns, frame)
+            Transport::Inline(data) => data.fetch(ns, desc),
+            Transport::Receive(receive) => {
+                if let Some(frame) = receive.list.frames.iter().find(|f| *f == desc) {
+                    receive.snapshot.fetch(ns, frame)
                 } else {
                     debug!("Unknown descriptor {desc:?}");
                     None
                 }
             }
-            Transport::Receive(receive) => {
-                if let Some(frame) = receive.list.frames.iter().find(|f| *f == desc) {
-                    receive.data.fetch(ns, frame)
+            Transport::Frames { list, data } => {
+                if let Some(frame) = list.frames.iter().find(|f| *f == desc) {
+                    data.fetch(ns, frame)
                 } else {
                     debug!("Unknown descriptor {desc:?}");
                     None

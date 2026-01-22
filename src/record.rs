@@ -1,13 +1,9 @@
 use crate::{
-    Data, Namespace, Opts, Symbol,
-    archive::{self, Entry, HeaderBuilder, Sha256Digest},
-    opts::Branch,
-    util::{Peek, PeekExtensions},
+    Data, Namespace, Opts, Symbol, archive::{self, Entry, HeaderBuilder}, data::ShaDigest, opts::Branch, util::{Peek, PeekExtensions}
 };
 use ascii::AsAsciiStr;
 use crc::{CRC_64_MS, Crc, Digest};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use std::{
     fmt::Debug,
     io::Error,
@@ -103,8 +99,8 @@ pub trait IRecord {
 
     /// Returns the content digest buffer for the data stored
     #[inline]
-    fn content(&self) -> Sha256Digest {
-        <Sha256 as sha2::Digest>::digest(self.bytes()).into()
+    fn content<D: sha2::Digest>(&self) -> ShaDigest<D> {
+        D::digest(self.bytes())
     }
 
     // /// Returns true if the record has enabled wire unit format, and is in transport mode
@@ -216,7 +212,7 @@ impl<'b> IRecord for Option<&'b Record> {
 }
 
 /// Record system data
-#[derive(Default, PartialEq, Copy, Clone, Debug, Deserialize, Serialize)]
+#[derive(Default, PartialEq, Copy, Clone, Debug, Hash, Deserialize, Serialize)]
 pub struct Info {
     /// Record key
     ///
@@ -230,7 +226,7 @@ pub struct Info {
     /// Bitflag options
     #[serde(with = "crate::opts::ser")]
     pub(crate) opts: crate::Opts,
-    /// Timestamp of when the record was created
+    /// UNIX Timestamp of when the record was created
     pub(crate) ts: u64,
 }
 
@@ -371,12 +367,24 @@ impl Record {
 
     /// Returns true if this record matches the provided label
     #[inline]
-    pub fn matches_label(&self, label: &str, namespace: impl Into<Namespace>) -> bool {
+    pub fn matches_label(&self, label: impl Symbol, namespace: impl Into<Namespace>) -> bool {
         let ns: Namespace = namespace.into();
         let label_key = ns.key(label);
 
         let (hi, _) = self.info.key.as_u64_pair();
         hi == label_key
+    }
+
+    /// Returns true if the current record data matches the contant address based
+    /// key as the current record
+    #[inline]
+    pub fn matches_content<D: sha2::Digest>(&self, namespace: impl Into<Namespace>) -> bool {
+        let ns = namespace.into();
+        if self.ns_chk() != ns.chk() {
+            return false;
+        }
+
+        self.matches_label(self.content::<D>().as_slice(), ns)
     }
 
     /// Attempts to deserialize data to some type

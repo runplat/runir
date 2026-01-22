@@ -1,21 +1,19 @@
-use std::ops::{Deref, DerefMut};
-
 use crate::{
-    Namespace, Opts, RecordInfo,
+    Data, Namespace, Opts, RecordInfo,
     record::crc_digest,
     util::PeekExtensions,
     vol::{Volume, VolumeTarget},
     wire::{
-        Fetch, TransportMut, Wire,
+        Fetch, TransportMut,
         cas::{Descriptor, FrameList},
         receive::Receive,
     },
 };
 use anyhow::anyhow;
 use asynchronous_codec::{Decoder, FramedRead};
-use bytes::{Buf, BufMut, BytesMut};
-use serde::Deserialize;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use sha2::Digest;
+use std::ops::{Deref, DerefMut};
 use tracing::{debug, trace};
 use uuid::Uuid;
 
@@ -24,13 +22,75 @@ pub const NS_HEADER_BLOCK_SIZE: usize = 512;
 pub const INLINE_BLOCK_SIZE: usize = 512;
 pub const NS_HEADER_INLINE_BLOCK_SIZE: usize = 1024;
 
+/// `Wire` protocol communication centers around a single component called a `Boot`
+///
+/// A `Boot` is an immutable fixed-size blob of data that contains all information
+/// required to start a `Container`
+///
+/// A `Container` pulls frames to rebuild the original `Protocol` state. When all
+/// frames have been pulled, the container can return a `Wire` to `receive` the
+/// `Record` that was originally sent by the `Protocol`
+///
+/// This trait contains the key settings of the binary format of a `Boot`.
+/// --
+///
+///
+/// --
+/// ## Glossary
+/// - `block`: A fixed byte-length slice that represents a single unit of a logical component
+/// - `prelude`: A `block` that identifies the protocol, encodes the namespace, and identifies the associated frame-list
+/// - `framelist`: Contains a list of descriptors that identify each `Frame` that was encoded by the `Protocol`
+/// - `inline`: A `block` that will always be accompanied by the `header` block
+trait _Format {
+    /// Size of the `prelude` block
+    const PRELUDE_BLOCK_SIZE: usize;
+
+    /// Size of the `header` block, which contains the `prelude` block and `framelist`
+    ///
+    /// Notes:
+    /// - Since the framelist is included in the header, this size limits the frame capacity
+    /// - Can fit about 10 frame descriptors total in a 512 block, which is more than enough at the moment
+    const HEADER_BLOCK_SIZE: usize;
+
+    /// Size of the `inline` block
+    ///
+    /// Notes:
+    /// - This determines how "enriched" a single `Boot` can be
+    ///     - In theory could mean different size `Boot`'s for different purposes
+    const INLINE_BLOCK_SIZE: usize;
+
+    /// Maximum size of an encoded `Framelist` per `Boot`
+    const MAX_FRAMELIST_SIZE: usize = Self::HEADER_BLOCK_SIZE - Self::PRELUDE_BLOCK_SIZE;
+
+    /// Total size of a single encoded `Boot`
+    const BOOT_SIZE: usize = Self::HEADER_BLOCK_SIZE + Self::INLINE_BLOCK_SIZE;
+
+    /// Size of a single `Container` `Unit`
+    ///
+    /// Notes:
+    /// - 8 MiB can fit about 8000 `Boot` blobs
+    const CONTAINER_UNIT_SIZE: usize = 1024 * 1024 * 8; // 8 MiB
+
+    fn format_block() {}
+}
+
+struct _V1;
+
+impl _Format for _V1 {
+    const PRELUDE_BLOCK_SIZE: usize = 128;
+
+    const HEADER_BLOCK_SIZE: usize = 512;
+
+    const INLINE_BLOCK_SIZE: usize = 512;
+}
+
 /// Wrapper struct for encoding boot properties
-pub(crate) struct Codec<T> {
-    pub volume: Volume<T, ()>,
+pub(crate) struct Codec<T, S> {
+    pub volume: Volume<T, S>,
     ns: Namespace,
 }
 
-impl<T: VolumeTarget + BufMut> Codec<T> {
+impl<T: VolumeTarget + BufMut> Codec<T, ()> {
     #[inline]
     pub fn encode_boot_start(&mut self, ns: &Namespace) {
         let [ab, cd, optschk] = ns.encode();
@@ -56,9 +116,8 @@ impl<T: VolumeTarget + BufMut> Codec<T> {
         let digest = sha2::Sha256::digest(bytes);
         let mut crc = crate::record::crc_digest();
         crc.update(&(bytes.len() as u64).to_be_bytes());
-        self.encode_u64(bytes.len() as u64); // len + delim
-        self.volume.target_mut().put(digest.as_slice()); // digest
-        self.volume.target_mut().put_u8(b'\0'); //delim
+        self.encode_u64(bytes.len() as u64); // len
+        self.volume.target_mut().put(digest.as_slice()); // digest (4 * u64)
         crc.update(digest.as_slice());
         self.encode_u64(crc.finalize());
     }
@@ -83,7 +142,7 @@ impl<T: VolumeTarget + BufMut> Codec<T> {
             );
         }
 
-        let framelist = FrameList::deserialize(fl_bin.val().unwrap()).unwrap(); // Zero-copy deserialize
+        let framelist: FrameList = fl_bin.to_obj().unwrap(); // Zero-copy deserialize
         for f in framelist.frames.iter() {
             // TODO: Validate this frame
             if f.is_inline() {
@@ -103,7 +162,7 @@ impl<T: VolumeTarget + BufMut> Codec<T> {
     #[inline]
     fn encode_u64(&mut self, v: u64) {
         self.volume.target_mut().put_u64(v);
-        self.volume.target_mut().put_u8(b'\0');
+        // self.volume.target_mut().put_u8(b'\0');
     }
 
     /// Aligns the current encoded buffer to a block size
@@ -123,7 +182,7 @@ impl<T: VolumeTarget + BufMut> Codec<T> {
     }
 }
 
-impl<T> From<T> for Codec<T> {
+impl<T> From<T> for Codec<T, ()> {
     fn from(value: T) -> Self {
         Self {
             volume: Volume::from_parts((value, ())),
@@ -132,7 +191,7 @@ impl<T> From<T> for Codec<T> {
     }
 }
 
-impl<T: VolumeTarget + BufMut> Deref for Codec<T> {
+impl<T: VolumeTarget + BufMut> Deref for Codec<T, ()> {
     type Target = T;
 
     #[inline]
@@ -141,7 +200,7 @@ impl<T: VolumeTarget + BufMut> Deref for Codec<T> {
     }
 }
 
-impl<T: VolumeTarget + BufMut> DerefMut for Codec<T> {
+impl<T: VolumeTarget + BufMut> DerefMut for Codec<T, ()> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.volume.target_mut()
@@ -150,13 +209,13 @@ impl<T: VolumeTarget + BufMut> DerefMut for Codec<T> {
 
 /// Contains boot information for subsequent framed reads
 #[derive(Clone, Debug)]
-pub struct Boot<'peek> {
+pub struct Boot {
     /// Namespace
     ns: Namespace,
-    /// Header bytes
-    header: &'peek [u8],
     /// Frame layout
     layout: FrameList,
+    /// Header bytes
+    header: Bytes,
 }
 
 #[derive(Debug)]
@@ -172,7 +231,13 @@ pub enum BootError {
     Fault(crate::Error),
 }
 
-impl<'peek> Boot<'peek> {
+impl From<crate::Error> for BootError {
+    fn from(value: crate::Error) -> Self {
+        Self::Fault(value)
+    }
+}
+
+impl Boot {
     /// Returns the namespace of the boot
     #[inline]
     pub fn ns(&self) -> &Namespace {
@@ -245,7 +310,7 @@ impl<'peek> Boot<'peek> {
 
     /// Returns a new Boot configured from a new header slice
     #[inline]
-    pub fn decode(header: &'peek [u8]) -> std::result::Result<Boot<'peek>, BootError> {
+    pub fn decode(header: Bytes) -> std::result::Result<Boot, BootError> {
         use super::boot::BootError::*;
 
         if header.len() < NS_HEADER_INLINE_BLOCK_SIZE {
@@ -254,11 +319,12 @@ impl<'peek> Boot<'peek> {
 
         fn decode_u64(settings: &mut impl Buf) -> std::result::Result<u64, BootError> {
             let next = settings.get_u64();
-            if settings.get_u8() != b'\0' {
-                return Err(MissingDelim); // MUST be delimited by a null-terminator
-            } else {
-                Ok(next)
-            }
+            // if settings.get_u8() != b'\0' {
+            //     return Err(MissingDelim); // MUST be delimited by a null-terminator
+            // } else {
+            //     Ok(next)
+            // }
+            Ok(next)
         }
 
         let ns_header = &header[..NS_BLOCK_SIZE];
@@ -285,11 +351,35 @@ impl<'peek> Boot<'peek> {
         let manifest_size = decode_u64(&mut settings)?;
         crc.update(manifest_size.to_be_bytes().as_slice());
 
+        // let a = settings.get_u64();
+        // let b = settings.get_u64();
+        // let c = settings.get_u64();
+        // let d = settings.get_u64();
+
+        /*
+            (.runir/ns)
+            |-----> (info)
+                    |------> (label)    // Can be a name, content digest, etc
+                    |------> (crc)      // crc of (data/ts)
+                    |------> (ts)
+                    |------> (ns_chk)   // ns.chk() that created the record
+                    |------> (opts)
+            (.data/ns)
+            |------> (len)
+            |------> (digest)
+                     |---------> (data_ns) // Could generate a namespace from the digest
+                                 - But then what would be the purpose?
+                                 - What question is the data_ns answering?
+                                 - What blocks do I have?
+            .runir
+            .settings
+            {ext}/{ns}/:frames/
+            - When record has been committed...
+            
+        */
+
         let manifest_digest = &settings.chunk()[..32].to_vec();
         settings.advance(32);
-        if settings.get_u8() != b'\0' {
-            return Err(MissingDelim); // MUST be delimited by a null-terminator
-        }
         crc.update(manifest_digest);
 
         let mchk = settings.get_u64();
@@ -335,10 +425,10 @@ impl<'peek> Boot<'peek> {
         self.required_size() < INLINE_BLOCK_SIZE as u64
     }
 
-    /// Returns a new loader that will write to dest after decoding all boot frames
+    /// Returns a new container to complete the boot process
     #[inline]
-    pub fn loader(&self) -> crate::Result<BootLoader<'peek>> {
-        Ok(BootLoader {
+    pub fn start(&self) -> crate::Result<Container> {
+        Ok(Container {
             boot: self.clone(),
             transport: if self.is_boot_inline() {
                 TransportMut::Inline
@@ -365,6 +455,17 @@ impl<'peek> Boot<'peek> {
         &self.header[NS_HEADER_BLOCK_SIZE..]
     }
 
+    /// Returns the inline record `.data`
+    #[inline]
+    pub fn inline_data(&self) -> Option<Data> {
+        self.layout
+            .frames
+            .iter()
+            .find(|f| f.label == self.ns.key(".data"))
+            .and_then(|f| self.fetch(&self.ns, f))
+            .map(Data::from)
+    }
+
     /// Returns the header bytes
     #[inline]
     pub fn header(&self) -> &[u8] {
@@ -372,42 +473,15 @@ impl<'peek> Boot<'peek> {
     }
 }
 
-impl<'peek> Fetch<'peek> for Boot<'peek> {
-    #[inline]
-    fn fetch(&'peek self, _: &Namespace, desc: &Descriptor) -> Option<&'peek [u8]> {
-        let header_data = self.inline();
-
-        if (desc.offset + desc.size) <= header_data.len() as u64 {
-            let offset = desc.offset as usize;
-            Some(&header_data[offset..offset + desc.size as usize])
-        } else {
-            None
-        }
-    }
-}
-
-impl<'wire> Fetch<'wire> for BootLoader<'wire> {
-    #[inline]
-    fn fetch(&'wire self, ns: &Namespace, desc: &Descriptor) -> Option<&'wire [u8]> {
-        if desc.is_inline() {
-            self.boot.fetch(ns, desc)
-        } else if let Some(recv) = self.transport.as_receive() {
-            recv.fetch(ns, desc)
-        } else {
-            None
-        }
-    }
-}
-
-/// Boot loader state for booting a record from an input stream
+/// Container that reassembles a protocol from a byte stream
 #[derive(Debug)]
-pub struct BootLoader<'wire> {
-    boot: Boot<'wire>,
-    transport: TransportMut,
+pub struct Container {
+    pub(super) boot: Boot,
+    pub(super) transport: TransportMut,
     frames: Vec<Descriptor>,
 }
 
-impl<'wire> BootLoader<'wire> {
+impl Container {
     /// Returns true if the boot is complete
     #[inline]
     pub fn is_completed(&self) -> bool {
@@ -419,7 +493,13 @@ impl<'wire> BootLoader<'wire> {
                 .unwrap_or_default()
     }
 
-    /// Begins boot process from an input byte stream
+    /// Returns a reference to the inner `Boot`
+    #[inline]
+    pub fn boot(&self) -> &Boot {
+        &self.boot
+    }
+
+    /// Pulls frames to complete the boot process
     ///
     /// Returns an error if an invalid digest is encountered while reading frames
     /// or if reading from the input i/o failed
@@ -427,7 +507,7 @@ impl<'wire> BootLoader<'wire> {
     /// If all no error occurs, future will complete when all frames have been
     /// received
     #[inline]
-    pub async fn boot<R>(&mut self, input: R) -> crate::Result<()>
+    pub async fn pull<R>(&mut self, input: R) -> crate::Result<()>
     where
         R: futures::AsyncRead + Send + Unpin,
     {
@@ -461,18 +541,11 @@ impl<'wire> BootLoader<'wire> {
         Ok(())
     }
 
-    /// Loads the current state into a new Wire
-    /// 
-    /// Note: This is used with `Wire::decode()` to return a `Record`
-    #[inline]
-    pub fn load(&self) -> BootLoadResult<Wire> {
-        let wire = Wire::from(super::proto::Proto::receive(&self.boot, &self.transport)?);
-        Ok(wire)
-    }
-
-    /// Returns data for a tool
+    /// Returns a tool `Frame`
     ///
-    /// Searches inline first, and then checks transport
+    /// Searches inline first, and then checks Transport
+    ///
+    /// Returns None if the frame could not be found
     #[inline]
     pub fn tool(&self, name: &str) -> Option<&[u8]> {
         self.boot.tool(name).or_else(|| {
@@ -481,19 +554,6 @@ impl<'wire> BootLoader<'wire> {
                 .find(|f| f.opts.is_tool() && f.label == self.boot.ns().key(name))
                 .and_then(|f| self.fetch(self.boot.ns(), f))
         })
-    }
-}
-
-type BootLoadResult<T> = std::result::Result<T, BootLoadErrors>;
-
-#[derive(Debug)]
-pub enum BootLoadErrors {
-    Fault(crate::Error),
-}
-
-impl From<crate::Error> for BootLoadErrors {
-    fn from(value: crate::Error) -> Self {
-        Self::Fault(value)
     }
 }
 
@@ -529,6 +589,11 @@ impl<'peek> Decoder for TransportMut {
 
 #[cfg(test)]
 mod tests {
+    use ascii::AsAsciiStr;
+    use bytes::{BufMut, BytesMut};
+    use uuid::Uuid;
+    use zstd::zstd_safe::WriteBuf;
+
     use crate::{
         Namespace,
         test::test_cas_record,
@@ -545,13 +610,13 @@ mod tests {
     async fn test_encode_decode_cas_record_boot() {
         let ns = Namespace::new("test");
         let wire = Wire::new(ns.clone());
-        let target = wire.encode(test_cas_record(), None).unwrap();
+        let target = wire.push(test_cas_record(), None).unwrap();
 
-        let bytes = target.filled();
+        let bytes = target.snapshot().unwrap();
         assert_eq!(bytes.len(), NS_HEADER_INLINE_BLOCK_SIZE);
 
         // Test decoding boot
-        let boot = Boot::decode(&bytes).unwrap();
+        let boot = Boot::decode(bytes.clone()).unwrap();
         let (prelude, manifest, inline) = boot.split_header();
         fn test_boot(ns: Namespace, boot: Boot) {
             let (_, manifest, _) = boot.split_header();
@@ -587,14 +652,11 @@ mod tests {
         test_boot(ns.clone(), boot.clone());
 
         // Test creating a loader and doing a boot->load
-        let mut loader = boot.loader().unwrap();
+        let mut loader = boot.start().unwrap();
 
         // MOCK: This would be an i/o stream to the frame bytes
         //       If inline, this is a No-op
-        loader.boot(bytes).await.unwrap();
-
-        // Test loading the record
-        let _wire = loader.load().unwrap();
+        loader.pull(bytes.as_ref()).await.unwrap();
 
         // Debug print boot blocks
         fn debug_print_block(block: &[u8], block_size: usize) {

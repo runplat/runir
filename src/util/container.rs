@@ -616,7 +616,7 @@ impl<P: Packer> MultiRoot<P> {
     /// Returns true if this container is a super set of the other container
     #[inline]
     pub fn is_super_set(&self, other: &Container) -> bool {
-        if self.content() != other.content() {
+        if self.content::<Sha256>() != other.content::<Sha256>() {
             return false;
         }
 
@@ -1324,7 +1324,7 @@ impl<'p> IContainer<'p> for Record {
 
     #[inline]
     fn system(&'p self) -> crate::Result<Peek<'p>> {
-        match self.peek().at_idx(1).val().peek() {
+        match self.peek().at_idx(1).val().as_blob_peek_val() {
             Some(found) => Ok(found),
             None => Err(anyhow!("Container is in an invalid format").into()),
         }
@@ -1469,7 +1469,7 @@ impl<'p> ILayerDescriptor for Peek<'p> {
 
     #[inline]
     fn labels(&self) -> Option<Peek<'_>> {
-        self.at("labels").peek()
+        self.peek_at("labels")
     }
 }
 

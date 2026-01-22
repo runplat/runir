@@ -4,6 +4,7 @@ use clap::Args;
 use runir::util::Container;
 use runir::IRecord;
 use runir::{Namespace, Record};
+use sha2::Sha256;
 use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 use tracing::debug;
@@ -48,7 +49,7 @@ impl CreateRecord {
             let record = ns.commit(label.as_str(), content);
             let mut container = Container::build(record);
 
-            let content_digest = hex::encode(container.content());
+            let content_digest = hex::encode(container.content::<Sha256>());
 
             match projection {
                 ObjectFormat::Yaml => {

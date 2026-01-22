@@ -14,6 +14,7 @@ use clap::{Args, Parser, Subcommand};
 use runir::QueryBuilder;
 use runir::Record;
 use runir::{IRecord, ToNamespace, frontend::Frontend};
+use sha2::Sha256;
 use std::ops::Deref;
 use std::process::exit;
 use tokio::io::AsyncWriteExt;
@@ -120,13 +121,13 @@ async fn main() -> runir::Result<()> {
                     kv.refresh().await?;
                     kv.save().await?;
 
-                    if let Some(inserted) = kv.search(content(record.content()).or(container(record.content()))).next() {
-                        println!("{}", hex::encode(inserted.content()));
+                    if let Some(inserted) = kv.search(content(record.content::<Sha256>()).or(container(record.content::<Sha256>().into()))).next() {
+                        println!("{}", hex::encode(inserted.content::<Sha256>()));
                     } else {
-                        if let Some(_) = kv.staging().search(content(record.content()).or(container(record.content()))).next() {
-                            println!("{} @ Staging", hex::encode(record.content()));
+                        if let Some(_) = kv.staging().search(content(record.content::<Sha256>()).or(container(record.content::<Sha256>().into()))).next() {
+                            println!("{} @ Staging", hex::encode(record.content::<Sha256>()));
                         } else {
-                            eprintln!("Cannot stage {}, Staging is already occupied", hex::encode(record.content()));
+                            eprintln!("Cannot stage {}, Staging is already occupied", hex::encode(record.content::<Sha256>()));
                             exit(1)
                         }
                     }
@@ -153,8 +154,8 @@ async fn main() -> runir::Result<()> {
                             if let Some(s) = search.next() {
                                 eprintln!(
                                     "Partial digest returned multiple matches\n\t{}\n\t{}",
-                                    hex::encode(m.unwrap().content()),
-                                    hex::encode(s.content())
+                                    hex::encode(m.unwrap().content::<Sha256>()),
+                                    hex::encode(s.content::<Sha256>())
                                 );
                                 exit(1)
                             }
@@ -314,7 +315,7 @@ async fn kv_get_multi_root(
 
     if !container.opts().is_object() {
         debug!("Container root is not an object, searching for object projection layer");
-        let content_digest = hex::encode(container.content());
+        let content_digest = hex::encode(container.content::<Sha256>());
 
         let matches = container.find_all_layer_by_labels(|p| {
             matches!(
@@ -373,7 +374,7 @@ async fn kv_get_multi_root(
 }
 
 fn print_info(value: impl IRecord) {
-    let content = format!("sha256:{}", hex::encode(value.content()));
+    let content = format!("sha256:{}", hex::encode(value.content::<Sha256>()));
     let uuid = value.uuid().as_simple().to_string();
     let opts = value.opts();
     let is_archivable = opts.is_archivable();

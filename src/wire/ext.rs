@@ -80,7 +80,3 @@ impl Ext for Data {
         desc
     }
 }
-
-pub fn format_ns_key(key: u64) -> String {
-    format!("{:x}", key)
-}

@@ -2,6 +2,7 @@ use crate::{
     IRecord, Record, Storage, Store, VecIndex, store::{ArchiveMember, StoreArchive}
 };
 use parking_lot::RwLock;
+use sha2::Sha256;
 use std::{
     ops::Deref,
     path::{Path, PathBuf},
@@ -152,7 +153,7 @@ impl State {
                             .get(key)
                             .expect("should return since cannot promoted returned");
 
-                        if existing.content() == staging.content() {
+                        if existing.content::<Sha256>() == staging.content::<Sha256>() {
                             debug!(
                                 "Attempted to insert duplicate content {uuid} @ {key}, skipping"
                             );

@@ -1,16 +1,16 @@
 use std::path::PathBuf;
 
-use bytes::BufMut;
-use tracing::error;
+use bytes::{BufMut, Bytes};
+use tracing::{error, trace};
 use uuid::Uuid;
 
 use crate::{
-    RecordInfo,
+    Namespace, RecordInfo,
     vol::{
         MemoryMappedTarget, ReadMemoryMappedTarget, Volume, VolumeTarget, new_mmap_anon_target,
         new_mmap_target, open_mmap_target, read_mmap_target,
     },
-    wire::{Boot, FrameList, boot::NS_HEADER_INLINE_BLOCK_SIZE},
+    wire::{Boot, FrameList, Wire, boot::NS_HEADER_INLINE_BLOCK_SIZE},
 };
 
 #[derive(Debug, Clone)]
@@ -82,6 +82,14 @@ impl Root {
         Catalog::open(self, name)
     }
 
+    /// Returns a new wire w/ the root set to this root
+    #[inline]
+    pub fn wire(&self, ns: impl Into<Namespace>) -> crate::wire::Wire {
+        let mut wire = Wire::new(ns);
+        wire.with_root(self.clone());
+        wire
+    }
+
     #[inline]
     fn open_ns_vol_path(
         &self,
@@ -123,12 +131,20 @@ pub struct Catalog<T> {
 
 #[inline]
 fn open_catalog_mem_target(catalog: &PathBuf) -> std::io::Result<MemoryMappedTarget> {
+    // TODO: If it exists, need to copy it into the me
+    // if catalog.exists() {
+    //     open_mmap_target(catalog, true)
+    // } else {
+    //     const CAP: u64 = 1024 * 1024 * 8; // 8000 records
+    //     new_mmap_target(catalog, CAP)
+    // }
+    const CAP: u64 = 1024 * 1024 * 8; // 8000 records
+    let mut active = new_mmap_target(catalog, CAP)?;
     if catalog.exists() {
-        open_mmap_target(catalog, true)
-    } else {
-        const CAP: u64 = 1024 * 1024 * 8; // 8000 records
-        new_mmap_target(catalog, CAP)
+        let opened = open_mmap_target(catalog, false)?;
+        active.as_mut()[..opened.len()].copy_from_slice(&opened);
     }
+    Ok(active)
 }
 
 impl Catalog<MemoryMappedTarget> {
@@ -158,10 +174,10 @@ impl<T: VolumeTarget + BufMut> Catalog<T> {
     ///
     /// Skips any boot records that could not be decoded
     #[inline]
-    pub fn list(&self) -> Vec<Boot<'_>> {
+    pub fn list(&self) -> Vec<Boot> {
         let mut list = vec![];
         for (idx, header) in self.volume.target().filled().chunks_exact(1024).enumerate() {
-            match Boot::decode(header) {
+            match Boot::decode(Bytes::copy_from_slice(header)) {
                 Ok(boot) => {
                     list.push(boot);
                 }
@@ -185,6 +201,10 @@ impl<T: VolumeTarget + BufMut> Catalog<T> {
         self.volume.into_parts().0
     }
 
+    /// Prunes any records in the catalog that are not committed to the root
+    #[inline]
+    pub fn prune(&mut self) {}
+
     /// Advances the cursor to the open position in the target
     #[inline]
     fn scan(&mut self) -> std::io::Result<()> {
@@ -194,11 +214,13 @@ impl<T: VolumeTarget + BufMut> Catalog<T> {
             .view()
             .chunks_exact(1024)
             .enumerate()
-            .filter(|(_, r)| Boot::decode(r).is_ok())
+            .filter(|(_, r)| Boot::decode(Bytes::copy_from_slice(*r)).is_ok())
             .last();
 
         if let Some((idx, _)) = last {
-            self.volume.target_mut().advance(idx + 1 * 1024)?;
+            let advance_to = (idx + 1) * 1024;
+            trace!(advance_to = advance_to, "scan");
+            self.volume.target_mut().advance(advance_to)?;
         }
         Ok(())
     }
@@ -206,7 +228,20 @@ impl<T: VolumeTarget + BufMut> Catalog<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{vol::new_memory_target, wire::root::Catalog};
+    use crate::{
+        IRecord,
+        test::test_cas_record,
+        util::PeekExtensions,
+        vol::{VolumeTarget, new_memory_target, new_mmap_anon_target},
+        wire::{Root, root::Catalog, tool::Tool},
+    };
+    use sha2::Sha256;
+
+    #[test]
+    fn mmap_sanity_check_len() {
+        let target = new_mmap_anon_target("", 4096).unwrap();
+        assert_eq!(target.len(), 4096);
+    }
 
     #[test]
     fn test_catalog() {
@@ -218,5 +253,53 @@ mod tests {
         let target = test.into_inner();
         let recover = Catalog::new(target).unwrap();
         recover.list().first().unwrap();
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_root_wire_push_pull() {
+        color_eyre::install().unwrap();
+
+        let root1 = Root::current_dir().unwrap();
+        let root2 = Root::open(".runir2").unwrap();
+
+        let mut wire1 = root1.wire("test");
+        wire1.install_tool("test", "hello world".to_string());
+        let wire2 = root2.wire("test");
+
+        // Test pushing to a wire
+        let mut pushed = wire1.push(test_cas_record(), Some(vec!["test"])).unwrap();
+
+        // Test fetching w/ different wire
+        let container = wire2.fetch(pushed.snapshot().unwrap()).await.unwrap();
+        assert_eq!(
+            container.tool(".settings").at("test").str().unwrap(),
+            "hello world"
+        );
+
+        // Test adding to a catalog
+        let mut catalog = root2.catalog("test").unwrap();
+        catalog.add(container.boot);
+        catalog.into_inner().commit().unwrap();
+
+        // Test pulling from a different wire
+        pushed.reset_cursor();
+        let wire = wire2.pull(pushed).await.unwrap();
+
+        // Test committing wire data to root
+        // assert!(wire.commit().is_ok());
+
+        let rec = wire.read_record_checked().unwrap();
+        assert!(rec.is_valid());
+        assert_eq!(rec.peek().at("value").str().unwrap(), "hello world");
+        assert!(rec.matches_content::<Sha256>(wire2.proto.ns.clone()));
+
+        // let catalog = root2.catalog("test").unwrap();
+        // for b in catalog.list() {
+        //     let reading = root2.read_boot_target(&b.info().unwrap()).unwrap();
+        //     let reading = wire2.pull(reading).await.unwrap();
+        //     let rec = reading.receive().unwrap();
+        //     debug!("{:?}", rec.info);
+        // }
     }
 }

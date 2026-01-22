@@ -234,7 +234,7 @@ impl ArchiveMember {
                         });
                 let mut validated = vec![];
                 for (i, r) in records.iter().enumerate().filter(|r| r.1.is_valid()) {
-                    if entries.remove(&(i, r.uuid(), r.content())) {
+                    if entries.remove(&(i, r.uuid(), r.content::<Sha256>().into())) {
                         validated.push(r.clone());
                     }
                 }

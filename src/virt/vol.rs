@@ -32,7 +32,7 @@ pub trait VolumeTarget: AsyncWrite + Unpin + Sync + 'static {
     fn freeze(self) -> std::io::Result<Data>;
 
     /// Creates a snapshot of the target from the beginning to end the current pos
-    fn snapshot(&mut self) -> std::io::Result<Data>;
+    fn snapshot(&self) -> std::io::Result<Bytes>;
 
     /// Returns a readonly view of the volume target
     fn view<'view>(&'view self) -> &'view [u8];
@@ -116,6 +116,11 @@ pub trait VolumeTarget: AsyncWrite + Unpin + Sync + 'static {
 
         Ok(())
     }
+
+    /// Resets the cursor to 0
+    /// 
+    /// Returns the previous pos
+    fn reset_cursor(&mut self) -> usize;
 }
 
 /// Type-alias for a memory-mapped volume target
@@ -180,7 +185,6 @@ pub fn new_mmap_target(
     file.set_len(capacity)?;
 
     let mmap = unsafe { MmapMut::map_mut(&file)? };
-
     Ok(CursorTarget::new(path, mmap))
 }
 
@@ -203,7 +207,15 @@ pub fn new_mmap_anon_target(
 
 static BYTES_POOL: OnceLock<Mutex<BytesMut>> = OnceLock::new();
 
-fn get_bytes_slice(size: usize) -> BytesMut {
+/// Returns a bytes-mut from a shared pool
+/// 
+/// This pool will reclaim bytes from previous borrows from the pool, so it is
+/// well suited for temporary/short-lived small buffers
+/// 
+/// Pool starts at 8 MiB but will attempt to reserve capacity if the requested buffer
+/// length could not be allocated
+#[inline]
+pub fn pool_bytes_mut(size: usize) -> BytesMut {
     let pool = BYTES_POOL.get_or_init(|| Mutex::new(BytesMut::with_capacity(8 * MIB)));
 
     let mut pool = pool.lock();
@@ -229,7 +241,7 @@ fn get_bytes_slice(size: usize) -> BytesMut {
 pub fn new_memory_target(path: impl Into<PathBuf>, capacity: usize) -> InMemoryTarget {
     let path = path.into();
 
-    let bytes = get_bytes_slice(capacity);
+    let bytes = pool_bytes_mut(capacity);
 
     CursorTarget::new(path, bytes)
 }
@@ -385,7 +397,7 @@ impl VolumeTarget for MemoryMappedTarget {
     }
 
     #[inline]
-    fn snapshot(&mut self) -> std::io::Result<Data> {
+    fn snapshot(&self) -> std::io::Result<Bytes> {
         if self.pos == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -419,11 +431,16 @@ impl VolumeTarget for MemoryMappedTarget {
     fn pos(&self) -> usize {
         self.pos
     }
+    
+    #[inline]
+    fn reset_cursor(&mut self) -> usize {
+        std::mem::replace(&mut self.pos, 0)
+    }
 }
 
 unsafe impl BufMut for MemoryMappedTarget {
     fn remaining_mut(&self) -> usize {
-        self.remaining_capacity()
+        self.len() - self.pos
     }
 
     unsafe fn advance_mut(&mut self, cnt: usize) {
@@ -494,7 +511,7 @@ impl VolumeTarget for InMemoryTarget {
     }
 
     #[inline]
-    fn snapshot(&mut self) -> std::io::Result<Data> {
+    fn snapshot(&self) -> std::io::Result<Bytes> {
         if self.pos == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -504,7 +521,7 @@ impl VolumeTarget for InMemoryTarget {
         let ptr = self.inner.as_ptr();
         let view = unsafe { std::slice::from_raw_parts(ptr, self.pos) };
         let view = Bytes::from_owner(view);
-        Ok(view.into())
+        Ok(view)
     }
 
     // #[inline]
@@ -523,6 +540,11 @@ impl VolumeTarget for InMemoryTarget {
     #[inline]
     fn pos(&self) -> usize {
         self.pos
+    }
+    
+    #[inline]
+    fn reset_cursor(&mut self) -> usize {
+        std::mem::replace(&mut self.pos, 0)
     }
 }
 

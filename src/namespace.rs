@@ -4,6 +4,7 @@ use bytes::Bytes;
 use bytes::BytesMut;
 use serde::Serialize;
 use sha2::Digest;
+use sha2::Sha256;
 
 use crate::Computed;
 use crate::Data;
@@ -329,7 +330,7 @@ impl Namespace {
         }
 
         Ok(self
-            .record(record.content().as_slice())
+            .record(record.content::<Sha256>().as_slice())
             .with_opts( record.opts().clone())
             .commit(record.bytes()))
     }
@@ -476,7 +477,7 @@ mod test {
         assert_eq!(transferred.bytes(), b"hello world");
         assert_ne!(rec.index_key(), transferred.index_key());
         assert_ne!(rec.ns_chk(), transferred.ns_chk());
-        assert_eq!(rec.content(), transferred.content());
+        assert_eq!(rec.content::<Sha256>(), transferred.content::<Sha256>());
 
         let non_addr = ns1.commit("non-transferrable", b"hello non-transfer");
         assert!(ns2.transfer(non_addr).is_err())

@@ -283,14 +283,14 @@ pub mod test {
         (let $var:ident = $ns:expr) => {
             let ns =  $crate::Namespace::new($ns);
             let wire = $crate::wire::Wire::new(ns.clone());
-            let target = wire.encode($crate::test::test_cas_record(), None).unwrap();
-            let bytes = $crate::virt::vol::VolumeTarget::filled(&target);
-            let $var = $crate::wire::Boot::decode(&bytes).unwrap();
+            let target = wire.push($crate::test::test_cas_record(), None).unwrap();
+            let bytes = $crate::virt::vol::VolumeTarget::snapshot(&target).unwrap();
+            let $var = $crate::wire::Boot::decode(bytes).unwrap();
         };
         (let $var:ident = $ns:expr, $tools:expr) => {
             let ns =  $crate::Namespace::new($ns);
             let wire = $crate::wire::Wire::new(ns.clone());
-            let target = wire.encode($crate::test::test_cas_record(), Some($tools)).unwrap();
+            let target = wire.push($crate::test::test_cas_record(), Some($tools)).unwrap();
             let bytes = $crate::virt::vol::VolumeTarget::filled(&target);
             let $var = $crate::wire::Boot::decode(&bytes).unwrap();
         };

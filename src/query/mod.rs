@@ -3,6 +3,7 @@ mod namespaced;
 
 pub use field::Field;
 pub use namespaced::Namespaced;
+use sha2::Sha256;
 
 use std::fmt::Debug;
 use crate::{
@@ -131,10 +132,10 @@ pub fn content<'query, R: crate::IRecord + 'query>(content: impl AsRef<[u8]> + S
     filter::<R>(move |record| {
         if record.opts().is_multi() {
             Container::read(record)
-                .map(|r| r.content().starts_with(content.as_ref()))
+                .map(|r| r.content::<Sha256>().starts_with(content.as_ref()))
                 .unwrap_or_default()
         } else {
-            record.content().starts_with(content.as_ref())
+            record.content::<Sha256>().starts_with(content.as_ref())
         }
     })
     .into()
@@ -148,7 +149,8 @@ pub fn content<'query, R: crate::IRecord + 'query>(content: impl AsRef<[u8]> + S
 pub fn container<'query, R: crate::IRecord + 'query>(content: [u8; 32]) -> Filter<'query, R> {
     filter::<R>(move |record| {
         if record.opts().is_multi() {
-            record.content() == content
+            let compare: [u8; 32] = record.content::<Sha256>().into();
+            compare == content
         } else {
             false
         }

@@ -1,7 +1,7 @@
 use crate::util::{Graph, Node, TrimPadding, ser::BytesMap};
 use serde::Deserialize;
-use tracing::error;
 use std::{cell::RefCell, fmt::Display, ops::Deref};
+use tracing::error;
 
 /// Wrapper over a flexbuffer reader, returned by IRecord::peek(..)
 #[derive(Clone, Debug)]
@@ -170,7 +170,7 @@ pub trait PeekExtensions<'peek>: Sized {
     /// Shorthand for `.at(key).peek()`
     #[inline]
     fn peek_at(self, key: &str) -> Option<Peek<'peek>> {
-        self.val()?.at(key).peek()
+        self.val()?.at(key).as_blob_peek_val()
     }
 
     /// Traverses a list of keys and returns a `Peek` at the final value, if found.
@@ -228,11 +228,11 @@ pub trait PeekExtensions<'peek>: Sized {
     }
 
     /// Peeks at the current position
+    /// 
+    /// Shorthand for `self.blob().and_then(Peek::val)`
     #[inline]
-    fn peek(self) -> Option<Peek<'peek>> {
-        self.blob()
-            .and_then(|b| flexbuffers::Reader::get_root(b).ok())
-            .map(Peek)
+    fn as_blob_peek_val(self) -> Option<Peek<'peek>> {
+        self.blob().and_then(|v| v.val())
     }
 
     /// Returns a bool if the current peek context is a bool
@@ -242,6 +242,8 @@ pub trait PeekExtensions<'peek>: Sized {
     }
 
     /// Returns a str if the current peek context is a str
+    /// 
+    /// If `Blob` instead of `String` checks if `utf8` is stored
     #[inline]
     fn str(self) -> Option<&'peek str> {
         self.val()?.str()
@@ -630,6 +632,36 @@ impl<'peek> PeekExtensions<'peek> for &'peek [u8] {
                     Some(Peek(r))
                 }
             })
+    }
+
+    fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {
+        self.val().as_iter()
+    }
+
+    fn as_iter_kv(self) -> Option<impl Iterator<Item = (&'peek str, Peek<'peek>)>> {
+        self.val().as_iter_kv()
+    }
+
+    fn in_ref(
+        self,
+    ) -> impl std::ops::Index<&'peek str, Output = PeekRef<'peek>> + PeekRefExtensions<'peek> {
+        self.val().in_ref()
+    }
+}
+
+impl<'peek> PeekExtensions<'peek> for Option<&'peek [u8]> {
+    fn val(self) -> Option<Peek<'peek>> {
+        self.and_then(|v| {
+            flexbuffers::Reader::get_root(v.trim_padding())
+                .ok()
+                .and_then(|r| {
+                    if r.flexbuffer_type().is_blob() {
+                        r.as_blob().0.val()
+                    } else {
+                        Some(Peek(r))
+                    }
+                })
+        })
     }
 
     fn as_iter(self) -> Option<impl Iterator<Item = Peek<'peek>>> {

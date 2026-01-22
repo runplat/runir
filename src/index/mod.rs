@@ -3,6 +3,7 @@ mod storage;
 
 use crate::{opts::Branch, util::Container, IRecord};
 use anyhow::anyhow;
+use sha2::Sha256;
 pub use storage::Storage;
 use tracing::{debug, error};
 
@@ -351,7 +352,7 @@ impl<R: crate::IRecord, S: Storage<Record = R>> Index<R, S> {
         let record = next.to_record();
         match Container::read(&record) {
             Ok(container) => {
-                if container.content() == current.content() {
+                if container.content::<Sha256>() == current.content::<Sha256>() {
                     debug!(
                         "Current container content digest matches container root's content digest, auto-promote conditions have been met"
                     );

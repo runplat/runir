@@ -6,7 +6,7 @@ use sha2::{Sha256, digest::Update};
 
 use crate::Namespace;
 
-type ShaDigest<D> = sha2::digest::Output<D>;
+pub type ShaDigest<D> = sha2::digest::Output<D>;
 
 /// Wraps Bytes struct to offer additional functions
 #[derive(Default, Debug, Clone)]
